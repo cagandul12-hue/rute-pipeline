@@ -6,3 +6,4 @@ scikit-learn>=1.5,<2
 folium>=0.19,<1
 streamlit-folium>=0.25,<1
 ortools>=9.10,<10
+requests>=2.31,<3
