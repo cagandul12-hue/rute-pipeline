@@ -354,6 +354,10 @@ if st.session_state.page == "Routing":
 
         run = st.button("🚀 Buat Rute Optimal", type="primary", width='stretch')
 
+        # Fingerprint of the current input+settings, so stale results (from a
+        # previous file/slider value) don't linger after the inputs change.
+        data_fingerprint = (len(df), tuple(df["merchant_name"]), max_points_per_route, starting_link)
+
         if run:
             if len(df) < 2:
                 st.warning("Minimal butuh 2 titik untuk membuat rute.")
@@ -370,8 +374,6 @@ if st.session_state.page == "Routing":
                 start_name, start_lat, start_lon = "START POINT", None, None
                 if starting_link:
                     start_name, start_lat, start_lon = extract_google_maps_data(starting_link)
-                    if start_lat is None:
-                        st.warning("Link Google Maps titik awal tidak dikenali, dilewati.")
 
                 all_routes = []
                 route_summaries = []
@@ -398,16 +400,41 @@ if st.session_state.page == "Routing":
                         }
                     )
 
+            final_df = pd.concat([r["df"] for r in route_summaries], ignore_index=True)
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+                final_df.to_excel(writer, index=False, sheet_name="Semua Route")
+                for r in route_summaries:
+                    sheet_name = f"Route {r['route_id'] + 1}"[:31]
+                    r["df"].to_excel(writer, index=False, sheet_name=sheet_name)
+
+            # Persist everything needed to render the result, so later reruns
+            # (e.g. clicking the map or the download button) don't wipe it out.
+            st.session_state.route_result = {
+                "fingerprint": data_fingerprint,
+                "route_summaries": route_summaries,
+                "total_points": len(df) + (1 if start_lat and start_lon else 0) * len(route_summaries),
+                "excel_bytes": buffer.getvalue(),
+                "start_ok": bool(start_lat and start_lon),
+                "start_link_given": bool(starting_link),
+            }
+
+        result = st.session_state.get("route_result")
+        if result and result["fingerprint"] == data_fingerprint:
+            if result["start_link_given"] and not result["start_ok"]:
+                st.warning("Link Google Maps titik awal tidak dikenali, dilewati.")
+
+            route_summaries = result["route_summaries"]
             st.success(f"✅ Berhasil membuat {len(route_summaries)} route optimal!")
 
             total_distance = sum(r["distance_km"] for r in route_summaries)
             m1, m2, m3 = st.columns(3)
             m1.metric("Total Route", len(route_summaries))
-            m2.metric("Total Titik", len(df) + (1 if start_lat and start_lon else 0) * len(route_summaries))
+            m2.metric("Total Titik", result["total_points"])
             m3.metric("Estimasi Total Jarak", f"{total_distance:.1f} km")
 
             st.markdown("### 🗺️ Detail Setiap Route")
-            first_route_id = sorted(df["route"].unique())[0]
+            first_route_id = route_summaries[0]["route_id"]
             for r in route_summaries:
                 route_id = r["route_id"]
                 optimized_df = r["df"]
@@ -442,25 +469,19 @@ if st.session_state.page == "Routing":
                                 icon=folium.Icon(color="blue" if idx > 0 else "green"),
                             ).add_to(fmap)
                         folium.PolyLine(polyline_coords, weight=4, color=color).add_to(fmap)
-                        st_folium(fmap, width=None, height=350, key=f"map_{route_id}")
-
-            final_df = pd.concat([r["df"] for r in route_summaries], ignore_index=True)
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-                final_df.to_excel(writer, index=False, sheet_name="Semua Route")
-                for r in route_summaries:
-                    sheet_name = f"Route {r['route_id'] + 1}"[:31]
-                    r["df"].to_excel(writer, index=False, sheet_name=sheet_name)
+                        st_folium(fmap, width=None, height=350, key=f"map_{route_id}", returned_objects=[])
 
             st.markdown("### 📥 Unduh Hasil")
             st.download_button(
                 label="Download Hasil Routing (Excel)",
-                data=buffer.getvalue(),
+                data=result["excel_bytes"],
                 file_name="hasil_routing.xlsx",
                 mime="application/vnd.ms-excel",
                 type="primary",
                 width='stretch',
             )
+        elif result and result["fingerprint"] != data_fingerprint:
+            st.info("Pengaturan atau data berubah — tekan **Buat Rute Optimal** lagi untuk memperbarui hasil.")
     else:
         st.info("⬆️ Upload file Excel atau centang opsi data hasil ekstraksi untuk memulai.")
 
@@ -542,7 +563,7 @@ elif st.session_state.page == "Extract":
                 )
                 for _, row in valid_points.iterrows():
                     folium.Marker([row["latitude"], row["longitude"]], popup=row["merchant_name"]).add_to(fmap)
-                st_folium(fmap, width=None, height=350, key="extract_map")
+                st_folium(fmap, width=None, height=350, key="extract_map", returned_objects=[])
 
         col1, col2, col3 = st.columns([1, 1, 1])
         with col1:
