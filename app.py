@@ -337,7 +337,7 @@ if st.session_state.page == "Routing":
         df["longitude"] = pd.to_numeric(df["longitude"])
 
         with st.expander("📄 Data Awal", expanded=False):
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, width='stretch')
 
         st.markdown("### ⚙️ Pengaturan Route")
         c1, c2, c3 = st.columns(3)
@@ -352,7 +352,7 @@ if st.session_state.page == "Routing":
         with c3:
             st.metric("Estimasi Jumlah Route", n_cluster_default)
 
-        run = st.button("🚀 Buat Rute Optimal", type="primary", use_container_width=True)
+        run = st.button("🚀 Buat Rute Optimal", type="primary", width='stretch')
 
         if run:
             if len(df) < 2:
@@ -421,12 +421,12 @@ if st.session_state.page == "Routing":
                     with left:
                         st.dataframe(
                             optimized_df[["sequence", "merchant_name", "latitude", "longitude"]],
-                            use_container_width=True,
+                            width='stretch',
                             hide_index=True,
                         )
                         maps_url = generate_google_maps_link(optimized_df)
                         if maps_url:
-                            st.link_button("🚗 Buka di Google Maps", maps_url, use_container_width=True)
+                            st.link_button("🚗 Buka di Google Maps", maps_url, width='stretch')
 
                     with right:
                         center_lat = optimized_df["latitude"].mean()
@@ -459,7 +459,7 @@ if st.session_state.page == "Routing":
                 file_name="hasil_routing.xlsx",
                 mime="application/vnd.ms-excel",
                 type="primary",
-                use_container_width=True,
+                width='stretch',
             )
     else:
         st.info("⬆️ Upload file Excel atau centang opsi data hasil ekstraksi untuk memulai.")
@@ -479,7 +479,7 @@ elif st.session_state.page == "Extract":
     with tab_link:
         with st.form("extractor_form", clear_on_submit=True):
             new_link = st.text_input("Paste link Google Maps di sini:")
-            submitted = st.form_submit_button("➕ Ekstrak & Tambahkan Data", use_container_width=True)
+            submitted = st.form_submit_button("➕ Ekstrak & Tambahkan Data", width='stretch')
 
             if submitted:
                 if not new_link.strip():
@@ -503,7 +503,7 @@ elif st.session_state.page == "Extract":
                 manual_lat = st.number_input("Latitude", value=0.0, format="%.6f")
             with mc3:
                 manual_lon = st.number_input("Longitude", value=0.0, format="%.6f")
-            manual_submit = st.form_submit_button("➕ Tambahkan Data", use_container_width=True)
+            manual_submit = st.form_submit_button("➕ Tambahkan Data", width='stretch')
 
             if manual_submit:
                 if not manual_name.strip():
@@ -523,7 +523,7 @@ elif st.session_state.page == "Extract":
         df_extract = pd.DataFrame(st.session_state.extracted_data)
         edited_df = st.data_editor(
             df_extract,
-            use_container_width=True,
+            width='stretch',
             num_rows="dynamic",
             key="extract_editor",
             column_config={
@@ -546,7 +546,7 @@ elif st.session_state.page == "Extract":
 
         col1, col2, col3 = st.columns([1, 1, 1])
         with col1:
-            if st.button("🗑️ Hapus Semua Data", use_container_width=True):
+            if st.button("🗑️ Hapus Semua Data", width='stretch'):
                 st.session_state.extracted_data = []
                 st.rerun()
         with col2:
@@ -558,10 +558,10 @@ elif st.session_state.page == "Extract":
                 data=buffer_ext.getvalue(),
                 file_name="hasil_extract_gmaps.xlsx",
                 mime="application/vnd.ms-excel",
-                use_container_width=True,
+                width='stretch',
             )
         with col3:
-            if st.button("➡️ Gunakan di Routing Optimizer", type="primary", use_container_width=True):
+            if st.button("➡️ Gunakan di Routing Optimizer", type="primary", width='stretch'):
                 st.session_state.page = "Routing"
                 st.rerun()
     else:
