@@ -164,27 +164,33 @@ def extract_google_maps_data(link):
         link = resolve_short_link(link.strip())
 
         # --- Coordinates -----------------------------------------------
-        # Priority 1: the pin's own coordinates, always encoded as
-        # "!8m2!3d<lat>!4d<lon>" right after the place ID block. This is
-        # the most reliable marker because a URL can contain several other
-        # "!3d/!4d" pairs (viewport bounds, photos, etc.) that are NOT the
-        # actual pin location.
-        pin_match = re.search(r"!8m2!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)", link)
+        # A "data=" segment can hold MULTIPLE "!8m2!3d<lat>!4d<lon>" pairs:
+        # when Google can't pin an unofficial/small place precisely, it
+        # first embeds a nearby *landmark's* own block — recognizable by an
+        # explicit "!2s<Landmark Name>" right before its "!8m2" — purely to
+        # anchor the search, then appends the actual target's block last
+        # (with no "!2sName", since the target's name is already in the
+        # URL path). Taking the FIRST match (or the "@lat,lng" viewport,
+        # which mirrors that same landmark) grabs the wrong location, so we
+        # take the LAST pair instead — that's always the real target.
+        all_pin_pairs = re.findall(r"!8m2!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)", link)
         # Priority 2: a bare "q=lat,lng" or "query=lat,lng" parameter.
         query_coord_match = re.search(r"[?&](?:q|query)=(-?\d+\.\d+),(-?\d+\.\d+)", link)
-        # Priority 3: any generic "!3d...!4d..." pair.
-        generic_match = re.search(r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)", link)
-        # Priority 4 (least reliable): the "@lat,lng,zoom" viewport center,
-        # which can be identical across several nearby links.
+        # Priority 3: any generic "!3d...!4d..." pair (same last-wins logic).
+        all_generic_pairs = re.findall(r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)", link)
+        # Priority 4 (least reliable): the "@lat,lng,zoom" viewport center —
+        # as shown above this can actually be a disambiguation landmark's
+        # coordinates rather than the place itself, so it's only used when
+        # nothing else in the link gives us a coordinate at all.
         view_match = re.search(r"@(-?\d+\.\d+),(-?\d+\.\d+)", link)
 
         latitude = longitude = None
-        if pin_match:
-            latitude, longitude = float(pin_match.group(1)), float(pin_match.group(2))
+        if all_pin_pairs:
+            latitude, longitude = float(all_pin_pairs[-1][0]), float(all_pin_pairs[-1][1])
         elif query_coord_match:
             latitude, longitude = float(query_coord_match.group(1)), float(query_coord_match.group(2))
-        elif generic_match:
-            latitude, longitude = float(generic_match.group(1)), float(generic_match.group(2))
+        elif all_generic_pairs:
+            latitude, longitude = float(all_generic_pairs[-1][0]), float(all_generic_pairs[-1][1])
         elif view_match:
             latitude, longitude = float(view_match.group(1)), float(view_match.group(2))
 
@@ -293,6 +299,13 @@ def make_template_excel():
 # ==========================================================================================
 # SESSION STATE INIT
 # ==========================================================================================
+# A widget's own state (key="page") can only be set BEFORE that widget is
+# instantiated in a given run — never after, even from a button lower down
+# the same script. So a "switch page" request is staged here as a plain,
+# non-widget flag and applied right now, before the sidebar radio below is
+# created; the button just sets the flag and reruns.
+if "pending_page" in st.session_state:
+    st.session_state.page = st.session_state.pop("pending_page")
 if "page" not in st.session_state:
     st.session_state.page = "Routing"
 if "extracted_data" not in st.session_state:
@@ -308,11 +321,6 @@ with st.sidebar:
     st.caption("KMeans + TSP Engine")
     st.markdown("---")
 
-    # key="page" binds this widget directly to st.session_state.page, so
-    # programmatically setting st.session_state.page elsewhere (e.g. the
-    # "Gunakan di Routing Optimizer" button) actually moves the selection —
-    # passing a separate `index` here would fight with that and always win,
-    # which is why the button used to get silently overridden.
     st.radio(
         "Menu",
         options=["Routing", "Extract"],
@@ -329,6 +337,7 @@ with st.sidebar:
             "2. Buka **Routing Optimizer**, upload file Excel (`merchant_name`, `latitude`, `longitude`).\n\n"
             "3. Atur jumlah titik maksimal per rute, lalu lihat hasil rute optimal di peta."
         )
+
 
 # ================================================================
 # HALAMAN 1: ROUTING PIPELINE OPTIMIZER
@@ -663,7 +672,7 @@ elif st.session_state.page == "Extract":
             )
         with col3:
             if st.button("➡️ Gunakan di Routing Optimizer", type="primary", width='stretch'):
-                st.session_state.page = "Routing"
+                st.session_state.pending_page = "Routing"
                 st.rerun()
     else:
         st.info("Belum ada data. Tambahkan lewat link Google Maps atau input manual di atas.")
