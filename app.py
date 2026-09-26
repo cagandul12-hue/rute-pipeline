@@ -8,6 +8,8 @@ import math
 import folium
 import re
 import io
+import requests
+from urllib.parse import unquote
 from sklearn.cluster import KMeans
 from ortools.constraint_solver import pywrapcp
 from ortools.constraint_solver import routing_enums_pb2
@@ -135,27 +137,73 @@ def generate_google_maps_link(df):
     return url
 
 
-def extract_google_maps_data(link):
+SHORT_LINK_DOMAINS = ("maps.app.goo.gl", "goo.gl/maps", "app.goo.gl")
+
+
+def resolve_short_link(link):
+    """maps.app.goo.gl / goo.gl links don't contain coordinates in the text
+    itself — the real URL only appears after following the redirect."""
+    if not any(domain in link for domain in SHORT_LINK_DOMAINS):
+        return link
     try:
-        place_pattern = r"/place/([^/]+)/"
-        place_match = re.search(place_pattern, link)
-        place_name = place_match.group(1).replace("+", " ") if place_match else "START POINT"
+        resp = requests.head(link, allow_redirects=True, timeout=6)
+        if resp.url and resp.url != link:
+            return resp.url
+    except Exception:
+        pass
+    try:
+        resp = requests.get(link, allow_redirects=True, timeout=6)
+        return resp.url or link
+    except Exception:
+        return link
+
+
+def extract_google_maps_data(link):
+    """Returns (place_name_or_None, latitude_or_None, longitude_or_None)."""
+    try:
+        link = resolve_short_link(link.strip())
+
+        # --- Coordinates -----------------------------------------------
+        # Priority 1: the pin's own coordinates, always encoded as
+        # "!8m2!3d<lat>!4d<lon>" right after the place ID block. This is
+        # the most reliable marker because a URL can contain several other
+        # "!3d/!4d" pairs (viewport bounds, photos, etc.) that are NOT the
+        # actual pin location.
+        pin_match = re.search(r"!8m2!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)", link)
+        # Priority 2: a bare "q=lat,lng" or "query=lat,lng" parameter.
+        query_coord_match = re.search(r"[?&](?:q|query)=(-?\d+\.\d+),(-?\d+\.\d+)", link)
+        # Priority 3: any generic "!3d...!4d..." pair.
+        generic_match = re.search(r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)", link)
+        # Priority 4 (least reliable): the "@lat,lng,zoom" viewport center,
+        # which can be identical across several nearby links.
+        view_match = re.search(r"@(-?\d+\.\d+),(-?\d+\.\d+)", link)
 
         latitude = longitude = None
-        lat_match = re.search(r"!3d(-?\d+\.\d+)", link)
-        lon_match = re.search(r"!4d(-?\d+\.\d+)", link)
+        if pin_match:
+            latitude, longitude = float(pin_match.group(1)), float(pin_match.group(2))
+        elif query_coord_match:
+            latitude, longitude = float(query_coord_match.group(1)), float(query_coord_match.group(2))
+        elif generic_match:
+            latitude, longitude = float(generic_match.group(1)), float(generic_match.group(2))
+        elif view_match:
+            latitude, longitude = float(view_match.group(1)), float(view_match.group(2))
 
-        if lat_match and lon_match:
-            latitude = float(lat_match.group(1))
-            longitude = float(lon_match.group(1))
+        # --- Place name --------------------------------------------------
+        place_name = None
+        place_match = re.search(r"/place/([^/@]+)", link)
+        if place_match:
+            place_name = unquote(place_match.group(1)).replace("+", " ").strip()
         else:
-            coord_match = re.search(r"@(-?\d+\.\d+),(-?\d+\.\d+)", link)
-            if coord_match:
-                latitude = float(coord_match.group(1))
-                longitude = float(coord_match.group(2))
+            query_name_match = re.search(r"[?&]query=([^&]+)", link)
+            if query_name_match:
+                candidate = unquote(query_name_match.group(1)).replace("+", " ").strip()
+                # Skip it if it's actually just coordinates, not a name.
+                if not re.fullmatch(r"-?\d+\.\d+,-?\d+\.\d+", candidate):
+                    place_name = candidate
+
         return place_name, latitude, longitude
     except Exception:
-        return "START POINT", None, None
+        return None, None, None
 
 
 def balance_clusters(df, max_points_per_route):
@@ -260,14 +308,18 @@ with st.sidebar:
     st.caption("KMeans + TSP Engine")
     st.markdown("---")
 
-    page_choice = st.radio(
+    # key="page" binds this widget directly to st.session_state.page, so
+    # programmatically setting st.session_state.page elsewhere (e.g. the
+    # "Gunakan di Routing Optimizer" button) actually moves the selection —
+    # passing a separate `index` here would fight with that and always win,
+    # which is why the button used to get silently overridden.
+    st.radio(
         "Menu",
         options=["Routing", "Extract"],
         format_func=lambda p: "🛣️ Routing Optimizer" if p == "Routing" else "📍 Maps Extractor",
-        index=0 if st.session_state.page == "Routing" else 1,
+        key="page",
         label_visibility="collapsed",
     )
-    st.session_state.page = page_choice
 
     st.markdown("---")
     with st.expander("ℹ️ Cara pakai"):
@@ -373,7 +425,8 @@ if st.session_state.page == "Routing":
 
                 start_name, start_lat, start_lon = "START POINT", None, None
                 if starting_link:
-                    start_name, start_lat, start_lon = extract_google_maps_data(starting_link)
+                    parsed_name, start_lat, start_lon = extract_google_maps_data(starting_link)
+                    start_name = parsed_name or "START POINT"
 
                 all_routes = []
                 route_summaries = []
@@ -506,14 +559,41 @@ elif st.session_state.page == "Extract":
                 if not new_link.strip():
                     st.error("❌ Link tidak boleh kosong.")
                 else:
-                    name, lat, lon = extract_google_maps_data(new_link)
+                    with st.spinner("Membaca link..."):
+                        name, lat, lon = extract_google_maps_data(new_link)
+
                     if lat is not None and lon is not None:
+                        # Give every entry with an unrecognized name a unique
+                        # placeholder — never reuse one fixed label, or every
+                        # unparsed entry ends up looking like the same
+                        # "duplicate" merchant on the map.
+                        if not name:
+                            name = f"Lokasi {len(st.session_state.extracted_data) + 1}"
+                            st.warning(
+                                f"Nama merchant tidak terdeteksi dari link — diberi nama sementara "
+                                f"**{name}**. Silakan edit di tabel di bawah."
+                            )
+
+                        is_duplicate = any(
+                            abs(d["latitude"] - lat) < 1e-5 and abs(d["longitude"] - lon) < 1e-5
+                            for d in st.session_state.extracted_data
+                        )
+
                         st.session_state.extracted_data.append(
                             {"merchant_name": name, "latitude": float(lat), "longitude": float(lon)}
                         )
                         st.success(f"✅ Berhasil menambahkan: {name}")
+                        if is_duplicate:
+                            st.warning(
+                                "⚠️ Koordinat ini sama persis dengan data lain yang sudah ada — "
+                                "periksa apakah link-nya benar-benar berbeda."
+                            )
                     else:
-                        st.error("❌ Gagal mendeteksi koordinat dari link tersebut. Pastikan link berasal dari Google Maps dan memuat koordinat.")
+                        st.error(
+                            "❌ Gagal mendeteksi koordinat dari link tersebut. Pastikan link berasal "
+                            "dari halaman detail lokasi di Google Maps (bukan link pencarian), lalu "
+                            "gunakan tombol **Bagikan → Salin link**."
+                        )
 
     with tab_manual:
         with st.form("manual_form", clear_on_submit=True):
