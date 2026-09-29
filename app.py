@@ -140,6 +140,28 @@ def generate_google_maps_link(df):
 SHORT_LINK_DOMAINS = ("maps.app.goo.gl", "goo.gl/maps", "app.goo.gl")
 
 
+def search_nominatim(query, limit=8):
+    """Free OpenStreetMap place search — no API key needed. Coverage of
+    small/local merchants in Indonesia is thinner than Google, so this is
+    best used with a specific name plus a city/area hint."""
+    url = "https://nominatim.openstreetmap.org/search"
+    params = {
+        "q": query,
+        "format": "jsonv2",
+        "addressdetails": 1,
+        "limit": limit,
+        "countrycodes": "id",
+    }
+    # Nominatim's usage policy requires a real identifying User-Agent.
+    headers = {"User-Agent": "RutePipelineOptimizerApp/1.0 (streamlit-community-app)"}
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=8)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        return []
+
+
 def resolve_short_link(link):
     """maps.app.goo.gl / goo.gl links don't contain coordinates in the text
     itself — the real URL only appears after following the redirect."""
@@ -332,8 +354,8 @@ with st.sidebar:
     st.markdown("---")
     with st.expander("ℹ️ Cara pakai"):
         st.write(
-            "1. Buka **Maps Extractor** untuk mengubah link Google Maps jadi tabel koordinat, "
-            "atau siapkan langsung file Excel.\n\n"
+            "1. Buka **Maps Extractor** untuk mengubah link Google Maps, hasil pencarian nama "
+            "merchant, atau input manual jadi tabel koordinat — atau siapkan langsung file Excel.\n\n"
             "2. Buka **Routing Optimizer**, upload file Excel (`merchant_name`, `latitude`, `longitude`).\n\n"
             "3. Atur jumlah titik maksimal per rute, lalu lihat hasil rute optimal di peta."
         )
@@ -557,7 +579,9 @@ elif st.session_state.page == "Extract":
     )
     st.caption("Ubah link Google Maps menjadi tabel (merchant_name, latitude, longitude) siap pakai.")
 
-    tab_link, tab_manual = st.tabs(["🔗 Dari Link Google Maps", "✏️ Input Manual"])
+    tab_link, tab_search, tab_manual = st.tabs(
+        ["🔗 Dari Link Google Maps", "🔎 Cari Nama Merchant", "✏️ Input Manual"]
+    )
 
     with tab_link:
         with st.form("extractor_form", clear_on_submit=True):
@@ -602,6 +626,79 @@ elif st.session_state.page == "Extract":
                             "❌ Gagal mendeteksi koordinat dari link tersebut. Pastikan link berasal "
                             "dari halaman detail lokasi di Google Maps (bukan link pencarian), lalu "
                             "gunakan tombol **Bagikan → Salin link**."
+                        )
+
+    with tab_search:
+        st.caption(
+            "Pencarian gratis via OpenStreetMap (Nominatim) — tanpa API key, tapi cakupan "
+            "merchant kecil/UMKM di Indonesia masih lebih terbatas dibanding Google Maps. "
+            "Sertakan kota/wilayah supaya hasilnya lebih relevan."
+        )
+        sc1, sc2 = st.columns([2, 1])
+        with sc1:
+            search_query = st.text_input(
+                "Nama merchant", key="nominatim_query", placeholder="contoh: Warung Bu Tini"
+            )
+        with sc2:
+            search_city = st.text_input(
+                "Kota/wilayah (opsional)", key="nominatim_city", placeholder="contoh: Surakarta"
+            )
+
+        if st.button("🔍 Cari Lokasi", width='stretch'):
+            if not search_query.strip():
+                st.error("❌ Nama merchant tidak boleh kosong.")
+            else:
+                full_query = (
+                    f"{search_query.strip()}, {search_city.strip()}"
+                    if search_city.strip()
+                    else search_query.strip()
+                )
+                with st.spinner("Mencari di OpenStreetMap..."):
+                    results = search_nominatim(full_query)
+                st.session_state.nominatim_results = results
+                st.session_state.nominatim_searched_for = full_query
+                st.session_state.nominatim_query_name = search_query.strip()
+                st.session_state.pop("nominatim_selected_idx", None)
+                if not results:
+                    st.warning(
+                        "Tidak ditemukan hasil. Coba nama yang lebih spesifik, tambahkan "
+                        "kota/wilayah, atau gunakan tab **Dari Link Google Maps** sebagai alternatif "
+                        "yang cakupannya lebih luas."
+                    )
+
+        results = st.session_state.get("nominatim_results", [])
+        if results:
+            st.markdown(f"**Hasil untuk:** _{st.session_state.get('nominatim_searched_for', '')}_")
+            idx_selected = st.radio(
+                "Pilih lokasi yang sesuai:",
+                options=list(range(len(results))),
+                format_func=lambda i: results[i].get("display_name", "(tanpa nama)"),
+                key="nominatim_selected_idx",
+            )
+
+            if st.button("➕ Tambahkan Lokasi Terpilih", type="primary", width='stretch'):
+                chosen = results[idx_selected]
+                try:
+                    lat = float(chosen["lat"])
+                    lon = float(chosen["lon"])
+                except (KeyError, ValueError, TypeError):
+                    st.error("❌ Data koordinat dari hasil pencarian tidak valid.")
+                else:
+                    name = st.session_state.get("nominatim_query_name") or chosen.get(
+                        "display_name", "Lokasi"
+                    )
+                    is_duplicate = any(
+                        abs(d["latitude"] - lat) < 1e-5 and abs(d["longitude"] - lon) < 1e-5
+                        for d in st.session_state.extracted_data
+                    )
+                    st.session_state.extracted_data.append(
+                        {"merchant_name": name, "latitude": lat, "longitude": lon}
+                    )
+                    st.success(f"✅ Berhasil menambahkan: {name}")
+                    if is_duplicate:
+                        st.warning(
+                            "⚠️ Koordinat ini sama persis dengan data lain yang sudah ada — "
+                            "periksa apakah lokasinya benar-benar berbeda."
                         )
 
     with tab_manual:
