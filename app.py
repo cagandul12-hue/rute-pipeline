@@ -463,10 +463,18 @@ if st.session_state.page == "Routing":
         st.markdown("### ⚙️ Pengaturan Route")
         c1, c2, c3 = st.columns(3)
         with c1:
-            max_points_per_route = st.slider(
-                "Maksimal titik per route", min_value=2, max_value=15,
-                value=min(9, max(2, len(df))),
-            )
+            slider_max = max(2, len(df))
+            if slider_max <= 2:
+                # st.slider needs min_value < max_value; with only 2
+                # merchants there's only one sensible route anyway.
+                max_points_per_route = slider_max
+                st.metric("Maksimal titik per route", max_points_per_route)
+            else:
+                max_points_per_route = st.slider(
+                    "Maksimal titik per route", min_value=2, max_value=slider_max,
+                    value=min(9, slider_max),
+                    help="Batas atas otomatis mengikuti total merchant yang ada.",
+                )
         n_cluster_default = math.ceil(len(df) / max_points_per_route)
         with c2:
             st.metric("Total Merchant", len(df))
