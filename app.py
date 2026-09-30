@@ -386,10 +386,11 @@ if st.session_state.page == "Routing":
         )
 
     use_extracted = False
-    if st.session_state.extracted_data and not uploaded_files:
+    if st.session_state.extracted_data:
         use_extracted = st.checkbox(
             f"Gunakan {len(st.session_state.extracted_data)} data hasil ekstraksi dari halaman Maps Extractor",
             value=False,
+            help="Bisa dicentang bersamaan dengan upload Excel di atas — keduanya akan digabung.",
         )
 
     st.download_button(
@@ -401,52 +402,56 @@ if st.session_state.page == "Routing":
     )
 
     df = None
-    already_validated = False
+    valid_parts = []
+    file_errors = []
 
-    if uploaded_files:
-        valid_parts = []
-        file_errors = []
-        for f in uploaded_files:
-            try:
-                file_df = pd.read_excel(f)
-            except Exception as e:
-                file_errors.append(f"**{f.name}**: gagal dibaca ({e})")
-                continue
+    for f in uploaded_files or []:
+        try:
+            file_df = pd.read_excel(f)
+        except Exception as e:
+            file_errors.append(f"**{f.name}**: gagal dibaca ({e})")
+            continue
 
-            is_valid, errors = validate_dataframe(file_df)
-            if not is_valid:
-                for err in errors:
-                    file_errors.append(f"**{f.name}**: {err}")
-                continue
+        is_valid, errors = validate_dataframe(file_df)
+        if not is_valid:
+            for err in errors:
+                file_errors.append(f"**{f.name}**: {err}")
+            continue
 
-            file_df = file_df.copy()
-            file_df["source_file"] = f.name
-            valid_parts.append(file_df)
+        file_df = file_df.copy()
+        file_df["source_file"] = f.name
+        valid_parts.append(file_df)
 
-        for err in file_errors:
-            st.error(f"❌ {err}")
-
-        if valid_parts:
-            df = pd.concat(valid_parts, ignore_index=True)
-            already_validated = True
-            skipped = len(uploaded_files) - len(valid_parts)
-            msg = f"✅ Berhasil menggabungkan {len(valid_parts)} file ({len(df)} baris total)."
-            if skipped:
-                msg += f" {skipped} file dilewati karena error di atas."
-            st.success(msg)
+    if use_extracted:
+        extracted_df = pd.DataFrame(st.session_state.extracted_data)
+        is_valid, errors = validate_dataframe(extracted_df)
+        if not is_valid:
+            for err in errors:
+                file_errors.append(f"**Data Ekstraksi (Maps Extractor)**: {err}")
         else:
-            st.stop()
-    elif use_extracted:
-        df = pd.DataFrame(st.session_state.extracted_data)
+            extracted_df = extracted_df.copy()
+            extracted_df["source_file"] = "Data Ekstraksi (Maps Extractor)"
+            valid_parts.append(extracted_df)
+
+    for err in file_errors:
+        st.error(f"❌ {err}")
+
+    if valid_parts:
+        df = pd.concat(valid_parts, ignore_index=True)
+        total_sources = len(uploaded_files or []) + (1 if use_extracted else 0)
+        skipped = total_sources - len(valid_parts)
+        msg = f"✅ Berhasil menggabungkan {len(valid_parts)} sumber data ({len(df)} baris total)."
+        if skipped:
+            msg += f" {skipped} sumber dilewati karena error di atas."
+        if len(valid_parts) > 1:
+            st.success(msg)
+    elif (uploaded_files or use_extracted) and not file_errors:
+        # Shouldn't normally happen, but avoid silently doing nothing.
+        st.info("Tidak ada data untuk diproses.")
+    elif file_errors:
+        st.stop()
 
     if df is not None:
-        if not already_validated:
-            is_valid, errors = validate_dataframe(df)
-            if not is_valid:
-                for err in errors:
-                    st.error(f"❌ {err}")
-                st.stop()
-
         df["latitude"] = pd.to_numeric(df["latitude"])
         df["longitude"] = pd.to_numeric(df["longitude"])
 
