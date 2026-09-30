@@ -17,7 +17,7 @@ from streamlit_folium import st_folium
 
 st.set_page_config(
     page_title="Routing & Extractor System",
-    page_icon="🚚",
+    page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -339,7 +339,7 @@ if "routing_df" not in st.session_state:
 # SIDEBAR NAVIGATION
 # ==========================================================================================
 with st.sidebar:
-    st.markdown("## 🚚 Routing & Extractor")
+    st.markdown("## 🏎️💨 Routing & Extractor")
     st.caption("KMeans + TSP Engine")
     st.markdown("---")
 
@@ -369,7 +369,7 @@ if st.session_state.page == "Routing":
         '<div class="app-header"><h1>🛣️ Routing Pipeline Optimizer</h1></div>',
         unsafe_allow_html=True,
     )
-    st.caption("Optimalkan rute pengiriman dengan clustering (KMeans) dan penentuan urutan kunjungan (TSP).")
+    st.caption("Optimalkan rute kunjungan dengan clustering (KMeans) dan penentuan urutan kunjungan (TSP).")
 
     col_link, col_upload = st.columns([1, 1.3])
     with col_link:
