@@ -472,8 +472,8 @@ if st.session_state.page == "Routing":
             else:
                 max_points_per_route = st.slider(
                     "Maksimal titik per route", min_value=2, max_value=slider_max,
-                    value=min(9, slider_max),
-                    help="Batas atas otomatis mengikuti total merchant yang ada.",
+                    value=slider_max,
+                    help="Default = total merchant, sehingga semua muat dalam 1 rute. Geser ke bawah untuk memecah jadi beberapa rute.",
                 )
         n_cluster_default = math.ceil(len(df) / max_points_per_route)
         with c2:
