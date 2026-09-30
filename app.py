@@ -17,7 +17,7 @@ from streamlit_folium import st_folium
 
 st.set_page_config(
     page_title="Routing & Extractor System",
-    page_icon="⚡",
+    page_icon="🚚",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -339,7 +339,7 @@ if "routing_df" not in st.session_state:
 # SIDEBAR NAVIGATION
 # ==========================================================================================
 with st.sidebar:
-    st.markdown("## 🏎️💨 Routing & Extractor")
+    st.markdown("## 🚚 Routing & Extractor")
     st.caption("KMeans + TSP Engine")
     st.markdown("---")
 
@@ -379,13 +379,14 @@ if st.session_state.page == "Routing":
             help="Jika diisi, titik ini akan dijadikan awal setiap rute.",
         )
     with col_upload:
-        uploaded_file = st.file_uploader(
-            "📂 Upload Excel (kolom: merchant_name, latitude, longitude)",
+        uploaded_files = st.file_uploader(
+            "📂 Upload Excel (kolom: merchant_name, latitude, longitude) — bisa pilih lebih dari satu file",
             type=["xlsx"],
+            accept_multiple_files=True,
         )
 
     use_extracted = False
-    if st.session_state.extracted_data and not uploaded_file:
+    if st.session_state.extracted_data and not uploaded_files:
         use_extracted = st.checkbox(
             f"Gunakan {len(st.session_state.extracted_data)} data hasil ekstraksi dari halaman Maps Extractor",
             value=False,
@@ -400,26 +401,58 @@ if st.session_state.page == "Routing":
     )
 
     df = None
-    if uploaded_file:
-        try:
-            df = pd.read_excel(uploaded_file)
-        except Exception as e:
-            st.error(f"Gagal membaca file Excel: {e}")
+    already_validated = False
+
+    if uploaded_files:
+        valid_parts = []
+        file_errors = []
+        for f in uploaded_files:
+            try:
+                file_df = pd.read_excel(f)
+            except Exception as e:
+                file_errors.append(f"**{f.name}**: gagal dibaca ({e})")
+                continue
+
+            is_valid, errors = validate_dataframe(file_df)
+            if not is_valid:
+                for err in errors:
+                    file_errors.append(f"**{f.name}**: {err}")
+                continue
+
+            file_df = file_df.copy()
+            file_df["source_file"] = f.name
+            valid_parts.append(file_df)
+
+        for err in file_errors:
+            st.error(f"❌ {err}")
+
+        if valid_parts:
+            df = pd.concat(valid_parts, ignore_index=True)
+            already_validated = True
+            skipped = len(uploaded_files) - len(valid_parts)
+            msg = f"✅ Berhasil menggabungkan {len(valid_parts)} file ({len(df)} baris total)."
+            if skipped:
+                msg += f" {skipped} file dilewati karena error di atas."
+            st.success(msg)
+        else:
             st.stop()
     elif use_extracted:
         df = pd.DataFrame(st.session_state.extracted_data)
 
     if df is not None:
-        is_valid, errors = validate_dataframe(df)
-        if not is_valid:
-            for err in errors:
-                st.error(f"❌ {err}")
-            st.stop()
+        if not already_validated:
+            is_valid, errors = validate_dataframe(df)
+            if not is_valid:
+                for err in errors:
+                    st.error(f"❌ {err}")
+                st.stop()
 
         df["latitude"] = pd.to_numeric(df["latitude"])
         df["longitude"] = pd.to_numeric(df["longitude"])
 
         with st.expander("📄 Data Awal", expanded=False):
+            if "source_file" in df.columns:
+                st.caption("Kolom `source_file` menunjukkan file asal tiap baris setelah digabung.")
             st.dataframe(df, width='stretch')
 
         st.markdown("### ⚙️ Pengaturan Route")
