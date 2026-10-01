@@ -336,14 +336,37 @@ def format_duration(seconds):
     return f"{hours} jam {rem} menit" if rem else f"{hours} jam"
 
 
-def solve_tsp(distance_matrix):
-    manager = pywrapcp.RoutingIndexManager(len(distance_matrix), 1, 0)
+def solve_tsp(distance_matrix, round_trip=False, fixed_start=False):
+    """Urutan kunjungan optimal dengan OR-Tools.
+
+    - round_trip=True : rute melingkar, kembali ke titik pertama (indeks 0).
+    - round_trip=False, fixed_start=True : mulai di indeks 0 (titik awal), selesai di mana saja.
+    - round_trip=False, fixed_start=False: mulai & selesai di mana saja (titik terbaik).
+
+    Untuk rute satu arah dipakai node "dummy" berjarak 0 ke/dari semua titik, supaya
+    solver tidak menghitung perjalanan pulang yang sebenarnya tidak dilakukan.
+    Mengembalikan daftar indeks node asli (tanpa dummy, tanpa titik kembali).
+    """
+    n = len(distance_matrix)
+    if n <= 2:
+        return list(range(n))
+
+    if round_trip:
+        matrix = distance_matrix
+        manager = pywrapcp.RoutingIndexManager(n, 1, 0)
+    else:
+        # tambah node dummy (indeks n) dengan jarak 0 ke/dari semua node
+        matrix = [list(row) + [0] for row in distance_matrix] + [[0] * (n + 1)]
+        if fixed_start:
+            manager = pywrapcp.RoutingIndexManager(n + 1, 1, [0], [n])
+        else:
+            manager = pywrapcp.RoutingIndexManager(n + 1, 1, n)
     routing = pywrapcp.RoutingModel(manager)
 
     def distance_callback(from_index, to_index):
         from_node = manager.IndexToNode(from_index)
         to_node = manager.IndexToNode(to_index)
-        return distance_matrix[from_node][to_node]
+        return matrix[from_node][to_node]
 
     transit_callback_index = routing.RegisterTransitCallback(distance_callback)
     routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
@@ -355,15 +378,22 @@ def solve_tsp(distance_matrix):
     solution = routing.SolveWithParameters(search_parameters)
 
     if solution is None:
-        return list(range(len(distance_matrix)))
+        return list(range(n))
 
     route = []
     index = routing.Start(0)
     while not routing.IsEnd(index):
         node = manager.IndexToNode(index)
-        route.append(node)
+        if node < n:  # lewati node dummy
+            route.append(node)
         index = solution.Value(routing.NextVar(index))
     return route
+
+
+def route_leg_sum(matrix, order, round_trip=False):
+    """Jumlah jarak/waktu sepanjang urutan; kalau round_trip, termasuk kaki pulang ke titik pertama."""
+    path = list(order) + ([order[0]] if round_trip and len(order) > 1 else [])
+    return sum(matrix[path[i]][path[i + 1]] for i in range(len(path) - 1))
 
 
 def generate_google_maps_link(df):
@@ -688,6 +718,20 @@ MAP_H = 260 if IS_MOBILE else 350
 TABLE_H = 260 if IS_MOBILE else None
 
 
+if "round_trip_flag" not in st.session_state:
+    st.session_state.round_trip_flag = False
+if "dedupe_flag" not in st.session_state:
+    st.session_state.dedupe_flag = True
+
+
+def _sync_round_trip():
+    st.session_state.round_trip_flag = st.session_state._round_trip_widget
+
+
+def _sync_dedupe():
+    st.session_state.dedupe_flag = st.session_state._dedupe_widget
+
+
 def _sync_use_extracted():
     st.session_state.use_extracted_flag = st.session_state._use_extracted_widget
 
@@ -929,6 +973,27 @@ if st.session_state.page == "Routing":
         df["latitude"] = pd.to_numeric(df["latitude"])
         df["longitude"] = pd.to_numeric(df["longitude"])
 
+        # Deteksi duplikat (nama sama + koordinat sama ~1 meter), mis. setelah
+        # menggabungkan Excel dengan data Maps Extractor.
+        _dup_mask = pd.DataFrame(
+            {
+                "n": df["merchant_name"].astype(str).str.strip().str.lower(),
+                "a": df["latitude"].round(5),
+                "o": df["longitude"].round(5),
+            }
+        ).duplicated()
+        n_dup = int(_dup_mask.sum())
+        if n_dup:
+            remove_dups = st.checkbox(
+                f"🧹 Hapus {n_dup} baris duplikat (nama & koordinat sama)",
+                value=st.session_state.dedupe_flag,
+                key="_dedupe_widget",
+                on_change=_sync_dedupe,
+                help="Baris pertama dipertahankan. Matikan kalau memang ada merchant kembar yang sengaja dimasukkan dua kali.",
+            )
+            if remove_dups:
+                df = df[~_dup_mask].copy().reset_index(drop=True)
+
         with st.expander(f"📄 Lihat Data Awal ({len(df)} baris)", expanded=False):
             if "source_file" in df.columns:
                 st.caption("💡 Kolom `source_file` menunjukkan file/sumber asal tiap baris setelah digabung.")
@@ -957,12 +1022,24 @@ if st.session_state.page == "Routing":
             with c3:
                 metric_card("🧭", "Estimasi Jumlah Route", n_cluster_default)
 
+        round_trip = st.checkbox(
+            "🔁 Kembali ke titik awal setelah rute selesai",
+            value=st.session_state.round_trip_flag,
+            key="_round_trip_widget",
+            on_change=_sync_round_trip,
+            help=(
+                "Aktif: rute melingkar dan jarak/waktu sudah termasuk perjalanan pulang. "
+                "Nonaktif: rute satu arah, berhenti di merchant terakhir. "
+                "Kalau Titik Awal kosong, rute dimulai dari titik yang paling efisien."
+            ),
+        )
+
         st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
         run = st.button("🚀 Buat Rute Optimal Sekarang", type="primary", width='stretch')
 
         # Fingerprint of the current input+settings, so stale results (from a
         # previous file/slider value) don't linger after the inputs change.
-        data_fingerprint = (len(df), tuple(df["merchant_name"]), max_points_per_route, starting_link)
+        data_fingerprint = (len(df), tuple(df["merchant_name"]), max_points_per_route, starting_link, round_trip)
 
         if run:
             if len(df) < 2:
@@ -997,20 +1074,15 @@ if st.session_state.page == "Routing":
                     distance_matrix, duration_matrix, used_real_roads = get_route_matrices(route_df)
                     any_fallback_used = any_fallback_used or not used_real_roads
 
-                    best_route = solve_tsp(distance_matrix)
+                    has_start = bool(start_lat and start_lon)
+                    best_route = solve_tsp(distance_matrix, round_trip=round_trip, fixed_start=has_start)
                     optimized_df = route_df.iloc[best_route].reset_index(drop=True)
                     optimized_df["sequence"] = optimized_df.index + 1
                     optimized_df["route_name"] = f"Route {route_id + 1}"
                     all_routes.append(optimized_df)
 
-                    route_distance_km = sum(
-                        distance_matrix[best_route[i]][best_route[i + 1]]
-                        for i in range(len(best_route) - 1)
-                    ) / 1000
-                    route_duration_sec = sum(
-                        duration_matrix[best_route[i]][best_route[i + 1]]
-                        for i in range(len(best_route) - 1)
-                    )
+                    route_distance_km = route_leg_sum(distance_matrix, best_route, round_trip) / 1000
+                    route_duration_sec = route_leg_sum(duration_matrix, best_route, round_trip)
 
                     route_summaries.append(
                         {
@@ -1018,6 +1090,7 @@ if st.session_state.page == "Routing":
                             "df": optimized_df,
                             "distance_km": route_distance_km,
                             "duration_sec": route_duration_sec,
+                            "round_trip": round_trip,
                         }
                     )
 
@@ -1093,7 +1166,11 @@ if st.session_state.page == "Routing":
                             height=TABLE_H,
                             hide_index=True,
                         )
-                        maps_url = generate_google_maps_link(optimized_df)
+                        link_df = (
+                            pd.concat([optimized_df, optimized_df.iloc[[0]]], ignore_index=True)
+                            if r.get("round_trip") else optimized_df
+                        )
+                        maps_url = generate_google_maps_link(link_df)
                         if maps_url:
                             st.link_button("🚗 Buka di Google Maps", maps_url, width='stretch')
 
@@ -1110,6 +1187,8 @@ if st.session_state.page == "Routing":
                                 popup=f"{idx + 1}. {row['merchant_name']}",
                                 icon=folium.Icon(color="blue" if idx > 0 else "green"),
                             ).add_to(fmap)
+                        if r.get("round_trip") and polyline_coords:
+                            polyline_coords.append(polyline_coords[0])
                         folium.PolyLine(polyline_coords, weight=4, color=color).add_to(fmap)
                         st_folium(fmap, width=None, height=MAP_H, key=f"map_{route_id}", returned_objects=[])
 
