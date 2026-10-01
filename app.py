@@ -145,6 +145,18 @@ st.markdown(
 
     div[data-testid="stSidebarNav"] {display: none;}
 
+    /* ---------- Penanda langkah ---------- */
+    .stepper {display: flex; align-items: center; gap: 8px; margin: 4px 0 18px 0;}
+    .stepper .step {display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 0.9rem; opacity: 0.55;}
+    .stepper .step .dot {
+        width: 26px; height: 26px; border-radius: 50%; display: inline-flex; align-items: center;
+        justify-content: center; font-size: 0.8rem; border: 2px solid rgba(128,128,128,0.5);
+    }
+    .stepper .step.active, .stepper .step.done {opacity: 1;}
+    .stepper .step.active .dot {border-color: #4F46E5; color: #4F46E5; box-shadow: 0 0 0 4px rgba(79,70,229,0.15);}
+    .stepper .step.done .dot {background: linear-gradient(135deg, #4F46E5 0%, #0EA5E9 100%); border-color: transparent; color: #fff;}
+    .stepper .bar {flex: 1 1 16px; height: 2px; background: rgba(128,128,128,0.3); min-width: 12px;}
+
     /* ---------- Footer ---------- */
     .app-footer {
         margin-top: 56px; padding: 26px 0 8px 0; text-align: center;
@@ -398,6 +410,53 @@ def get_route_matrices(df):
             for i in range(n)
         ]
         return distance_matrix, duration_matrix, False, str(e)[:160]
+
+
+def parse_coordinate_text(text):
+    """Baca koordinat yang ditempel, mis. '-7.5665, 110.8167' atau '-7,5665; 110,8167'.
+
+    Mengembalikan (lat, lon, pesan_error). pesan_error None kalau berhasil.
+    """
+    nums = re.findall(r"-?\d+(?:[.,]\d+)?", str(text or ""))
+    if len(nums) != 2:
+        return None, None, "Tidak terbaca. Tempel dua angka saja, contoh: -7.5665, 110.8167"
+    lat, lon = (float(x.replace(",", ".")) for x in nums)
+    if not (-90 <= lat <= 90) and (-90 <= lon <= 90) and (-180 <= lat <= 180):
+        return None, None, "Latitude di luar rentang. Mungkin urutannya tertukar — format yang benar: latitude, longitude."
+    if not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
+        return None, None, "Koordinat di luar rentang valid (latitude -90 s/d 90, longitude -180 s/d 180)."
+    return lat, lon, None
+
+
+def make_sample_csv():
+    """Data contoh: 12 merchant fiktif di dua area di sekitar Surakarta."""
+    rng = np.random.default_rng(7)
+    centers = [(-7.5560, 110.8000), (-7.5700, 110.8350)]
+    rows = []
+    for i in range(12):
+        c = centers[i % 2]
+        rows.append(
+            {
+                "merchant_name": f"Toko Contoh {i + 1:02d}",
+                "latitude": round(c[0] + float(rng.normal(0, 0.006)), 6),
+                "longitude": round(c[1] + float(rng.normal(0, 0.006)), 6),
+            }
+        )
+    return pd.DataFrame(rows).to_csv(index=False).encode("utf-8-sig")
+
+
+STEP_LABELS = ["Data", "Pengaturan", "Hasil"]
+
+
+def render_stepper(slot, done):
+    """Penanda langkah. done = jumlah langkah yang sudah selesai (0-3)."""
+    items = []
+    for i, label in enumerate(STEP_LABELS):
+        state = "done" if i < done else ("active" if i == done else "todo")
+        mark = "✓" if state == "done" else str(i + 1)
+        items.append(f'<div class="step {state}"><span class="dot">{mark}</span><span class="lbl">{label}</span></div>')
+    bar = '<div class="bar"></div>'
+    slot.markdown('<div class="stepper">' + bar.join(items) + '</div>', unsafe_allow_html=True)
 
 
 def format_duration(seconds):
@@ -670,15 +729,15 @@ def fill_clusters(df, max_points_per_route):
 
 
 def _max_points_control(df):
-    """Slider 'maksimal titik per route' (dipakai di mode Desktop & Mobile)."""
+    """Slider 'maksimal titik per rute' (dipakai di mode Desktop & Mobile)."""
     slider_max = max(2, len(df))
     if slider_max <= 2:
         # st.slider needs min_value < max_value; with only 2
         # merchants there's only one sensible route anyway.
-        metric_card("📍", "Maksimal titik per route", slider_max)
+        metric_card("📍", "Maksimal titik per rute", slider_max)
         return slider_max
     return st.slider(
-        "Maksimal titik per route", min_value=2, max_value=slider_max,
+        "Maksimal titik per rute", min_value=2, max_value=slider_max,
         value=slider_max,
         help="Default = total merchant, sehingga semua muat dalam 1 rute. Geser ke bawah untuk memecah jadi beberapa rute.",
     )
@@ -1208,16 +1267,24 @@ def render_nav(prefix, horizontal=False):
 
 
 def render_howto():
-    with st.expander("ℹ️ Cara Pakai (3 Langkah)", expanded=False):
-        st.write(
-            "**1. Kumpulkan data** 📍\n"
-            "Buka **Maps Extractor** — tempel link Google Maps, cari nama merchant, atau isi manual. "
-            "Sudah punya file Excel/CSV? Langsung lompat ke langkah 2.\n\n"
-            "**2. Buat rute** 🛣️\n"
-            "Buka **Routing Optimizer**, upload Excel/CSV (`merchant_name`, `latitude`, `longitude`), "
-            "atur maksimal titik per rute, lalu klik **Buat Rute Optimal**.\n\n"
-            "**3. Unduh & pakai** 📥\n"
-            "Lihat tiap rute di peta, buka langsung di Google Maps, atau unduh semuanya sebagai Excel."
+    # Terbuka otomatis untuk pengguna baru (belum ada data); menutup sendiri setelah ada data.
+    empty = not (st.session_state.uploaded_store or st.session_state.extracted_data)
+    with st.expander("ℹ️ Cara Pakai (3 Langkah)", expanded=empty):
+        st.markdown(
+            "**1. Kumpulkan data** 📍  \n"
+            "Di **Maps Extractor**: tempel link Google Maps, cari nama merchant, atau isi manual "
+            "(koordinat bisa ditempel sekaligus). Sudah punya file Excel/CSV? Upload langsung di "
+            "**Routing Optimizer** — atau klik **🧪 Coba dengan data contoh** untuk melihat cara kerjanya.\n\n"
+            "**2. Atur rute** 🛣️  \n"
+            "Di **Routing Optimizer**: pilih cara membagi rute (maksimal titik per rute, atau jumlah rute "
+            "misalnya jumlah sales), jam mulai, durasi kunjungan per toko, titik awal (opsional, boleh link "
+            "Google Maps atau koordinat), dan apakah rute kembali ke titik awal. Lalu klik "
+            "**Buat Rute Optimal Sekarang**.\n\n"
+            "**3. Pakai hasilnya** 📥  \n"
+            "Lihat urutan kunjungan dan perkiraan jam tiba, buka di Google Maps, kirim ke WhatsApp, "
+            "atau unduh semua rute sebagai Excel.\n\n"
+            "💾 **Tips:** data tetap tersimpan selama halaman tidak di-refresh, walau kamu pindah menu. "
+            "Untuk melanjutkan di lain waktu, pakai **Simpan / Buka Sesi**."
         )
 
 
@@ -1268,6 +1335,9 @@ if st.session_state.page == "Routing":
         unsafe_allow_html=True,
     )
 
+    stepper_slot = st.empty()
+    render_stepper(stepper_slot, 0)
+
     section_header(
         "1️⃣", "Siapkan Data Merchant",
         "Upload file Excel/CSV, pakai data dari Maps Extractor, atau gabungan keduanya",
@@ -1280,8 +1350,12 @@ if st.session_state.page == "Routing":
             value=st.session_state.starting_link_saved,
             key="_starting_link_widget",
             on_change=_sync_starting_link,
-            placeholder="Tempel link Google Maps di sini",
-            help="Misalnya lokasi gudang atau toko pusat. Kalau diisi, titik ini otomatis jadi awal setiap rute.",
+            placeholder="Link Google Maps atau koordinat (-7.5665, 110.8167)",
+            help=(
+                "Misalnya lokasi gudang atau toko pusat. Kalau diisi, titik ini otomatis jadi awal setiap rute. "
+                "Cara dapat link: buka lokasinya di Google Maps → Bagikan → Salin link. "
+                "Atau tempel koordinatnya langsung."
+            ),
         )
     with col_upload:
         new_files = st.file_uploader(
@@ -1309,6 +1383,12 @@ if st.session_state.page == "Routing":
                     if st.button("✖", key=f"rm_{fname}", help=f"Hapus {fname}"):
                         st.session_state.uploaded_store.pop(fname, None)
                         st.rerun()
+
+    if not st.session_state.uploaded_store and not st.session_state.extracted_data:
+        if st.button("🧪 Coba dengan data contoh (12 merchant)", width='stretch',
+                     help="Memuat 12 merchant fiktif di sekitar Surakarta supaya kamu bisa langsung mencoba. Bisa dihapus kapan saja dengan tombol ✖."):
+            st.session_state.uploaded_store["data_contoh.csv"] = make_sample_csv()
+            st.rerun()
 
     use_extracted = False
     if st.session_state.extracted_data:
@@ -1393,6 +1473,7 @@ if st.session_state.page == "Routing":
         st.stop()
 
     if df is not None:
+        render_stepper(stepper_slot, 1)
         df["latitude"] = pd.to_numeric(df["latitude"])
         df["longitude"] = pd.to_numeric(df["longitude"])
 
@@ -1442,7 +1523,7 @@ if st.session_state.page == "Routing":
                 with c2:
                     metric_card("🏪", "Total Merchant", len(df))
                 with c3:
-                    metric_card("🧭", "Estimasi Jumlah Route", n_cluster_default)
+                    metric_card("🧭", "Estimasi Jumlah Rute", n_cluster_default)
         else:
             c1, c2, c3 = st.columns(3)
             with c1:
@@ -1451,7 +1532,7 @@ if st.session_state.page == "Routing":
             with c2:
                 metric_card("🏪", "Total Merchant", len(df))
             with c3:
-                metric_card("🧭", "Estimasi Jumlah Route", n_cluster_default)
+                metric_card("🧭", "Estimasi Jumlah Rute", n_cluster_default)
 
         if target_routes is not None:
             split_mode = SPLIT_AUTO
@@ -1517,6 +1598,20 @@ if st.session_state.page == "Routing":
             ),
         )
 
+        _plan_txt = (
+            f"{target_routes} rute (maks. {max_points_per_route}/rute)" if target_routes is not None
+            else f"{n_cluster_default} rute (maks. {max_points_per_route} merchant/rute"
+                 + (", isi penuh" if n_cluster_default > 1 and split_mode == SPLIT_FULL else
+                    ", otomatis per area" if n_cluster_default > 1 else "") + ")"
+        )
+        st.info(
+            f"**Ringkasan:** {len(df)} merchant → {_plan_txt} · mulai {start_time:%H:%M} · "
+            + (f"{int(visit_minutes)} menit/toko" if visit_minutes else "tanpa durasi kunjungan")
+            + " · " + ("pulang-pergi" if round_trip else "satu arah")
+            + " · titik awal: " + ("sesuai isian" if starting_link else "otomatis (paling efisien)"),
+            icon="🧾",
+        )
+
         st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
         run = st.button("🚀 Buat Rute Optimal Sekarang", type="primary", width='stretch')
 
@@ -1545,8 +1640,14 @@ if st.session_state.page == "Routing":
 
                 start_name, start_lat, start_lon = "START POINT", None, None
                 if starting_link:
-                    parsed_name, start_lat, start_lon = extract_google_maps_data(starting_link)
-                    start_name = parsed_name or "START POINT"
+                    coord_lat = coord_lon = None
+                    if "http" not in starting_link.lower():
+                        coord_lat, coord_lon, _coord_err = parse_coordinate_text(starting_link)
+                    if coord_lat is not None:
+                        start_name, start_lat, start_lon = "Titik Awal", coord_lat, coord_lon
+                    else:
+                        parsed_name, start_lat, start_lon = extract_google_maps_data(starting_link)
+                        start_name = parsed_name or "START POINT"
 
                 all_routes = []
                 route_summaries = []
@@ -1573,7 +1674,7 @@ if st.session_state.page == "Routing":
                     best_route = solve_tsp(distance_matrix, round_trip=round_trip, fixed_start=has_start)
                     optimized_df = route_df.iloc[best_route].reset_index(drop=True)
                     optimized_df["sequence"] = optimized_df.index + 1
-                    optimized_df["route_name"] = f"Route {route_id + 1}"
+                    optimized_df["route_name"] = f"Rute {route_id + 1}"
 
                     arrivals, departs, back_dt, finish_dt = build_schedule(
                         duration_matrix, best_route, start_dt, visit_sec, has_start, round_trip
@@ -1603,9 +1704,9 @@ if st.session_state.page == "Routing":
             final_df = pd.concat([r["df"] for r in route_summaries], ignore_index=True)
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-                final_df.to_excel(writer, index=False, sheet_name="Semua Route")
+                final_df.to_excel(writer, index=False, sheet_name="Semua Rute")
                 for r in route_summaries:
-                    sheet_name = f"Route {r['route_id'] + 1}"[:31]
+                    sheet_name = f"Rute {r['route_id'] + 1}"[:31]
                     r["df"].to_excel(writer, index=False, sheet_name=sheet_name)
 
             # Persist everything needed to render the result, so later reruns
@@ -1624,7 +1725,7 @@ if st.session_state.page == "Routing":
         result = st.session_state.get("route_result")
         if result and result["fingerprint"] == data_fingerprint:
             if result["start_link_given"] and not result["start_ok"]:
-                st.warning("⚠️ Link Google Maps titik awal tidak dikenali, jadi dilewati — rute tetap dibuat tanpa titik awal khusus.")
+                st.warning("⚠️ Titik awal tidak dikenali (bukan link Google Maps atau koordinat yang valid), jadi dilewati — rute tetap dibuat tanpa titik awal khusus.")
 
             if not result.get("used_real_roads", True):
                 reason = result.get("osrm_error")
@@ -1637,6 +1738,7 @@ if st.session_state.page == "Routing":
                     "pengaturan `OSRM_BASE_URL` di Secrets."
                 )
 
+            render_stepper(stepper_slot, 3)
             route_summaries = result["route_summaries"]
             st.success(f"🎉 Rute berhasil dibuat! {len(route_summaries)} rute siap dipakai.")
 
@@ -1646,7 +1748,7 @@ if st.session_state.page == "Routing":
             with st.container(key="grid4"):
                 m1, m2, m3, m4 = st.columns(4)
                 with m1:
-                    metric_card("🧭", "Total Route", len(route_summaries))
+                    metric_card("🧭", "Total Rute", len(route_summaries))
                 with m2:
                     metric_card("📍", "Total Titik", result["total_points"])
                 with m3:
@@ -1672,7 +1774,7 @@ if st.session_state.page == "Routing":
                 route_total_sec = r["duration_sec"] + r.get("visit_sec", 0)
                 warn_mark = "" if r.get("real_roads", True) else " ⚠️ estimasi"
                 with st.expander(
-                    f"{emoji} Route {route_id + 1} — {len(optimized_df)} titik — "
+                    f"{emoji} Rute {route_id + 1} — {len(optimized_df)} titik — "
                     f"~{r['distance_km']:.1f} km — ~{format_duration(route_total_sec)}{warn_mark}",
                     expanded=(route_id == first_route_id),
                 ):
@@ -1912,31 +2014,47 @@ elif st.session_state.page == "Extract":
 
     with tab_manual:
         with st.form("manual_form", clear_on_submit=True):
-            mc1, mc2, mc3 = st.columns(3)
-            with mc1:
-                manual_name = st.text_input("Nama merchant", placeholder="contoh: Toko Berkah")
-            with mc2:
-                manual_lat = st.number_input(
-                    "Latitude", value=0.0, format="%.6f",
-                    help="Gunakan titik desimal, contoh: -7.5665",
-                )
-            with mc3:
-                manual_lon = st.number_input(
-                    "Longitude", value=0.0, format="%.6f",
-                    help="Gunakan titik desimal, contoh: 110.8167",
-                )
+            manual_name = st.text_input("Nama merchant", placeholder="contoh: Toko Berkah")
+            manual_coord = st.text_input(
+                "📋 Tempel koordinat",
+                placeholder="-7.5665, 110.8167",
+                help=(
+                    "Di Google Maps: klik kanan (atau tekan lama di HP) pada lokasi, lalu klik/sentuh angka "
+                    "koordinat di bagian atas menu untuk menyalinnya, dan tempel di sini."
+                ),
+            )
+            with st.expander("Atau isi latitude & longitude secara terpisah"):
+                mc2, mc3 = st.columns(2)
+                with mc2:
+                    manual_lat = st.number_input(
+                        "Latitude", value=0.0, format="%.6f",
+                        help="Gunakan titik desimal, contoh: -7.5665",
+                    )
+                with mc3:
+                    manual_lon = st.number_input(
+                        "Longitude", value=0.0, format="%.6f",
+                        help="Gunakan titik desimal, contoh: 110.8167",
+                    )
             manual_submit = st.form_submit_button("➕ Tambahkan Data", type="primary", width='stretch')
 
             if manual_submit:
+                lat = lon = None
                 if not manual_name.strip():
                     st.error("❌ Nama merchant tidak boleh kosong.")
+                elif manual_coord.strip():
+                    lat, lon, coord_err = parse_coordinate_text(manual_coord)
+                    if coord_err:
+                        st.error(f"❌ {coord_err}")
                 elif manual_lat == 0.0 and manual_lon == 0.0:
-                    st.error("❌ Masukkan koordinat yang valid.")
+                    st.error("❌ Isi koordinat: tempel di kolom koordinat, atau isi latitude & longitude.")
                 else:
+                    lat, lon = manual_lat, manual_lon
+
+                if lat is not None and lon is not None:
                     st.session_state.extracted_data.append(
-                        {"merchant_name": manual_name, "latitude": manual_lat, "longitude": manual_lon}
+                        {"merchant_name": manual_name.strip(), "latitude": float(lat), "longitude": float(lon)}
                     )
-                    st.success(f"✅ Berhasil menambahkan: {manual_name}")
+                    st.success(f"✅ Berhasil menambahkan: {manual_name.strip()}")
 
     if len(st.session_state.extracted_data) > 0:
         section_header(
