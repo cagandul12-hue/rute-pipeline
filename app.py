@@ -17,7 +17,7 @@ from streamlit_folium import st_folium
 
 st.set_page_config(
     page_title="Routing & Extractor System",
-    page_icon="⚡",
+    page_icon="🚚",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -25,39 +25,113 @@ st.set_page_config(
 # ==========================================================================================
 # STYLING
 # ==========================================================================================
+ACCENT_GRADIENT = "linear-gradient(135deg, #4F46E5 0%, #0EA5E9 100%)"
+
 st.markdown(
     """
     <style>
-    .block-container {padding-top: 2rem; padding-bottom: 3rem;}
-    .metric-card {
-        background: #ffffff10;
-        border: 1px solid rgba(128,128,128,0.25);
-        border-radius: 12px;
-        padding: 14px 18px;
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+
+    html, body, .main, p, div, span, h1, h2, h3, h4, h5, h6, label, button, textarea, input {
+        font-family: 'Plus Jakarta Sans', -apple-system, sans-serif;
     }
-    .route-card {
-        border: 1px solid rgba(128,128,128,0.25);
+
+    .block-container {padding-top: 1.5rem; padding-bottom: 3rem; max-width: 1200px;}
+
+    /* ---------- Hero header ---------- */
+    .hero-header {
+        background: linear-gradient(135deg, #4F46E5 0%, #0EA5E9 100%);
+        border-radius: 18px;
+        padding: 26px 32px;
+        margin-bottom: 22px;
+        box-shadow: 0 10px 28px rgba(79,70,229,0.28);
+    }
+    .hero-header h1 {
+        color: #ffffff !important;
+        margin: 0 !important;
+        font-size: 1.7rem;
+        font-weight: 800;
+        line-height: 1.3;
+    }
+    .hero-header p {
+        color: rgba(255,255,255,0.92) !important;
+        margin: 6px 0 0 0 !important;
+        font-size: 0.95rem;
+    }
+
+    /* ---------- Metric cards ---------- */
+    .metric-card {
+        background: rgba(128,128,128,0.08);
+        border: 1px solid rgba(128,128,128,0.18);
         border-radius: 14px;
         padding: 16px 18px;
-        margin-bottom: 16px;
+        height: 100%;
     }
-    .app-header {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        margin-bottom: 4px;
+    .metric-card .metric-icon {font-size: 1.4rem; line-height: 1;}
+    .metric-card .metric-label {
+        font-size: 0.78rem; opacity: 0.7; margin-top: 8px; font-weight: 600;
+        text-transform: uppercase; letter-spacing: 0.03em;
     }
+    .metric-card .metric-value {font-size: 1.5rem; font-weight: 800; margin-top: 2px;}
+
+    /* ---------- Sidebar ---------- */
+    .sidebar-brand {display: flex; align-items: center; gap: 10px;}
+    .sidebar-brand .emoji {font-size: 1.9rem; line-height: 1;}
+    .sidebar-brand .title {font-weight: 800; font-size: 1.08rem; line-height: 1.2;}
+    .sidebar-brand .subtitle {font-size: 0.78rem; opacity: 0.65;}
+    section[data-testid="stSidebar"] button {border-radius: 10px !important;}
+
+    /* ---------- Buttons ---------- */
+    .stButton > button, .stDownloadButton > button, .stLinkButton > a {
+        border-radius: 10px !important;
+        font-weight: 600 !important;
+    }
+    .stButton > button[kind="primary"], .stDownloadButton > button[kind="primary"] {
+        background: linear-gradient(135deg, #4F46E5 0%, #0EA5E9 100%) !important;
+        border: none !important;
+        box-shadow: 0 4px 14px rgba(79,70,229,0.32);
+    }
+
+    /* ---------- Expanders (route cards) ---------- */
+    div[data-testid="stExpander"] {
+        border-radius: 14px !important;
+        border: 1px solid rgba(128,128,128,0.18) !important;
+        margin-bottom: 14px;
+        overflow: hidden;
+    }
+
+    /* ---------- Tabs ---------- */
+    .stTabs [data-baseweb="tab"] {
+        font-weight: 600;
+        border-radius: 8px 8px 0 0;
+    }
+
     div[data-testid="stSidebarNav"] {display: none;}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
+
+def metric_card(icon, label, value):
+    st.markdown(
+        f"""
+        <div class="metric-card">
+            <div class="metric-icon">{icon}</div>
+            <div class="metric-value">{value}</div>
+            <div class="metric-label">{label}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 ROUTE_COLORS = [
     "#e6194B", "#3cb44b", "#4363d8", "#f58231", "#911eb4",
     "#42d4f4", "#f032e6", "#bfef45", "#fabed4", "#469990",
     "#dcbeff", "#9A6324", "#800000", "#aaffc3", "#000075",
 ]
+ROUTE_EMOJIS = ["🔴", "🟢", "🔵", "🟠", "🟣", "🟡", "🟤", "⚫", "⚪"]
 
 # ==========================================================================================
 # HELPER FUNCTIONS
@@ -321,13 +395,6 @@ def make_template_excel():
 # ==========================================================================================
 # SESSION STATE INIT
 # ==========================================================================================
-# A widget's own state (key="page") can only be set BEFORE that widget is
-# instantiated in a given run — never after, even from a button lower down
-# the same script. So a "switch page" request is staged here as a plain,
-# non-widget flag and applied right now, before the sidebar radio below is
-# created; the button just sets the flag and reruns.
-if "pending_page" in st.session_state:
-    st.session_state.page = st.session_state.pop("pending_page")
 if "page" not in st.session_state:
     st.session_state.page = "Routing"
 if "extracted_data" not in st.session_state:
@@ -339,17 +406,42 @@ if "routing_df" not in st.session_state:
 # SIDEBAR NAVIGATION
 # ==========================================================================================
 with st.sidebar:
-    st.markdown("## 🏎️💨 Routing & Extractor")
-    st.caption("KMeans + TSP Engine")
-    st.markdown("---")
-
-    st.radio(
-        "Menu",
-        options=["Routing", "Extract"],
-        format_func=lambda p: "🛣️ Routing Optimizer" if p == "Routing" else "📍 Maps Extractor",
-        key="page",
-        label_visibility="collapsed",
+    st.markdown(
+        """
+        <div class="sidebar-brand">
+            <span class="emoji">🚚</span>
+            <div>
+                <div class="title">Routing &amp; Extractor</div>
+                <div class="subtitle">KMeans + TSP Engine</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+
+    # Plain buttons (not a key-bound widget) so the active page can be set
+    # programmatically from anywhere — e.g. the "pakai di Routing Optimizer"
+    # button on the Extract page — without hitting Streamlit's restriction
+    # on mutating a widget's own session-state key after it's been created.
+    nav_routing_active = st.session_state.page == "Routing"
+    nav_extract_active = st.session_state.page == "Extract"
+
+    if st.button(
+        "🛣️  Routing Optimizer",
+        width='stretch',
+        type="primary" if nav_routing_active else "secondary",
+    ):
+        st.session_state.page = "Routing"
+        st.rerun()
+
+    if st.button(
+        "📍  Maps Extractor",
+        width='stretch',
+        type="primary" if nav_extract_active else "secondary",
+    ):
+        st.session_state.page = "Extract"
+        st.rerun()
 
     st.markdown("---")
     with st.expander("ℹ️ Cara pakai"):
@@ -366,10 +458,14 @@ with st.sidebar:
 # ================================================================
 if st.session_state.page == "Routing":
     st.markdown(
-        '<div class="app-header"><h1>🛣️ Routing Pipeline Optimizer</h1></div>',
+        """
+        <div class="hero-header">
+            <h1>🛣️ Routing Pipeline Optimizer</h1>
+            <p>Optimalkan rute pengiriman dengan clustering (KMeans) dan penentuan urutan kunjungan (TSP).</p>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
-    st.caption("Optimalkan rute kunjungan dengan clustering (KMeans) dan penentuan urutan kunjungan (TSP).")
 
     col_link, col_upload = st.columns([1, 1.3])
     with col_link:
@@ -468,7 +564,7 @@ if st.session_state.page == "Routing":
                 # st.slider needs min_value < max_value; with only 2
                 # merchants there's only one sensible route anyway.
                 max_points_per_route = slider_max
-                st.metric("Maksimal titik per route", max_points_per_route)
+                metric_card("📍", "Maksimal titik per route", max_points_per_route)
             else:
                 max_points_per_route = st.slider(
                     "Maksimal titik per route", min_value=2, max_value=slider_max,
@@ -477,9 +573,9 @@ if st.session_state.page == "Routing":
                 )
         n_cluster_default = math.ceil(len(df) / max_points_per_route)
         with c2:
-            st.metric("Total Merchant", len(df))
+            metric_card("🏪", "Total Merchant", len(df))
         with c3:
-            st.metric("Estimasi Jumlah Route", n_cluster_default)
+            metric_card("🧭", "Estimasi Jumlah Route", n_cluster_default)
 
         run = st.button("🚀 Buat Rute Optimal", type="primary", width='stretch')
 
@@ -559,9 +655,12 @@ if st.session_state.page == "Routing":
 
             total_distance = sum(r["distance_km"] for r in route_summaries)
             m1, m2, m3 = st.columns(3)
-            m1.metric("Total Route", len(route_summaries))
-            m2.metric("Total Titik", result["total_points"])
-            m3.metric("Estimasi Total Jarak", f"{total_distance:.1f} km")
+            with m1:
+                metric_card("🧭", "Total Route", len(route_summaries))
+            with m2:
+                metric_card("📍", "Total Titik", result["total_points"])
+            with m3:
+                metric_card("📏", "Estimasi Total Jarak", f"{total_distance:.1f} km")
 
             st.markdown("### 🗺️ Detail Setiap Route")
             first_route_id = route_summaries[0]["route_id"]
@@ -569,9 +668,10 @@ if st.session_state.page == "Routing":
                 route_id = r["route_id"]
                 optimized_df = r["df"]
                 color = ROUTE_COLORS[route_id % len(ROUTE_COLORS)]
+                emoji = ROUTE_EMOJIS[route_id % len(ROUTE_EMOJIS)]
 
                 with st.expander(
-                    f"Route {route_id + 1} — {len(optimized_df)} titik — ~{r['distance_km']:.1f} km",
+                    f"{emoji} Route {route_id + 1} — {len(optimized_df)} titik — ~{r['distance_km']:.1f} km",
                     expanded=(route_id == first_route_id),
                 ):
                     left, right = st.columns([1, 1.4])
@@ -620,10 +720,14 @@ if st.session_state.page == "Routing":
 # ================================================================
 elif st.session_state.page == "Extract":
     st.markdown(
-        '<div class="app-header"><h1>📍 Google Maps Extractor</h1></div>',
+        """
+        <div class="hero-header">
+            <h1>📍 Google Maps Extractor</h1>
+            <p>Ubah link Google Maps, pencarian nama merchant, atau input manual jadi tabel (merchant_name, latitude, longitude) siap pakai.</p>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
-    st.caption("Ubah link Google Maps menjadi tabel (merchant_name, latitude, longitude) siap pakai.")
 
     tab_link, tab_search, tab_manual = st.tabs(
         ["🔗 Dari Link Google Maps", "🔎 Cari Nama Merchant", "✏️ Input Manual"]
@@ -815,7 +919,7 @@ elif st.session_state.page == "Extract":
             )
         with col3:
             if st.button("➡️ Gunakan di Routing Optimizer", type="primary", width='stretch'):
-                st.session_state.pending_page = "Routing"
+                st.session_state.page = "Routing"
                 st.rerun()
     else:
         st.info("Belum ada data. Tambahkan lewat link Google Maps atau input manual di atas.")
