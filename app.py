@@ -715,7 +715,8 @@ if IS_MOBILE:
     st.markdown(MOBILE_CSS, unsafe_allow_html=True)
 
 MAP_H = 260 if IS_MOBILE else 350
-TABLE_H = 260 if IS_MOBILE else None
+# Hanya kirim `height` di mode Mobile; height=None ditolak Streamlit versi baru.
+TABLE_KW = {"height": 260} if IS_MOBILE else {}
 
 
 if "round_trip_flag" not in st.session_state:
@@ -997,7 +998,7 @@ if st.session_state.page == "Routing":
         with st.expander(f"📄 Lihat Data Awal ({len(df)} baris)", expanded=False):
             if "source_file" in df.columns:
                 st.caption("💡 Kolom `source_file` menunjukkan file/sumber asal tiap baris setelah digabung.")
-            st.dataframe(df, width='stretch', height=TABLE_H)
+            st.dataframe(df, width='stretch', **TABLE_KW)
 
         section_header(
             "2️⃣", "Atur Pembagian Rute",
@@ -1163,7 +1164,7 @@ if st.session_state.page == "Routing":
                         st.dataframe(
                             optimized_df[["sequence", "merchant_name", "latitude", "longitude"]],
                             width='stretch',
-                            height=TABLE_H,
+                            **TABLE_KW,
                             hide_index=True,
                         )
                         link_df = (
@@ -1389,7 +1390,7 @@ elif st.session_state.page == "Extract":
             df_extract,
             width='stretch',
             num_rows="dynamic",
-            height=TABLE_H,
+            **TABLE_KW,
             key="extract_editor",
             column_config={
                 "latitude": st.column_config.NumberColumn(format="%.6f"),
