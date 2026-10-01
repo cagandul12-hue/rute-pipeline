@@ -106,6 +106,38 @@ st.markdown(
         border-radius: 8px 8px 0 0;
     }
 
+    /* ---------- Section headers ---------- */
+    .section-header {
+        display: flex; align-items: center; gap: 12px;
+        margin: 30px 0 14px 0;
+        padding-bottom: 10px;
+        border-bottom: 2px solid rgba(128,128,128,0.15);
+    }
+    .section-header .badge {
+        width: 36px; height: 36px; border-radius: 10px; flex-shrink: 0;
+        background: linear-gradient(135deg, #4F46E5 0%, #0EA5E9 100%);
+        display: flex; align-items: center; justify-content: center;
+        font-size: 1.05rem;
+    }
+    .section-header .title {font-weight: 800; font-size: 1.08rem; line-height: 1.3;}
+    .section-header .subtitle {font-size: 0.82rem; opacity: 0.65; margin-top: 1px;}
+
+    /* ---------- Empty state ---------- */
+    .empty-state {
+        border: 1.5px dashed rgba(128,128,128,0.35);
+        border-radius: 16px;
+        padding: 36px 24px;
+        text-align: center;
+        background: rgba(128,128,128,0.04);
+        margin-top: 8px;
+    }
+    .empty-state .emoji {font-size: 2.3rem;}
+    .empty-state .title {font-weight: 700; font-size: 1.05rem; margin-top: 12px;}
+    .empty-state .desc {
+        font-size: 0.86rem; opacity: 0.7; margin-top: 4px;
+        max-width: 440px; margin-left: auto; margin-right: auto; line-height: 1.5;
+    }
+
     div[data-testid="stSidebarNav"] {display: none;}
     </style>
     """,
@@ -120,6 +152,35 @@ def metric_card(icon, label, value):
             <div class="metric-icon">{icon}</div>
             <div class="metric-value">{value}</div>
             <div class="metric-label">{label}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def section_header(icon, title, subtitle=None):
+    subtitle_html = f'<div class="subtitle">{subtitle}</div>' if subtitle else ""
+    st.markdown(
+        f"""
+        <div class="section-header">
+            <div class="badge">{icon}</div>
+            <div>
+                <div class="title">{title}</div>
+                {subtitle_html}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def empty_state(icon, title, desc):
+    st.markdown(
+        f"""
+        <div class="empty-state">
+            <div class="emoji">{icon}</div>
+            <div class="title">{title}</div>
+            <div class="desc">{desc}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -412,7 +473,7 @@ with st.sidebar:
             <span class="emoji">🚚</span>
             <div>
                 <div class="title">Routing &amp; Extractor</div>
-                <div class="subtitle">KMeans + TSP Engine</div>
+                <div class="subtitle">Rute otomatis, lebih singkat & rapi</div>
             </div>
         </div>
         """,
@@ -444,12 +505,16 @@ with st.sidebar:
         st.rerun()
 
     st.markdown("---")
-    with st.expander("ℹ️ Cara pakai"):
+    with st.expander("ℹ️ Cara Pakai (3 Langkah)", expanded=False):
         st.write(
-            "1. Buka **Maps Extractor** untuk mengubah link Google Maps, hasil pencarian nama "
-            "merchant, atau input manual jadi tabel koordinat — atau siapkan langsung file Excel.\n\n"
-            "2. Buka **Routing Optimizer**, upload file Excel (`merchant_name`, `latitude`, `longitude`).\n\n"
-            "3. Atur jumlah titik maksimal per rute, lalu lihat hasil rute optimal di peta."
+            "**1. Kumpulkan data** 📍\n"
+            "Buka **Maps Extractor** — tempel link Google Maps, cari nama merchant, atau isi manual. "
+            "Sudah punya file Excel? Langsung lompat ke langkah 2.\n\n"
+            "**2. Buat rute** 🛣️\n"
+            "Buka **Routing Optimizer**, upload Excel (`merchant_name`, `latitude`, `longitude`), "
+            "atur maksimal titik per rute, lalu klik **Buat Rute Optimal**.\n\n"
+            "**3. Unduh & pakai** 📥\n"
+            "Lihat tiap rute di peta, buka langsung di Google Maps, atau unduh semuanya sebagai Excel."
         )
 
 
@@ -467,34 +532,40 @@ if st.session_state.page == "Routing":
         unsafe_allow_html=True,
     )
 
+    section_header(
+        "1️⃣", "Siapkan Data Merchant",
+        "Upload file Excel, pakai data dari Maps Extractor, atau gabungan keduanya",
+    )
+
     col_link, col_upload = st.columns([1, 1.3])
     with col_link:
         starting_link = st.text_input(
-            "📍 Link Google Maps Titik Awal (opsional)",
+            "📍 Titik Awal (opsional)",
             placeholder="Tempel link Google Maps di sini",
-            help="Jika diisi, titik ini akan dijadikan awal setiap rute.",
+            help="Misalnya lokasi gudang atau toko pusat. Kalau diisi, titik ini otomatis jadi awal setiap rute.",
         )
     with col_upload:
         uploaded_files = st.file_uploader(
-            "📂 Upload Excel (kolom: merchant_name, latitude, longitude) — bisa pilih lebih dari satu file",
+            "📂 Upload Data Excel",
             type=["xlsx"],
             accept_multiple_files=True,
+            help="Kolom wajib: merchant_name, latitude, longitude. Bisa pilih beberapa file sekaligus — nanti otomatis digabung.",
         )
 
     use_extracted = False
     if st.session_state.extracted_data:
         use_extracted = st.checkbox(
-            f"Gunakan {len(st.session_state.extracted_data)} data hasil ekstraksi dari halaman Maps Extractor",
+            f"📋 Pakai {len(st.session_state.extracted_data)} data dari Maps Extractor",
             value=False,
-            help="Bisa dicentang bersamaan dengan upload Excel di atas — keduanya akan digabung.",
+            help="Bisa dicentang bersamaan dengan upload Excel di atas — keduanya akan digabung otomatis.",
         )
 
     st.download_button(
-        "⬇️ Download template Excel",
+        "⬇️ Download Template Excel",
         data=make_template_excel(),
         file_name="template_routing.xlsx",
         mime="application/vnd.ms-excel",
-        help="Gunakan format ini agar file kamu langsung terbaca.",
+        help="Belum punya file? Download contoh formatnya di sini supaya langsung cocok.",
     )
 
     df = None
@@ -536,9 +607,9 @@ if st.session_state.page == "Routing":
         df = pd.concat(valid_parts, ignore_index=True)
         total_sources = len(uploaded_files or []) + (1 if use_extracted else 0)
         skipped = total_sources - len(valid_parts)
-        msg = f"✅ Berhasil menggabungkan {len(valid_parts)} sumber data ({len(df)} baris total)."
+        msg = f"✅ {len(valid_parts)} sumber data berhasil digabung — total {len(df)} baris."
         if skipped:
-            msg += f" {skipped} sumber dilewati karena error di atas."
+            msg += f" ({skipped} sumber dilewati karena error di atas)"
         if len(valid_parts) > 1:
             st.success(msg)
     elif (uploaded_files or use_extracted) and not file_errors:
@@ -551,12 +622,15 @@ if st.session_state.page == "Routing":
         df["latitude"] = pd.to_numeric(df["latitude"])
         df["longitude"] = pd.to_numeric(df["longitude"])
 
-        with st.expander("📄 Data Awal", expanded=False):
+        with st.expander(f"📄 Lihat Data Awal ({len(df)} baris)", expanded=False):
             if "source_file" in df.columns:
-                st.caption("Kolom `source_file` menunjukkan file asal tiap baris setelah digabung.")
+                st.caption("💡 Kolom `source_file` menunjukkan file/sumber asal tiap baris setelah digabung.")
             st.dataframe(df, width='stretch')
 
-        st.markdown("### ⚙️ Pengaturan Route")
+        section_header(
+            "2️⃣", "Atur Pembagian Rute",
+            "Tentukan berapa banyak merchant maksimal dalam satu rute",
+        )
         c1, c2, c3 = st.columns(3)
         with c1:
             slider_max = max(2, len(df))
@@ -577,7 +651,8 @@ if st.session_state.page == "Routing":
         with c3:
             metric_card("🧭", "Estimasi Jumlah Route", n_cluster_default)
 
-        run = st.button("🚀 Buat Rute Optimal", type="primary", width='stretch')
+        st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+        run = st.button("🚀 Buat Rute Optimal Sekarang", type="primary", width='stretch')
 
         # Fingerprint of the current input+settings, so stale results (from a
         # previous file/slider value) don't linger after the inputs change.
@@ -585,10 +660,10 @@ if st.session_state.page == "Routing":
 
         if run:
             if len(df) < 2:
-                st.warning("Minimal butuh 2 titik untuk membuat rute.")
+                st.warning("⚠️ Minimal butuh 2 titik untuk bisa membuat rute.")
                 st.stop()
 
-            with st.spinner("Mengelompokkan titik dan menghitung rute tercepat..."):
+            with st.spinner("🔄 Mengelompokkan titik dan mencari urutan kunjungan tercepat..."):
                 n_cluster = math.ceil(len(df) / max_points_per_route)
                 n_cluster = max(1, min(n_cluster, len(df)))
                 coords = df[["latitude", "longitude"]]
@@ -648,10 +723,10 @@ if st.session_state.page == "Routing":
         result = st.session_state.get("route_result")
         if result and result["fingerprint"] == data_fingerprint:
             if result["start_link_given"] and not result["start_ok"]:
-                st.warning("Link Google Maps titik awal tidak dikenali, dilewati.")
+                st.warning("⚠️ Link Google Maps titik awal tidak dikenali, jadi dilewati — rute tetap dibuat tanpa titik awal khusus.")
 
             route_summaries = result["route_summaries"]
-            st.success(f"✅ Berhasil membuat {len(route_summaries)} route optimal!")
+            st.success(f"🎉 Rute berhasil dibuat! {len(route_summaries)} rute siap dipakai.")
 
             total_distance = sum(r["distance_km"] for r in route_summaries)
             m1, m2, m3 = st.columns(3)
@@ -662,7 +737,10 @@ if st.session_state.page == "Routing":
             with m3:
                 metric_card("📏", "Estimasi Total Jarak", f"{total_distance:.1f} km")
 
-            st.markdown("### 🗺️ Detail Setiap Route")
+            section_header(
+                "3️⃣", "Rute yang Sudah Dioptimalkan",
+                "Klik tiap rute untuk lihat urutan kunjungan dan petanya",
+            )
             first_route_id = route_summaries[0]["route_id"]
             for r in route_summaries:
                 route_id = r["route_id"]
@@ -701,9 +779,9 @@ if st.session_state.page == "Routing":
                         folium.PolyLine(polyline_coords, weight=4, color=color).add_to(fmap)
                         st_folium(fmap, width=None, height=350, key=f"map_{route_id}", returned_objects=[])
 
-            st.markdown("### 📥 Unduh Hasil")
+            section_header("📥", "Unduh Hasil", "Satu file Excel berisi semua rute, rapi per-sheet")
             st.download_button(
-                label="Download Hasil Routing (Excel)",
+                label="📥 Download Hasil Routing (Excel)",
                 data=result["excel_bytes"],
                 file_name="hasil_routing.xlsx",
                 mime="application/vnd.ms-excel",
@@ -711,9 +789,13 @@ if st.session_state.page == "Routing":
                 width='stretch',
             )
         elif result and result["fingerprint"] != data_fingerprint:
-            st.info("Pengaturan atau data berubah — tekan **Buat Rute Optimal** lagi untuk memperbarui hasil.")
+            st.info("ℹ️ Pengaturan atau data berubah — tekan **Buat Rute Optimal Sekarang** lagi untuk memperbarui hasil.")
     else:
-        st.info("⬆️ Upload file Excel atau centang opsi data hasil ekstraksi untuk memulai.")
+        empty_state(
+            "📂",
+            "Belum ada data untuk diproses",
+            "Upload file Excel di atas, atau centang opsi data dari Maps Extractor untuk mulai membuat rute optimal.",
+        )
 
 # ================================================================
 # HALAMAN 2: GOOGLE MAPS EXTRACTOR
@@ -736,7 +818,7 @@ elif st.session_state.page == "Extract":
     with tab_link:
         with st.form("extractor_form", clear_on_submit=True):
             new_link = st.text_input("Paste link Google Maps di sini:")
-            submitted = st.form_submit_button("➕ Ekstrak & Tambahkan Data", width='stretch')
+            submitted = st.form_submit_button("➕ Ekstrak & Tambahkan Data", type="primary", width='stretch')
 
             if submitted:
                 if not new_link.strip():
@@ -779,10 +861,11 @@ elif st.session_state.page == "Extract":
                         )
 
     with tab_search:
-        st.caption(
-            "Pencarian gratis via OpenStreetMap (Nominatim) — tanpa API key, tapi cakupan "
-            "merchant kecil/UMKM di Indonesia masih lebih terbatas dibanding Google Maps. "
-            "Sertakan kota/wilayah supaya hasilnya lebih relevan."
+        st.info(
+            "Pencarian gratis via OpenStreetMap — tanpa API key, tapi cakupan merchant kecil/UMKM "
+            "di Indonesia masih lebih terbatas dibanding Google Maps. Sertakan kota/wilayah supaya "
+            "hasilnya lebih akurat.",
+            icon="💡",
         )
         sc1, sc2 = st.columns([2, 1])
         with sc1:
@@ -794,7 +877,7 @@ elif st.session_state.page == "Extract":
                 "Kota/wilayah (opsional)", key="nominatim_city", placeholder="contoh: Surakarta"
             )
 
-        if st.button("🔍 Cari Lokasi", width='stretch'):
+        if st.button("🔍 Cari Lokasi", type="primary", width='stretch'):
             if not search_query.strip():
                 st.error("❌ Nama merchant tidak boleh kosong.")
             else:
@@ -818,9 +901,11 @@ elif st.session_state.page == "Extract":
 
         results = st.session_state.get("nominatim_results", [])
         if results:
-            st.markdown(f"**Hasil untuk:** _{st.session_state.get('nominatim_searched_for', '')}_")
+            st.markdown(
+                f"**🔎 Ditemukan {len(results)} hasil untuk:** _{st.session_state.get('nominatim_searched_for', '')}_"
+            )
             idx_selected = st.radio(
-                "Pilih lokasi yang sesuai:",
+                "Pilih lokasi yang paling sesuai:",
                 options=list(range(len(results))),
                 format_func=lambda i: results[i].get("display_name", "(tanpa nama)"),
                 key="nominatim_selected_idx",
@@ -855,12 +940,18 @@ elif st.session_state.page == "Extract":
         with st.form("manual_form", clear_on_submit=True):
             mc1, mc2, mc3 = st.columns(3)
             with mc1:
-                manual_name = st.text_input("Nama merchant")
+                manual_name = st.text_input("Nama merchant", placeholder="contoh: Toko Berkah")
             with mc2:
-                manual_lat = st.number_input("Latitude", value=0.0, format="%.6f")
+                manual_lat = st.number_input(
+                    "Latitude", value=0.0, format="%.6f",
+                    help="Gunakan titik desimal, contoh: -7.5665",
+                )
             with mc3:
-                manual_lon = st.number_input("Longitude", value=0.0, format="%.6f")
-            manual_submit = st.form_submit_button("➕ Tambahkan Data", width='stretch')
+                manual_lon = st.number_input(
+                    "Longitude", value=0.0, format="%.6f",
+                    help="Gunakan titik desimal, contoh: 110.8167",
+                )
+            manual_submit = st.form_submit_button("➕ Tambahkan Data", type="primary", width='stretch')
 
             if manual_submit:
                 if not manual_name.strip():
@@ -874,8 +965,10 @@ elif st.session_state.page == "Extract":
                     st.success(f"✅ Berhasil menambahkan: {manual_name}")
 
     if len(st.session_state.extracted_data) > 0:
-        st.markdown("### 📋 Hasil Ekstraksi")
-        st.caption("Klik dua kali pada sel untuk mengubah nilai, atau centang baris lalu tekan delete untuk menghapus.")
+        section_header(
+            "📋", "Data yang Sudah Dikumpulkan",
+            f"{len(st.session_state.extracted_data)} lokasi — klik dua kali sel untuk edit, atau hapus baris yang tidak perlu",
+        )
 
         df_extract = pd.DataFrame(st.session_state.extracted_data)
         edited_df = st.data_editor(
@@ -901,9 +994,9 @@ elif st.session_state.page == "Extract":
                     folium.Marker([row["latitude"], row["longitude"]], popup=row["merchant_name"]).add_to(fmap)
                 st_folium(fmap, width=None, height=350, key="extract_map", returned_objects=[])
 
-        col1, col2, col3 = st.columns([1, 1, 1])
+        col1, col2, col3 = st.columns([1, 1, 1.3])
         with col1:
-            if st.button("🗑️ Hapus Semua Data", width='stretch'):
+            if st.button("🗑️ Hapus Semua", width='stretch'):
                 st.session_state.extracted_data = []
                 st.rerun()
         with col2:
@@ -918,8 +1011,12 @@ elif st.session_state.page == "Extract":
                 width='stretch',
             )
         with col3:
-            if st.button("➡️ Gunakan di Routing Optimizer", type="primary", width='stretch'):
+            if st.button("➡️ Pakai di Routing Optimizer", type="primary", width='stretch'):
                 st.session_state.page = "Routing"
                 st.rerun()
     else:
-        st.info("Belum ada data. Tambahkan lewat link Google Maps atau input manual di atas.")
+        empty_state(
+            "🗺️",
+            "Belum ada lokasi yang dikumpulkan",
+            "Tempel link Google Maps, cari nama merchant, atau isi manual lewat tab di atas untuk mulai mengumpulkan data.",
+        )
