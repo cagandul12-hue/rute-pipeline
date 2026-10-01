@@ -459,6 +459,21 @@ def balance_clusters(df, max_points_per_route):
     return df
 
 
+def _max_points_control(df):
+    """Slider 'maksimal titik per route' (dipakai di mode Desktop & Handphone)."""
+    slider_max = max(2, len(df))
+    if slider_max <= 2:
+        # st.slider needs min_value < max_value; with only 2
+        # merchants there's only one sensible route anyway.
+        metric_card("📍", "Maksimal titik per route", slider_max)
+        return slider_max
+    return st.slider(
+        "Maksimal titik per route", min_value=2, max_value=slider_max,
+        value=slider_max,
+        help="Default = total merchant, sehingga semua muat dalam 1 rute. Geser ke bawah untuk memecah jadi beberapa rute.",
+    )
+
+
 def validate_dataframe(df):
     """Returns (is_valid, list_of_error_messages)."""
     errors = []
@@ -528,6 +543,97 @@ if "starting_link_saved" not in st.session_state:
     st.session_state.starting_link_saved = ""
 
 
+def _detect_default_mode():
+    """Tebak mode awal dari User-Agent: HP -> Handphone, selain itu Desktop."""
+    try:
+        ua = (st.context.headers.get("User-Agent") or "").lower()
+    except Exception:
+        return "Desktop"
+    return "Handphone" if ("iphone" in ua or "ipod" in ua or "mobile" in ua) else "Desktop"
+
+
+if "view_mode" not in st.session_state:
+    st.session_state.view_mode = _detect_default_mode()
+IS_MOBILE = st.session_state.view_mode == "Handphone"
+
+MOBILE_CSS = """
+<style>
+/* ===== MODE HANDPHONE ===== */
+.block-container {padding: 3.4rem 0.8rem 4rem 0.8rem !important; max-width: 100% !important;}
+section[data-testid="stSidebar"],
+[data-testid="stSidebarCollapsedControl"],
+[data-testid="collapsedControl"] {display: none !important;}
+
+.hero-header {padding: 16px 16px; border-radius: 14px; margin-bottom: 14px;}
+.hero-header h1 {font-size: 1.25rem;}
+.hero-header p {font-size: 0.8rem; line-height: 1.4;}
+.section-header {margin: 20px 0 10px 0; gap: 10px;}
+.section-header .badge {width: 32px; height: 32px;}
+.metric-card {padding: 12px 14px;}
+.metric-card .metric-value {font-size: 1.25rem;}
+.empty-state {padding: 26px 16px;}
+
+/* target sentuh lebih besar + cegah zoom otomatis iOS */
+.stButton > button, .stDownloadButton > button, .stLinkButton > a {
+    min-height: 3rem; font-size: 1rem !important;
+}
+input, textarea, [data-baseweb="select"] {font-size: 16px !important;}
+[data-testid="stFileUploaderDropzone"] {padding: 1rem;}
+
+/* semua kolom ditumpuk ke bawah */
+[data-testid="stHorizontalBlock"] {flex-direction: column !important; gap: 0.6rem !important;}
+[data-testid="stHorizontalBlock"] > [data-testid="stColumn"],
+[data-testid="stHorizontalBlock"] > [data-testid="column"] {
+    width: 100% !important; flex: 1 1 100% !important; min-width: 100% !important;
+}
+
+/* pengecualian: baris yang tetap berdampingan */
+.st-key-navrow [data-testid="stHorizontalBlock"],
+.st-key-moderow [data-testid="stHorizontalBlock"],
+[class*="st-key-filerow"] [data-testid="stHorizontalBlock"] {
+    flex-direction: row !important; flex-wrap: nowrap !important; gap: 0.5rem !important;
+}
+.st-key-navrow [data-testid="stHorizontalBlock"] > [data-testid="stColumn"],
+.st-key-moderow [data-testid="stHorizontalBlock"] > [data-testid="stColumn"],
+.st-key-navrow [data-testid="stHorizontalBlock"] > [data-testid="column"],
+.st-key-moderow [data-testid="stHorizontalBlock"] > [data-testid="column"] {
+    width: auto !important; flex: 1 1 0 !important; min-width: 0 !important;
+}
+.st-key-moderow .stButton > button {min-height: 2.4rem; font-size: 0.85rem !important;}
+[class*="st-key-filerow"] [data-testid="stColumn"]:first-child,
+[class*="st-key-filerow"] [data-testid="column"]:first-child {
+    width: auto !important; flex: 1 1 0 !important; min-width: 0 !important; overflow-wrap: anywhere;
+}
+[class*="st-key-filerow"] [data-testid="stColumn"]:last-child,
+[class*="st-key-filerow"] [data-testid="column"]:last-child {
+    width: 3.2rem !important; flex: 0 0 3.2rem !important; min-width: 3.2rem !important;
+}
+
+/* kartu metrik: 2 kolom (grid) */
+.st-key-grid2 [data-testid="stHorizontalBlock"],
+.st-key-grid4 [data-testid="stHorizontalBlock"] {
+    flex-direction: row !important; flex-wrap: wrap !important; gap: 0.6rem !important;
+}
+.st-key-grid2 [data-testid="stHorizontalBlock"] > [data-testid="stColumn"],
+.st-key-grid4 [data-testid="stHorizontalBlock"] > [data-testid="stColumn"],
+.st-key-grid2 [data-testid="stHorizontalBlock"] > [data-testid="column"],
+.st-key-grid4 [data-testid="stHorizontalBlock"] > [data-testid="column"] {
+    width: calc(50% - 0.3rem) !important; flex: 0 0 calc(50% - 0.3rem) !important;
+    min-width: calc(50% - 0.3rem) !important;
+}
+
+.stTabs [role="tablist"] {overflow-x: auto;}
+.stTabs [data-baseweb="tab"] {padding: 0.5rem 0.7rem;}
+div[data-testid="stExpander"] {margin-bottom: 10px; border-radius: 12px !important;}
+</style>
+"""
+if IS_MOBILE:
+    st.markdown(MOBILE_CSS, unsafe_allow_html=True)
+
+MAP_H = 260 if IS_MOBILE else 350
+TABLE_H = 260 if IS_MOBILE else None
+
+
 def _sync_use_extracted():
     st.session_state.use_extracted_flag = st.session_state._use_extracted_widget
 
@@ -536,47 +642,65 @@ def _sync_starting_link():
     st.session_state.starting_link_saved = st.session_state._starting_link_widget
 
 # ==========================================================================================
-# SIDEBAR NAVIGATION
+# NAVIGASI + PILIHAN MODE TAMPILAN
 # ==========================================================================================
-with st.sidebar:
-    st.markdown(
-        """
-        <div class="sidebar-brand">
-            <span class="emoji">🏎️</span>
-            <div>
-                <div class="title">Routing &amp; Extractor</div>
-                <div class="subtitle">Rute otomatis, lebih singkat & rapi</div>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+def _set_mode(mode):
+    st.session_state.view_mode = mode
 
+
+def render_mode_toggle(prefix):
+    """Dua tombol: 🖥️ Desktop | 📱 Handphone."""
+    mode = st.session_state.view_mode
+    m1, m2 = st.columns(2)
+    with m1:
+        st.button(
+            "🖥️ Desktop", key=f"{prefix}_mode_desktop", width='stretch',
+            type="primary" if mode == "Desktop" else "secondary",
+            on_click=_set_mode, args=("Desktop",),
+        )
+    with m2:
+        st.button(
+            "📱 Handphone", key=f"{prefix}_mode_mobile", width='stretch',
+            type="primary" if mode == "Handphone" else "secondary",
+            on_click=_set_mode, args=("Handphone",),
+        )
+
+
+def render_nav(prefix, horizontal=False):
     # Plain buttons (not a key-bound widget) so the active page can be set
     # programmatically from anywhere — e.g. the "pakai di Routing Optimizer"
     # button on the Extract page — without hitting Streamlit's restriction
     # on mutating a widget's own session-state key after it's been created.
     nav_routing_active = st.session_state.page == "Routing"
     nav_extract_active = st.session_state.page == "Extract"
+    label_routing = "🛣️ Routing" if horizontal else "🛣️  Routing Optimizer"
+    label_extract = "📍 Extractor" if horizontal else "📍  Maps Extractor"
 
-    if st.button(
-        "🛣️  Routing Optimizer",
-        width='stretch',
-        type="primary" if nav_routing_active else "secondary",
-    ):
+    if horizontal:
+        n1, n2 = st.columns(2)
+    else:
+        n1 = n2 = st.container()
+
+    with n1:
+        go_routing = st.button(
+            label_routing, key=f"{prefix}_nav_routing", width='stretch',
+            type="primary" if nav_routing_active else "secondary",
+        )
+    with n2:
+        go_extract = st.button(
+            label_extract, key=f"{prefix}_nav_extract", width='stretch',
+            type="primary" if nav_extract_active else "secondary",
+        )
+
+    if go_routing:
         st.session_state.page = "Routing"
         st.rerun()
-
-    if st.button(
-        "📍  Maps Extractor",
-        width='stretch',
-        type="primary" if nav_extract_active else "secondary",
-    ):
+    if go_extract:
         st.session_state.page = "Extract"
         st.rerun()
 
-    st.markdown("---")
+
+def render_howto():
     with st.expander("ℹ️ Cara Pakai (3 Langkah)", expanded=False):
         st.write(
             "**1. Kumpulkan data** 📍\n"
@@ -588,6 +712,36 @@ with st.sidebar:
             "**3. Unduh & pakai** 📥\n"
             "Lihat tiap rute di peta, buka langsung di Google Maps, atau unduh semuanya sebagai Excel."
         )
+
+
+if IS_MOBILE:
+    # Di HP sidebar disembunyikan (susah dibuka) — navigasi & mode pindah ke atas halaman.
+    with st.container(key="navrow"):
+        render_nav("top", horizontal=True)
+    with st.container(key="moderow"):
+        render_mode_toggle("top")
+    render_howto()
+else:
+    with st.sidebar:
+        st.markdown(
+            """
+            <div class="sidebar-brand">
+                <span class="emoji">🏎️</span>
+                <div>
+                    <div class="title">Routing &amp; Extractor</div>
+                    <div class="subtitle">Rute otomatis, lebih singkat & rapi</div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+        render_nav("side")
+        st.markdown("---")
+        st.caption("Mode tampilan")
+        render_mode_toggle("side")
+        st.markdown("---")
+        render_howto()
 
 
 # ================================================================
@@ -636,14 +790,15 @@ if st.session_state.page == "Routing":
     # Daftar file yang tersimpan (tetap ada setelah pindah halaman)
     if st.session_state.uploaded_store:
         st.caption(f"📎 {len(st.session_state.uploaded_store)} file tersimpan")
-        for fname in list(st.session_state.uploaded_store.keys()):
-            fc1, fc2 = st.columns([6, 1])
-            with fc1:
-                st.markdown(f"📄 `{fname}`")
-            with fc2:
-                if st.button("✖", key=f"rm_{fname}", help=f"Hapus {fname}"):
-                    st.session_state.uploaded_store.pop(fname, None)
-                    st.rerun()
+        for i, fname in enumerate(list(st.session_state.uploaded_store.keys())):
+            with st.container(key=f"filerow_{i}"):
+                fc1, fc2 = st.columns([6, 1])
+                with fc1:
+                    st.markdown(f"📄 `{fname}`")
+                with fc2:
+                    if st.button("✖", key=f"rm_{fname}", help=f"Hapus {fname}"):
+                        st.session_state.uploaded_store.pop(fname, None)
+                        st.rerun()
 
     use_extracted = False
     if st.session_state.extracted_data:
@@ -722,31 +877,30 @@ if st.session_state.page == "Routing":
         with st.expander(f"📄 Lihat Data Awal ({len(df)} baris)", expanded=False):
             if "source_file" in df.columns:
                 st.caption("💡 Kolom `source_file` menunjukkan file/sumber asal tiap baris setelah digabung.")
-            st.dataframe(df, width='stretch')
+            st.dataframe(df, width='stretch', height=TABLE_H)
 
         section_header(
             "2️⃣", "Atur Pembagian Rute",
             "Tentukan berapa banyak merchant maksimal dalam satu rute",
         )
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            slider_max = max(2, len(df))
-            if slider_max <= 2:
-                # st.slider needs min_value < max_value; with only 2
-                # merchants there's only one sensible route anyway.
-                max_points_per_route = slider_max
-                metric_card("📍", "Maksimal titik per route", max_points_per_route)
-            else:
-                max_points_per_route = st.slider(
-                    "Maksimal titik per route", min_value=2, max_value=slider_max,
-                    value=slider_max,
-                    help="Default = total merchant, sehingga semua muat dalam 1 rute. Geser ke bawah untuk memecah jadi beberapa rute.",
-                )
-        n_cluster_default = math.ceil(len(df) / max_points_per_route)
-        with c2:
-            metric_card("🏪", "Total Merchant", len(df))
-        with c3:
-            metric_card("🧭", "Estimasi Jumlah Route", n_cluster_default)
+        if IS_MOBILE:
+            max_points_per_route = _max_points_control(df)
+            n_cluster_default = math.ceil(len(df) / max_points_per_route)
+            with st.container(key="grid2"):
+                c2, c3 = st.columns(2)
+                with c2:
+                    metric_card("🏪", "Total Merchant", len(df))
+                with c3:
+                    metric_card("🧭", "Estimasi Jumlah Route", n_cluster_default)
+        else:
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                max_points_per_route = _max_points_control(df)
+            n_cluster_default = math.ceil(len(df) / max_points_per_route)
+            with c2:
+                metric_card("🏪", "Total Merchant", len(df))
+            with c3:
+                metric_card("🧭", "Estimasi Jumlah Route", n_cluster_default)
 
         st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
         run = st.button("🚀 Buat Rute Optimal Sekarang", type="primary", width='stretch')
@@ -849,15 +1003,16 @@ if st.session_state.page == "Routing":
 
             total_distance = sum(r["distance_km"] for r in route_summaries)
             total_duration = sum(r["duration_sec"] for r in route_summaries)
-            m1, m2, m3, m4 = st.columns(4)
-            with m1:
-                metric_card("🧭", "Total Route", len(route_summaries))
-            with m2:
-                metric_card("📍", "Total Titik", result["total_points"])
-            with m3:
-                metric_card("📏", "Estimasi Total Jarak", f"{total_distance:.1f} km")
-            with m4:
-                metric_card("⏱️", "Estimasi Waktu Tempuh", format_duration(total_duration))
+            with st.container(key="grid4"):
+                m1, m2, m3, m4 = st.columns(4)
+                with m1:
+                    metric_card("🧭", "Total Route", len(route_summaries))
+                with m2:
+                    metric_card("📍", "Total Titik", result["total_points"])
+                with m3:
+                    metric_card("📏", "Estimasi Total Jarak", f"{total_distance:.1f} km")
+                with m4:
+                    metric_card("⏱️", "Estimasi Waktu Tempuh", format_duration(total_duration))
 
             section_header(
                 "3️⃣", "Rute yang Sudah Dioptimalkan",
@@ -880,6 +1035,7 @@ if st.session_state.page == "Routing":
                         st.dataframe(
                             optimized_df[["sequence", "merchant_name", "latitude", "longitude"]],
                             width='stretch',
+                            height=TABLE_H,
                             hide_index=True,
                         )
                         maps_url = generate_google_maps_link(optimized_df)
@@ -900,7 +1056,7 @@ if st.session_state.page == "Routing":
                                 icon=folium.Icon(color="blue" if idx > 0 else "green"),
                             ).add_to(fmap)
                         folium.PolyLine(polyline_coords, weight=4, color=color).add_to(fmap)
-                        st_folium(fmap, width=None, height=350, key=f"map_{route_id}", returned_objects=[])
+                        st_folium(fmap, width=None, height=MAP_H, key=f"map_{route_id}", returned_objects=[])
 
             section_header("📥", "Unduh Hasil", "Satu file Excel berisi semua rute, rapi per-sheet")
             st.download_button(
@@ -935,7 +1091,8 @@ elif st.session_state.page == "Extract":
     )
 
     tab_link, tab_search, tab_manual = st.tabs(
-        ["🔗 Dari Link Google Maps", "🔎 Cari Nama Merchant", "✏️ Input Manual"]
+        ["🔗 Link", "🔎 Cari", "✏️ Manual"] if IS_MOBILE
+        else ["🔗 Dari Link Google Maps", "🔎 Cari Nama Merchant", "✏️ Input Manual"]
     )
 
     with tab_link:
@@ -1098,6 +1255,7 @@ elif st.session_state.page == "Extract":
             df_extract,
             width='stretch',
             num_rows="dynamic",
+            height=TABLE_H,
             key="extract_editor",
             column_config={
                 "latitude": st.column_config.NumberColumn(format="%.6f"),
@@ -1115,7 +1273,7 @@ elif st.session_state.page == "Extract":
                 )
                 for _, row in valid_points.iterrows():
                     folium.Marker([row["latitude"], row["longitude"]], popup=row["merchant_name"]).add_to(fmap)
-                st_folium(fmap, width=None, height=350, key="extract_map", returned_objects=[])
+                st_folium(fmap, width=None, height=MAP_H, key="extract_map", returned_objects=[])
 
         col1, col2, col3 = st.columns([1, 1, 1.3])
         with col1:
