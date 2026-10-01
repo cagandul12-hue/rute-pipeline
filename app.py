@@ -564,6 +564,34 @@ def balance_clusters(df, max_points_per_route):
     return df
 
 
+def fill_clusters(df, max_points_per_route):
+    """Bagi titik jadi rute yang diisi PENUH sesuai maksimal (mis. 16 titik, maks 10 -> 10 + 6).
+
+    Tiap rute dibangun dengan cara: ambil titik terluar dari sisa titik sebagai
+    awal, lalu tambahkan terus titik terdekat dari pusat kelompok sampai penuh.
+    Rute-rute awal biasanya rapat; rute terakhir berisi sisa (bisa lebih tersebar).
+    Mengembalikan array label rute (0, 1, 2, ...) berurutan sesuai indeks df.
+    """
+    coords = df[["latitude", "longitude"]].to_numpy(dtype=float)
+    n = len(coords)
+    labels = np.full(n, -1, dtype=int)
+    remaining = list(range(n))
+    route_id = 0
+    while remaining:
+        pts = coords[remaining]
+        center = pts.mean(axis=0)
+        seed_pos = int(np.argmax(((pts - center) ** 2).sum(axis=1)))
+        group = [remaining.pop(seed_pos)]
+        while len(group) < max_points_per_route and remaining:
+            gc = coords[group].mean(axis=0)
+            rem_pts = coords[remaining]
+            nearest = int(np.argmin(((rem_pts - gc) ** 2).sum(axis=1)))
+            group.append(remaining.pop(nearest))
+        labels[group] = route_id
+        route_id += 1
+    return labels
+
+
 def _max_points_control(df):
     """Slider 'maksimal titik per route' (dipakai di mode Desktop & Mobile)."""
     slider_max = max(2, len(df))
@@ -738,6 +766,21 @@ if IS_MOBILE:
 MAP_H = 260 if IS_MOBILE else 350
 # Hanya kirim `height` di mode Mobile; height=None ditolak Streamlit versi baru.
 TABLE_KW = {"height": 260} if IS_MOBILE else {}
+
+
+SPLIT_FULL = "📦 Isi penuh"
+SPLIT_AUTO = "🧭 Otomatis (per area)"
+if "split_mode_flag" not in st.session_state:
+    st.session_state.split_mode_flag = SPLIT_AUTO
+
+
+def _sync_split():
+    st.session_state.split_mode_flag = st.session_state._split_widget
+
+
+def _fmt_sizes(sizes):
+    shown = " + ".join(str(x) for x in sizes[:5])
+    return shown + (" + …" if len(sizes) > 5 else "")
 
 
 if "round_trip_flag" not in st.session_state:
@@ -1044,6 +1087,33 @@ if st.session_state.page == "Routing":
             with c3:
                 metric_card("🧭", "Estimasi Jumlah Route", n_cluster_default)
 
+        if n_cluster_default > 1:
+            split_mode = st.radio(
+                "Cara membagi rute",
+                [SPLIT_AUTO, SPLIT_FULL],
+                index=0 if st.session_state.split_mode_flag == SPLIT_AUTO else 1,
+                key="_split_widget",
+                on_change=_sync_split,
+                horizontal=not IS_MOBILE,
+                help=(
+                    "Otomatis: merchant dikelompokkan menurut area/kedekatan lokasi, jadi jarak tempuh "
+                    "lebih pendek, tapi isi tiap rute bisa berbeda (selalu di bawah atau sama dengan maksimal). "
+                    "Isi penuh: tiap rute diisi sampai batas maksimal dan sisanya masuk rute terakhir, "
+                    "tapi rute bisa lebih melebar karena merchant dari area lain ikut terambil."
+                ),
+            )
+            _n, _k, _m = len(df), n_cluster_default, max_points_per_route
+            if split_mode == SPLIT_FULL:
+                full_sizes = [_m] * (_k - 1) + [_n - _m * (_k - 1)]
+                st.caption(f"Isi tiap rute: {_fmt_sizes(full_sizes)} merchant.")
+            else:
+                st.caption(
+                    f"Pembagian mengikuti area lokasi — {_k} rute, masing-masing maksimal {_m} merchant. "
+                    "Pilih **Isi penuh** kalau ingin tiap rute berisi tepat sebanyak maksimal."
+                )
+        else:
+            split_mode = st.session_state.split_mode_flag
+
         round_trip = st.checkbox(
             "🔁 Kembali ke titik awal setelah rute selesai",
             value=st.session_state.round_trip_flag,
@@ -1061,7 +1131,7 @@ if st.session_state.page == "Routing":
 
         # Fingerprint of the current input+settings, so stale results (from a
         # previous file/slider value) don't linger after the inputs change.
-        data_fingerprint = (len(df), tuple(df["merchant_name"]), max_points_per_route, starting_link, round_trip)
+        data_fingerprint = (len(df), tuple(df["merchant_name"]), max_points_per_route, starting_link, round_trip, split_mode)
 
         if run:
             if len(df) < 2:
@@ -1071,10 +1141,13 @@ if st.session_state.page == "Routing":
             with st.spinner("🔄 Mengelompokkan titik dan mencari rute tercepat di jalan asli..."):
                 n_cluster = math.ceil(len(df) / max_points_per_route)
                 n_cluster = max(1, min(n_cluster, len(df)))
-                coords = df[["latitude", "longitude"]]
-                kmeans = KMeans(n_clusters=n_cluster, random_state=42, n_init=10)
-                df["route"] = kmeans.fit_predict(coords)
-                df = balance_clusters(df, max_points_per_route)
+                if n_cluster > 1 and split_mode == SPLIT_FULL:
+                    df["route"] = fill_clusters(df, max_points_per_route)
+                else:
+                    coords = df[["latitude", "longitude"]]
+                    kmeans = KMeans(n_clusters=n_cluster, random_state=42, n_init=10)
+                    df["route"] = kmeans.fit_predict(coords)
+                    df = balance_clusters(df, max_points_per_route)
 
                 start_name, start_lat, start_lon = "START POINT", None, None
                 if starting_link:
