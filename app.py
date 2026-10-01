@@ -396,18 +396,39 @@ def route_leg_sum(matrix, order, round_trip=False):
     return sum(matrix[path[i]][path[i + 1]] for i in range(len(path) - 1))
 
 
-def generate_google_maps_link(df):
+# Batas titik singgah (waypoints) di link Google Maps menurut dokumentasi resmi:
+# maks. 9 di desktop/aplikasi, tapi hanya 3 di browser HP. Kalau lebih, titik
+# singgah berlebih DIBUANG diam-diam oleh Google Maps — makanya rute dipecah.
+MAPS_MAX_WAYPOINTS_DESKTOP = 9
+MAPS_MAX_WAYPOINTS_MOBILE = 3
+
+
+def generate_google_maps_links(df, max_waypoints):
+    """Pecah rute jadi beberapa link Google Maps.
+
+    Tiap link berisi origin + maksimal `max_waypoints` titik singgah + destination.
+    Link berikutnya dimulai dari titik akhir link sebelumnya, sehingga urutan tetap
+    tersambung. Mengembalikan list (indeks_awal, indeks_akhir, url) — indeks 0-based
+    pada baris df.
+    """
     coords = [f"{row.latitude},{row.longitude}" for _, row in df.iterrows()]
     if len(coords) < 2:
-        return None
-    origin = coords[0]
-    destination = coords[-1]
-    waypoints = "%7C".join(coords[1:-1])
-    url = f"https://www.google.com/maps/dir/?api=1&origin={origin}&destination={destination}"
-    if waypoints:
-        url += f"&waypoints={waypoints}"
-    url += "&travelmode=driving"
-    return url
+        return []
+    step = max_waypoints + 1
+    links = []
+    start = 0
+    while start < len(coords) - 1:
+        end = min(start + step, len(coords) - 1)
+        seg = coords[start:end + 1]
+        url = (
+            f"https://www.google.com/maps/dir/?api=1&origin={seg[0]}&destination={seg[-1]}"
+        )
+        if len(seg) > 2:
+            url += "&waypoints=" + "%7C".join(seg[1:-1])
+        url += "&travelmode=driving"
+        links.append((start, end, url))
+        start = end
+    return links
 
 
 SHORT_LINK_DOMAINS = ("maps.app.goo.gl", "goo.gl/maps", "app.goo.gl")
@@ -1167,13 +1188,30 @@ if st.session_state.page == "Routing":
                             **TABLE_KW,
                             hide_index=True,
                         )
+                        is_round = bool(r.get("round_trip"))
                         link_df = (
                             pd.concat([optimized_df, optimized_df.iloc[[0]]], ignore_index=True)
-                            if r.get("round_trip") else optimized_df
+                            if is_round else optimized_df
                         )
-                        maps_url = generate_google_maps_link(link_df)
-                        if maps_url:
-                            st.link_button("🚗 Buka di Google Maps", maps_url, width='stretch')
+                        seq_nums = list(optimized_df["sequence"]) + (
+                            [optimized_df["sequence"].iloc[0]] if is_round else []
+                        )
+                        max_wp = MAPS_MAX_WAYPOINTS_MOBILE if IS_MOBILE else MAPS_MAX_WAYPOINTS_DESKTOP
+                        map_links = generate_google_maps_links(link_df, max_wp)
+                        if len(map_links) == 1:
+                            st.link_button("🚗 Buka di Google Maps", map_links[0][2], width='stretch')
+                        elif len(map_links) > 1:
+                            st.caption(
+                                f"ℹ️ Google Maps membatasi titik singgah (maks. {max_wp} per link), "
+                                f"jadi rute dibagi jadi {len(map_links)} link. Buka berurutan — "
+                                "tiap bagian dimulai dari titik akhir bagian sebelumnya."
+                            )
+                            for i, (ia, ib, url) in enumerate(map_links, start=1):
+                                st.link_button(
+                                    f"🚗 Bagian {i}/{len(map_links)} · titik {seq_nums[ia]} → {seq_nums[ib]}",
+                                    url,
+                                    width='stretch',
+                                )
 
                     with right:
                         center_lat = optimized_df["latitude"].mean()
