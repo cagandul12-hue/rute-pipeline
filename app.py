@@ -17,7 +17,7 @@ from streamlit_folium import st_folium
 
 st.set_page_config(
     page_title="Routing & Extractor System",
-    page_icon="🚚",
+    page_icon="🏎️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -470,7 +470,7 @@ with st.sidebar:
     st.markdown(
         """
         <div class="sidebar-brand">
-            <span class="emoji">🚚</span>
+            <span class="emoji">🏎️</span>
             <div>
                 <div class="title">Routing &amp; Extractor</div>
                 <div class="subtitle">Rute otomatis, lebih singkat & rapi</div>
@@ -526,7 +526,7 @@ if st.session_state.page == "Routing":
         """
         <div class="hero-header">
             <h1>🛣️ Routing Pipeline Optimizer</h1>
-            <p>Optimalkan rute pengiriman dengan clustering (KMeans) dan penentuan urutan kunjungan (TSP).</p>
+            <p>Optimalkan rute kunjungan dengan clustering (KMeans) dan penentuan urutan kunjungan (TSP).</p>
         </div>
         """,
         unsafe_allow_html=True,
