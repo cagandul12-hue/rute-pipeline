@@ -207,6 +207,8 @@ def haversine(lat1, lon1, lat2, lon2):
 
 
 def create_distance_matrix(df):
+    """Straight-line (haversine) distance matrix in meters — used as the
+    fallback when real road data (OSRM) isn't available."""
     n = len(df)
     lat = df["latitude"].to_numpy()
     lon = df["longitude"].to_numpy()
@@ -218,14 +220,66 @@ def create_distance_matrix(df):
     return matrix
 
 
-def route_total_distance_km(df_ordered):
-    total = 0.0
-    for i in range(len(df_ordered) - 1):
-        total += haversine(
-            df_ordered.iloc[i]["latitude"], df_ordered.iloc[i]["longitude"],
-            df_ordered.iloc[i + 1]["latitude"], df_ordered.iloc[i + 1]["longitude"],
-        )
-    return total
+OSRM_BASE_URL = "https://router.project-osrm.org"
+FALLBACK_SPEED_KMH = 30  # used only if OSRM is unreachable
+
+
+def get_route_matrices(df):
+    """Returns (distance_matrix_meters, duration_matrix_seconds, used_real_roads).
+
+    Tries OSRM's public routing service first, which follows the actual
+    road network (one-ways, detours, etc.) instead of a straight line — so
+    both the TSP ordering and the reported distance/time reflect real
+    driving conditions. Falls back to haversine straight-line distance
+    with an assumed average speed if OSRM is unreachable, rate-limited, or
+    the request fails for any other reason.
+    """
+    n = len(df)
+    if n < 2:
+        return [[0]], [[0]], True
+
+    try:
+        coords = ";".join(f"{row.longitude},{row.latitude}" for _, row in df.iterrows())
+        url = f"{OSRM_BASE_URL}/table/v1/driving/{coords}"
+        resp = requests.get(url, params={"annotations": "distance,duration"}, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") != "Ok":
+            raise ValueError(data.get("message", "OSRM returned an error"))
+
+        raw_distances = data["distances"]
+        raw_durations = data["durations"]
+        # OSRM can return null for a pair it couldn't route between; treat
+        # that as "very far" so the TSP solver avoids it rather than crashing.
+        distance_matrix = [
+            [int(raw_distances[i][j]) if raw_distances[i][j] is not None else 10_000_000 for j in range(n)]
+            for i in range(n)
+        ]
+        duration_matrix = [
+            [raw_durations[i][j] if raw_durations[i][j] is not None else 0 for j in range(n)]
+            for i in range(n)
+        ]
+        return distance_matrix, duration_matrix, True
+    except Exception:
+        distance_matrix = create_distance_matrix(df)
+        duration_matrix = [
+            [
+                (distance_matrix[i][j] / 1000) / FALLBACK_SPEED_KMH * 3600 if i != j else 0
+                for j in range(n)
+            ]
+            for i in range(n)
+        ]
+        return distance_matrix, duration_matrix, False
+
+
+def format_duration(seconds):
+    if seconds is None:
+        return "–"
+    minutes = round(seconds / 60)
+    if minutes < 60:
+        return f"{minutes} menit"
+    hours, rem = divmod(minutes, 60)
+    return f"{hours} jam {rem} menit" if rem else f"{hours} jam"
 
 
 def solve_tsp(distance_matrix):
@@ -663,7 +717,7 @@ if st.session_state.page == "Routing":
                 st.warning("⚠️ Minimal butuh 2 titik untuk bisa membuat rute.")
                 st.stop()
 
-            with st.spinner("🔄 Mengelompokkan titik dan mencari urutan kunjungan tercepat..."):
+            with st.spinner("🔄 Mengelompokkan titik dan mencari rute tercepat di jalan asli..."):
                 n_cluster = math.ceil(len(df) / max_points_per_route)
                 n_cluster = max(1, min(n_cluster, len(df)))
                 coords = df[["latitude", "longitude"]]
@@ -678,6 +732,7 @@ if st.session_state.page == "Routing":
 
                 all_routes = []
                 route_summaries = []
+                any_fallback_used = False
                 for route_id in sorted(df["route"].unique()):
                     route_df = df[df["route"] == route_id].reset_index(drop=True)
 
@@ -687,17 +742,30 @@ if st.session_state.page == "Routing":
                         )
                         route_df = pd.concat([start_df, route_df], ignore_index=True)
 
-                    distance_matrix = create_distance_matrix(route_df)
+                    distance_matrix, duration_matrix, used_real_roads = get_route_matrices(route_df)
+                    any_fallback_used = any_fallback_used or not used_real_roads
+
                     best_route = solve_tsp(distance_matrix)
                     optimized_df = route_df.iloc[best_route].reset_index(drop=True)
                     optimized_df["sequence"] = optimized_df.index + 1
                     optimized_df["route_name"] = f"Route {route_id + 1}"
                     all_routes.append(optimized_df)
+
+                    route_distance_km = sum(
+                        distance_matrix[best_route[i]][best_route[i + 1]]
+                        for i in range(len(best_route) - 1)
+                    ) / 1000
+                    route_duration_sec = sum(
+                        duration_matrix[best_route[i]][best_route[i + 1]]
+                        for i in range(len(best_route) - 1)
+                    )
+
                     route_summaries.append(
                         {
                             "route_id": route_id,
                             "df": optimized_df,
-                            "distance_km": route_total_distance_km(optimized_df),
+                            "distance_km": route_distance_km,
+                            "duration_sec": route_duration_sec,
                         }
                     )
 
@@ -718,6 +786,7 @@ if st.session_state.page == "Routing":
                 "excel_bytes": buffer.getvalue(),
                 "start_ok": bool(start_lat and start_lon),
                 "start_link_given": bool(starting_link),
+                "used_real_roads": not any_fallback_used,
             }
 
         result = st.session_state.get("route_result")
@@ -725,17 +794,27 @@ if st.session_state.page == "Routing":
             if result["start_link_given"] and not result["start_ok"]:
                 st.warning("⚠️ Link Google Maps titik awal tidak dikenali, jadi dilewati — rute tetap dibuat tanpa titik awal khusus.")
 
+            if not result.get("used_real_roads", True):
+                st.warning(
+                    "⚠️ Tidak bisa terhubung ke layanan rute jalan asli (OSRM) — jarak & waktu tempuh "
+                    "di bawah ini dihitung dari estimasi garis lurus, jadi bisa kurang akurat "
+                    "dibanding kondisi jalan sebenarnya."
+                )
+
             route_summaries = result["route_summaries"]
             st.success(f"🎉 Rute berhasil dibuat! {len(route_summaries)} rute siap dipakai.")
 
             total_distance = sum(r["distance_km"] for r in route_summaries)
-            m1, m2, m3 = st.columns(3)
+            total_duration = sum(r["duration_sec"] for r in route_summaries)
+            m1, m2, m3, m4 = st.columns(4)
             with m1:
                 metric_card("🧭", "Total Route", len(route_summaries))
             with m2:
                 metric_card("📍", "Total Titik", result["total_points"])
             with m3:
                 metric_card("📏", "Estimasi Total Jarak", f"{total_distance:.1f} km")
+            with m4:
+                metric_card("⏱️", "Estimasi Waktu Tempuh", format_duration(total_duration))
 
             section_header(
                 "3️⃣", "Rute yang Sudah Dioptimalkan",
@@ -749,7 +828,8 @@ if st.session_state.page == "Routing":
                 emoji = ROUTE_EMOJIS[route_id % len(ROUTE_EMOJIS)]
 
                 with st.expander(
-                    f"{emoji} Route {route_id + 1} — {len(optimized_df)} titik — ~{r['distance_km']:.1f} km",
+                    f"{emoji} Route {route_id + 1} — {len(optimized_df)} titik — "
+                    f"~{r['distance_km']:.1f} km — ~{format_duration(r['duration_sec'])}",
                     expanded=(route_id == first_route_id),
                 ):
                     left, right = st.columns([1, 1.4])
