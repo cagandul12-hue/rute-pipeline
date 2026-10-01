@@ -10,7 +10,11 @@ import re
 import io
 import requests
 import datetime
-from urllib.parse import unquote
+import os
+import json
+import time
+import base64
+from urllib.parse import unquote, quote
 from sklearn.cluster import KMeans
 from ortools.constraint_solver import pywrapcp
 from ortools.constraint_solver import routing_enums_pb2
@@ -274,47 +278,117 @@ def create_distance_matrix(df):
     return matrix
 
 
-OSRM_BASE_URL = "https://router.project-osrm.org"
+OSRM_DEFAULT_URL = "https://router.project-osrm.org"
+OSRM_DEFAULT_MAX_TABLE = 100  # batas jumlah titik per permintaan di server demo OSRM
 FALLBACK_SPEED_KMH = 30  # used only if OSRM is unreachable
 
 
-def get_route_matrices(df):
-    """Returns (distance_matrix_meters, duration_matrix_seconds, used_real_roads).
+def _setting(name, default=None):
+    """Baca pengaturan dari st.secrets, lalu environment variable, lalu default."""
+    try:
+        value = st.secrets.get(name)
+    except Exception:
+        value = None
+    return value or os.environ.get(name) or default
 
-    Tries OSRM's public routing service first, which follows the actual
-    road network (one-ways, detours, etc.) instead of a straight line — so
-    both the TSP ordering and the reported distance/time reflect real
-    driving conditions. Falls back to haversine straight-line distance
-    with an assumed average speed if OSRM is unreachable, rate-limited, or
-    the request fails for any other reason.
+
+def _osrm_url():
+    # Untuk pemakaian serius, arahkan ke server OSRM sendiri lewat Secrets / env var OSRM_BASE_URL.
+    return str(_setting("OSRM_BASE_URL", OSRM_DEFAULT_URL)).rstrip("/")
+
+
+def _osrm_max_table():
+    try:
+        return max(4, int(_setting("OSRM_MAX_TABLE", OSRM_DEFAULT_MAX_TABLE)))
+    except (TypeError, ValueError):
+        return OSRM_DEFAULT_MAX_TABLE
+
+
+def _osrm_request(coords, base_url, sources=None, destinations=None, retries=3):
+    """Satu permintaan /table ke OSRM, dengan retry untuk gangguan sementara (429/5xx/timeout)."""
+    path = ";".join(f"{lon},{lat}" for lon, lat in coords)
+    params = {"annotations": "distance,duration"}
+    if sources is not None:
+        params["sources"] = ";".join(str(i) for i in sources)
+    if destinations is not None:
+        params["destinations"] = ";".join(str(i) for i in destinations)
+
+    last_error = None
+    for attempt in range(retries):
+        try:
+            resp = requests.get(f"{base_url}/table/v1/driving/{path}", params=params, timeout=20)
+            if resp.status_code in (429, 500, 502, 503, 504):
+                raise requests.HTTPError(f"HTTP {resp.status_code}")
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("code") != "Ok":
+                # Kesalahan permintaan (mis. TooBig) — tidak ada gunanya diulang.
+                raise ValueError(data.get("message") or data.get("code") or "OSRM mengembalikan error")
+            return data["distances"], data["durations"]
+        except requests.RequestException as e:
+            last_error = e
+            if attempt < retries - 1:
+                time.sleep(1.5 * (attempt + 1))
+    raise last_error
+
+
+@st.cache_data(ttl=3600, show_spinner=False, max_entries=64)
+def _osrm_matrices_cached(coords, base_url, max_table):
+    """Matriks jarak (m) & durasi (detik) dari OSRM, dipecah per blok kalau titiknya melebihi batas server.
+
+    Kegagalan melempar exception, sehingga TIDAK ikut tersimpan di cache.
+    """
+    n = len(coords)
+    dist = [[0] * n for _ in range(n)]
+    dur = [[0] * n for _ in range(n)]
+
+    def put(rows, cols, raw_d, raw_t):
+        for a, i in enumerate(rows):
+            for b, j in enumerate(cols):
+                d, t = raw_d[a][b], raw_t[a][b]
+                # null = pasangan titik yang tidak bisa dirutekan -> anggap "sangat jauh"
+                dist[i][j] = int(d) if d is not None else 10_000_000
+                dur[i][j] = t if t is not None else 0
+
+    if n <= max_table:
+        raw_d, raw_t = _osrm_request(coords, base_url)
+        put(range(n), range(n), raw_d, raw_t)
+        return dist, dur
+
+    block = max(2, max_table // 2)
+    starts = list(range(0, n, block))
+    for i0 in starts:
+        rows = list(range(i0, min(i0 + block, n)))
+        for j0 in starts:
+            cols = list(range(j0, min(j0 + block, n)))
+            if i0 == j0:
+                raw_d, raw_t = _osrm_request([coords[k] for k in rows], base_url)
+            else:
+                sub = [coords[k] for k in rows] + [coords[k] for k in cols]
+                src = list(range(len(rows)))
+                dst = list(range(len(rows), len(rows) + len(cols)))
+                raw_d, raw_t = _osrm_request(sub, base_url, src, dst)
+            put(rows, cols, raw_d, raw_t)
+    return dist, dur
+
+
+def get_route_matrices(df):
+    """Returns (distance_matrix_meters, duration_matrix_seconds, used_real_roads, error_message).
+
+    Memakai OSRM (jalan asli): hasilnya di-cache, titik yang banyak dipecah per blok
+    agar tidak melewati batas server, dan gangguan sementara dicoba ulang.
+    Kalau tetap gagal, jatuh ke estimasi garis lurus (haversine) dengan kecepatan
+    rata-rata tetap, dan alasan kegagalannya ikut dikembalikan supaya bisa ditampilkan.
     """
     n = len(df)
     if n < 2:
-        return [[0]], [[0]], True
+        return [[0]], [[0]], True, None
 
+    coords = tuple((round(float(r.longitude), 6), round(float(r.latitude), 6)) for r in df.itertuples())
     try:
-        coords = ";".join(f"{row.longitude},{row.latitude}" for _, row in df.iterrows())
-        url = f"{OSRM_BASE_URL}/table/v1/driving/{coords}"
-        resp = requests.get(url, params={"annotations": "distance,duration"}, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("code") != "Ok":
-            raise ValueError(data.get("message", "OSRM returned an error"))
-
-        raw_distances = data["distances"]
-        raw_durations = data["durations"]
-        # OSRM can return null for a pair it couldn't route between; treat
-        # that as "very far" so the TSP solver avoids it rather than crashing.
-        distance_matrix = [
-            [int(raw_distances[i][j]) if raw_distances[i][j] is not None else 10_000_000 for j in range(n)]
-            for i in range(n)
-        ]
-        duration_matrix = [
-            [raw_durations[i][j] if raw_durations[i][j] is not None else 0 for j in range(n)]
-            for i in range(n)
-        ]
-        return distance_matrix, duration_matrix, True
-    except Exception:
+        distance_matrix, duration_matrix = _osrm_matrices_cached(coords, _osrm_url(), _osrm_max_table())
+        return distance_matrix, duration_matrix, True, None
+    except Exception as e:
         distance_matrix = create_distance_matrix(df)
         duration_matrix = [
             [
@@ -323,7 +397,7 @@ def get_route_matrices(df):
             ]
             for i in range(n)
         ]
-        return distance_matrix, duration_matrix, False
+        return distance_matrix, duration_matrix, False, str(e)[:160]
 
 
 def format_duration(seconds):
@@ -530,7 +604,7 @@ def extract_google_maps_data(link):
 
 def balance_clusters(df, max_points_per_route):
     df = df.copy()
-    while True:
+    for _guard in range(1000):  # pengaman supaya tidak pernah macet
         cluster_sizes = df["route"].value_counts().to_dict()
         oversized_clusters = [c for c, size in cluster_sizes.items() if size > max_points_per_route]
         if not oversized_clusters:
@@ -544,6 +618,9 @@ def balance_clusters(df, max_points_per_route):
                 break
 
             for _ in range(excess_points):
+                candidate_clusters = [c for c, size in cluster_sizes.items() if size < max_points_per_route]
+                if not candidate_clusters:
+                    break
                 best_point_index, best_target_cluster = None, None
                 best_distance = float("inf")
                 for idx, row in big_cluster_df.iterrows():
@@ -607,6 +684,22 @@ def _max_points_control(df):
     )
 
 
+def _plan_control(df, plan_mode):
+    """Kontrol penentu jumlah rute. Mengembalikan (maks_titik_per_rute, jumlah_rute_atau_None)."""
+    n = len(df)
+    if plan_mode == PLAN_COUNT:
+        k_max = max(1, n)
+        k_val = min(max(1, int(st.session_state.target_routes_flag)), k_max)
+        k = st.number_input(
+            "Jumlah rute",
+            min_value=1, max_value=k_max, value=k_val, step=1,
+            key="_target_widget", on_change=_sync_target,
+            help="Misalnya 5 sales = 5 rute. Merchant dibagi merata menurut area lokasi.",
+        )
+        return math.ceil(n / int(k)), int(k)
+    return _max_points_control(df), None
+
+
 def validate_dataframe(df):
     """Returns (is_valid, list_of_error_messages)."""
     errors = []
@@ -617,7 +710,7 @@ def validate_dataframe(df):
         return False, errors
 
     if df.empty:
-        errors.append("File Excel tidak berisi data.")
+        errors.append("File tidak berisi data.")
         return False, errors
 
     numeric_lat = pd.to_numeric(df["latitude"], errors="coerce")
@@ -641,18 +734,114 @@ def validate_dataframe(df):
     return len(errors) == 0, errors
 
 
-def make_template_excel():
-    template_df = pd.DataFrame(
+REQUIRED_COLS = ("merchant_name", "latitude", "longitude")
+
+
+def read_table_file(name, data):
+    """Baca file .xlsx atau .csv menjadi DataFrame.
+
+    CSV: pemisah (koma / titik koma / tab) dideteksi otomatis, BOM UTF-8 ditangani.
+    Nama kolom wajib dinormalkan (huruf kecil, tanpa spasi tepi) dan koma desimal pada
+    latitude/longitude (format Indonesia, mis. -7,5665) diubah jadi titik.
+    """
+    if name.lower().endswith(".csv"):
+        df, last_error = None, None
+        for enc in ("utf-8-sig", "latin-1"):
+            try:
+                df = pd.read_csv(io.BytesIO(data), sep=None, engine="python", encoding=enc)
+                break
+            except Exception as e:
+                last_error = e
+        if df is None:
+            raise last_error
+    else:
+        df = pd.read_excel(io.BytesIO(data))
+
+    rename = {
+        c: str(c).strip().lower()
+        for c in df.columns
+        if str(c).strip().lower() in REQUIRED_COLS and c != str(c).strip().lower()
+    }
+    if rename:
+        df = df.rename(columns=rename)
+
+    for col in ("latitude", "longitude"):
+        if col in df.columns and not pd.api.types.is_numeric_dtype(df[col]):  # pandas 3: teks bertipe "str", bukan object
+            mask = df[col].notna()
+            df.loc[mask, col] = df.loc[mask, col].astype(str).str.strip().str.replace(",", ".", regex=False)
+    return df
+
+
+def _clock(dt, base_date):
+    """Format jam 'HH:MM'; kalau lewat tengah malam tambahkan '(+N hari)'."""
+    days = (dt.date() - base_date).days
+    text = dt.strftime("%H:%M")
+    return text + (f" (+{days} hari)" if days > 0 else "")
+
+
+def build_schedule(duration_matrix, order, start_dt, visit_sec, first_is_start, round_trip):
+    """Jam tiba/selesai tiap titik sepanjang urutan kunjungan.
+
+    Titik awal (kalau ada) tidak dihitung durasi kunjungan. Mengembalikan
+    (jam_tiba, jam_selesai, jam_kembali_atau_None, jam_selesai_rute) sebagai datetime.
+    """
+    arrivals, departs = [], []
+    t = start_dt
+    for k, node in enumerate(order):
+        if k > 0:
+            t = departs[-1] + datetime.timedelta(seconds=duration_matrix[order[k - 1]][node])
+        arrivals.append(t)
+        stay = 0 if (k == 0 and first_is_start) else visit_sec
+        departs.append(t + datetime.timedelta(seconds=stay))
+    back = None
+    if round_trip and len(order) > 1:
+        back = departs[-1] + datetime.timedelta(seconds=duration_matrix[order[-1]][order[0]])
+    return arrivals, departs, back, (back or departs[-1])
+
+
+def build_whatsapp_text(r, map_links):
+    """Teks siap kirim (format WhatsApp) untuk satu rute."""
+    df = r["df"]
+    total_sec = r["duration_sec"] + r.get("visit_sec", 0)
+    lines = [
+        f"*Rute {r['route_id'] + 1}* — {len(df)} titik · ~{r['distance_km']:.1f} km · ~{format_duration(total_sec)}"
+    ]
+    if r.get("finish_label"):
+        lines.append(f"🏁 Estimasi selesai ±{r['finish_label']}")
+    lines.append("")
+    for _, row in df.iterrows():
+        eta = f" ({row['jam_tiba']})" if "jam_tiba" in df.columns else ""
+        lines.append(f"{int(row['sequence'])}. {row['merchant_name']}{eta}")
+    if r.get("round_trip"):
+        lines.append("↩️ Lalu kembali ke titik awal")
+    lines.append("")
+    if len(map_links) == 1:
+        lines.append(f"🗺️ Google Maps: {map_links[0][2]}")
+    else:
+        for i, (_, _, url) in enumerate(map_links, start=1):
+            lines.append(f"🗺️ Google Maps bagian {i}: {url}")
+    return "\n".join(lines)
+
+
+def _template_df():
+    return pd.DataFrame(
         {
             "merchant_name": ["Toko A", "Toko B", "Toko C"],
             "latitude": [-7.5665, -7.5700, -7.5610],
             "longitude": [110.8167, 110.8200, 110.8100],
         }
     )
+
+
+def make_template_excel():
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        template_df.to_excel(writer, index=False)
+        _template_df().to_excel(writer, index=False)
     return buf.getvalue()
+
+
+def make_template_csv():
+    return _template_df().to_csv(index=False).encode("utf-8-sig")
 
 
 # ==========================================================================================
@@ -804,6 +993,161 @@ def _sync_use_extracted():
 def _sync_starting_link():
     st.session_state.starting_link_saved = st.session_state._starting_link_widget
 
+
+PLAN_MAX = "📏 Maksimal titik per rute"
+PLAN_COUNT = "👥 Jumlah rute (mis. jumlah sales)"
+for _k, _v in {
+    "plan_mode_flag": PLAN_MAX,
+    "target_routes_flag": 2,
+    "visit_minutes_flag": 0,
+    "start_time_flag": datetime.time(8, 0),
+    "session_nonce": 0,
+}.items():
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
+
+
+def _sync_plan():
+    st.session_state.plan_mode_flag = st.session_state._plan_widget
+
+
+def _sync_target():
+    st.session_state.target_routes_flag = int(st.session_state._target_widget)
+
+
+def _sync_visit():
+    st.session_state.visit_minutes_flag = int(st.session_state._visit_widget)
+
+
+def _sync_start_time():
+    st.session_state.start_time_flag = st.session_state._start_time_widget
+
+
+# ---------- Simpan / buka sesi ----------
+MAX_SESSION_BYTES = 40 * 1024 * 1024
+SESSION_WIDGET_KEYS = (
+    "_use_extracted_widget", "_starting_link_widget", "_round_trip_widget", "_dedupe_widget",
+    "_split_widget", "_plan_widget", "_target_widget", "_visit_widget", "_start_time_widget",
+    "extract_editor",
+)
+
+
+def build_session_bytes():
+    ss = st.session_state
+    extracted = [
+        {k: (None if isinstance(v, float) and math.isnan(v) else v) for k, v in row.items()}
+        for row in ss.extracted_data
+    ]
+    payload = {
+        "app": "routing-extractor",
+        "version": 1,
+        "saved_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        "files": {name: base64.b64encode(data).decode("ascii") for name, data in ss.uploaded_store.items()},
+        "extracted_data": extracted,
+        "settings": {
+            "use_extracted_flag": bool(ss.use_extracted_flag),
+            "starting_link_saved": ss.starting_link_saved,
+            "round_trip_flag": bool(ss.round_trip_flag),
+            "dedupe_flag": bool(ss.dedupe_flag),
+            "split_mode_flag": ss.split_mode_flag,
+            "plan_mode_flag": ss.plan_mode_flag,
+            "target_routes_flag": int(ss.target_routes_flag),
+            "visit_minutes_flag": int(ss.visit_minutes_flag),
+            "start_time_flag": ss.start_time_flag.strftime("%H:%M"),
+        },
+    }
+    return json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
+
+
+def load_session_bytes(raw):
+    """Muat file sesi. Isi file diperlakukan sebagai data: divalidasi, bukan dijalankan."""
+    if len(raw) > MAX_SESSION_BYTES:
+        return False, "File sesi terlalu besar."
+    try:
+        data = json.loads(raw.decode("utf-8-sig"))
+    except Exception:
+        return False, "File sesi tidak bisa dibaca (bukan JSON yang valid)."
+    if not isinstance(data, dict) or data.get("app") != "routing-extractor":
+        return False, "File ini bukan file sesi dari aplikasi ini."
+
+    files_raw = data.get("files")
+    files = {}
+    for name, b64 in (files_raw if isinstance(files_raw, dict) else {}).items():
+        if not isinstance(name, str) or not isinstance(b64, str):
+            continue
+        safe_name = os.path.basename(name) or "data.xlsx"
+        try:
+            files[safe_name] = base64.b64decode(b64, validate=True)
+        except Exception:
+            return False, f"File '{safe_name}' di dalam sesi rusak."
+
+    ext_raw = data.get("extracted_data")
+    extracted = [
+        {str(k): v for k, v in row.items()}
+        for row in (ext_raw[:5000] if isinstance(ext_raw, list) else [])
+        if isinstance(row, dict)
+    ]
+
+    cfg = data.get("settings") if isinstance(data.get("settings"), dict) else {}
+    updates = {}
+    for key in ("use_extracted_flag", "round_trip_flag", "dedupe_flag"):
+        if isinstance(cfg.get(key), bool):
+            updates[key] = cfg[key]
+    if isinstance(cfg.get("starting_link_saved"), str):
+        updates["starting_link_saved"] = cfg["starting_link_saved"][:2000]
+    if cfg.get("split_mode_flag") in (SPLIT_AUTO, SPLIT_FULL):
+        updates["split_mode_flag"] = cfg["split_mode_flag"]
+    if cfg.get("plan_mode_flag") in (PLAN_MAX, PLAN_COUNT):
+        updates["plan_mode_flag"] = cfg["plan_mode_flag"]
+    if isinstance(cfg.get("target_routes_flag"), int) and 1 <= cfg["target_routes_flag"] <= 10000:
+        updates["target_routes_flag"] = cfg["target_routes_flag"]
+    if isinstance(cfg.get("visit_minutes_flag"), int) and 0 <= cfg["visit_minutes_flag"] <= 480:
+        updates["visit_minutes_flag"] = cfg["visit_minutes_flag"]
+    if isinstance(cfg.get("start_time_flag"), str):
+        try:
+            updates["start_time_flag"] = datetime.datetime.strptime(cfg["start_time_flag"], "%H:%M").time()
+        except ValueError:
+            pass
+
+    ss = st.session_state
+    ss.uploaded_store = files
+    ss.extracted_data = extracted
+    for k, v in updates.items():
+        ss[k] = v
+    for wk in SESSION_WIDGET_KEYS:  # supaya nilai baru dipakai oleh widget
+        ss.pop(wk, None)
+    ss.route_result = None
+    ss.uploader_nonce += 1
+    return True, f"Sesi dimuat: {len(files)} file dan {len(extracted)} data Maps Extractor."
+
+
+def render_session_panel(prefix):
+    ss = st.session_state
+    flash = ss.pop("_session_flash", None)
+    with st.expander("💾 Simpan / Buka Sesi", expanded=flash is not None):
+        if flash:
+            (st.success if flash[0] == "ok" else st.error)(flash[1])
+        st.caption(
+            "Simpan data & pengaturan ke satu file untuk dilanjutkan nanti, bahkan setelah halaman "
+            "di-refresh. Hasil rute tidak ikut disimpan — tinggal tekan Buat Rute lagi. "
+            "File berisi data merchant, jadi simpan di tempat yang aman."
+        )
+        st.download_button(
+            "💾 Simpan sesi",
+            data=build_session_bytes(),
+            file_name=f"sesi-rute-{datetime.datetime.now():%Y%m%d-%H%M}.json",
+            mime="application/json",
+            key=f"{prefix}_session_dl",
+            width='stretch',
+            disabled=not (ss.uploaded_store or ss.extracted_data),
+        )
+        up = st.file_uploader("📂 Buka sesi (.json)", type=["json"], key=f"{prefix}_session_up_{ss.session_nonce}")
+        if up is not None:
+            ok, msg = load_session_bytes(up.getvalue())
+            ss._session_flash = ("ok" if ok else "err", msg)
+            ss.session_nonce += 1
+            st.rerun()
+
 # ==========================================================================================
 # NAVIGASI + PILIHAN MODE TAMPILAN
 # ==========================================================================================
@@ -868,9 +1212,9 @@ def render_howto():
         st.write(
             "**1. Kumpulkan data** 📍\n"
             "Buka **Maps Extractor** — tempel link Google Maps, cari nama merchant, atau isi manual. "
-            "Sudah punya file Excel? Langsung lompat ke langkah 2.\n\n"
+            "Sudah punya file Excel/CSV? Langsung lompat ke langkah 2.\n\n"
             "**2. Buat rute** 🛣️\n"
-            "Buka **Routing Optimizer**, upload Excel (`merchant_name`, `latitude`, `longitude`), "
+            "Buka **Routing Optimizer**, upload Excel/CSV (`merchant_name`, `latitude`, `longitude`), "
             "atur maksimal titik per rute, lalu klik **Buat Rute Optimal**.\n\n"
             "**3. Unduh & pakai** 📥\n"
             "Lihat tiap rute di peta, buka langsung di Google Maps, atau unduh semuanya sebagai Excel."
@@ -884,6 +1228,7 @@ if IS_MOBILE:
     with st.container(key="moderow"):
         render_mode_toggle("top")
     render_howto()
+    render_session_panel("top")
 else:
     with st.sidebar:
         st.markdown(
@@ -905,6 +1250,7 @@ else:
         render_mode_toggle("side")
         st.markdown("---")
         render_howto()
+        render_session_panel("side")
         st.caption("⚡ Developed by **Abdillah**")
 
 
@@ -924,7 +1270,7 @@ if st.session_state.page == "Routing":
 
     section_header(
         "1️⃣", "Siapkan Data Merchant",
-        "Upload file Excel, pakai data dari Maps Extractor, atau gabungan keduanya",
+        "Upload file Excel/CSV, pakai data dari Maps Extractor, atau gabungan keduanya",
     )
 
     col_link, col_upload = st.columns([1, 1.3])
@@ -939,11 +1285,11 @@ if st.session_state.page == "Routing":
         )
     with col_upload:
         new_files = st.file_uploader(
-            "📂 Upload Data Excel",
-            type=["xlsx"],
+            "📂 Upload Data (Excel / CSV)",
+            type=["xlsx", "csv"],
             accept_multiple_files=True,
             key=f"uploader_{st.session_state.uploader_nonce}",
-            help="Kolom wajib: merchant_name, latitude, longitude. Bisa pilih beberapa file sekaligus — nanti otomatis digabung. File yang sudah diupload tetap tersimpan walau kamu pindah ke Maps Extractor.",
+            help="Format .xlsx atau .csv. Kolom wajib: merchant_name, latitude, longitude (koma desimal seperti -7,56 juga dikenali). Bisa pilih beberapa file sekaligus — nanti otomatis digabung. File yang sudah diupload tetap tersimpan walau kamu pindah ke Maps Extractor.",
         )
         if new_files:
             for nf in new_files:
@@ -976,13 +1322,25 @@ if st.session_state.page == "Routing":
     else:
         st.session_state.use_extracted_flag = False
 
-    st.download_button(
-        "⬇️ Download Template Excel",
-        data=make_template_excel(),
-        file_name="template_routing.xlsx",
-        mime="application/vnd.ms-excel",
-        help="Belum punya file? Download contoh formatnya di sini supaya langsung cocok.",
-    )
+    tpl1, tpl2 = st.columns(2)
+    with tpl1:
+        st.download_button(
+            "⬇️ Template Excel",
+            data=make_template_excel(),
+            file_name="template_routing.xlsx",
+            mime="application/vnd.ms-excel",
+            help="Belum punya file? Download contoh formatnya di sini supaya langsung cocok.",
+            width='stretch',
+        )
+    with tpl2:
+        st.download_button(
+            "⬇️ Template CSV",
+            data=make_template_csv(),
+            file_name="template_routing.csv",
+            mime="text/csv",
+            help="Contoh format CSV (kolom: merchant_name, latitude, longitude).",
+            width='stretch',
+        )
 
     df = None
     valid_parts = []
@@ -990,7 +1348,7 @@ if st.session_state.page == "Routing":
 
     for fname, fbytes in st.session_state.uploaded_store.items():
         try:
-            file_df = pd.read_excel(io.BytesIO(fbytes))
+            file_df = read_table_file(fname, fbytes)
         except Exception as e:
             file_errors.append(f"**{fname}**: gagal dibaca ({e})")
             continue
@@ -1066,11 +1424,19 @@ if st.session_state.page == "Routing":
 
         section_header(
             "2️⃣", "Atur Pembagian Rute",
-            "Tentukan berapa banyak merchant maksimal dalam satu rute",
+            "Tentukan jumlah rute — lewat maksimal merchant per rute, atau langsung jumlah rute (mis. jumlah sales)",
+        )
+        plan_mode = st.radio(
+            "Cara menentukan jumlah rute",
+            [PLAN_MAX, PLAN_COUNT],
+            index=0 if st.session_state.plan_mode_flag == PLAN_MAX else 1,
+            key="_plan_widget",
+            on_change=_sync_plan,
+            horizontal=not IS_MOBILE,
         )
         if IS_MOBILE:
-            max_points_per_route = _max_points_control(df)
-            n_cluster_default = math.ceil(len(df) / max_points_per_route)
+            max_points_per_route, target_routes = _plan_control(df, plan_mode)
+            n_cluster_default = target_routes or math.ceil(len(df) / max_points_per_route)
             with st.container(key="grid2"):
                 c2, c3 = st.columns(2)
                 with c2:
@@ -1080,14 +1446,20 @@ if st.session_state.page == "Routing":
         else:
             c1, c2, c3 = st.columns(3)
             with c1:
-                max_points_per_route = _max_points_control(df)
-            n_cluster_default = math.ceil(len(df) / max_points_per_route)
+                max_points_per_route, target_routes = _plan_control(df, plan_mode)
+            n_cluster_default = target_routes or math.ceil(len(df) / max_points_per_route)
             with c2:
                 metric_card("🏪", "Total Merchant", len(df))
             with c3:
                 metric_card("🧭", "Estimasi Jumlah Route", n_cluster_default)
 
-        if n_cluster_default > 1:
+        if target_routes is not None:
+            split_mode = SPLIT_AUTO
+            st.caption(
+                f"Merchant dibagi ke {target_routes} rute mengikuti area lokasi, "
+                f"maksimal {max_points_per_route} merchant per rute supaya beban merata."
+            )
+        elif n_cluster_default > 1:
             split_mode = st.radio(
                 "Cara membagi rute",
                 [SPLIT_AUTO, SPLIT_FULL],
@@ -1114,6 +1486,25 @@ if st.session_state.page == "Routing":
         else:
             split_mode = st.session_state.split_mode_flag
 
+        t1, t2 = st.columns(2)
+        with t1:
+            start_time = st.time_input(
+                "⏰ Jam mulai",
+                value=st.session_state.start_time_flag,
+                key="_start_time_widget",
+                on_change=_sync_start_time,
+                step=300,
+                help="Dipakai untuk menghitung perkiraan jam tiba di tiap merchant.",
+            )
+        with t2:
+            visit_minutes = st.number_input(
+                "🏪 Durasi kunjungan per toko (menit)",
+                min_value=0, max_value=480, value=int(st.session_state.visit_minutes_flag), step=1,
+                key="_visit_widget",
+                on_change=_sync_visit,
+                help="Waktu yang dihabiskan di tiap merchant. 0 = hanya hitung waktu perjalanan.",
+            )
+
         round_trip = st.checkbox(
             "🔁 Kembali ke titik awal setelah rute selesai",
             value=st.session_state.round_trip_flag,
@@ -1131,7 +1522,10 @@ if st.session_state.page == "Routing":
 
         # Fingerprint of the current input+settings, so stale results (from a
         # previous file/slider value) don't linger after the inputs change.
-        data_fingerprint = (len(df), tuple(df["merchant_name"]), max_points_per_route, starting_link, round_trip, split_mode)
+        data_fingerprint = (
+            len(df), tuple(df["merchant_name"]), max_points_per_route, target_routes, starting_link,
+            round_trip, split_mode, int(visit_minutes), start_time.strftime("%H:%M"),
+        )
 
         if run:
             if len(df) < 2:
@@ -1139,9 +1533,9 @@ if st.session_state.page == "Routing":
                 st.stop()
 
             with st.spinner("🔄 Mengelompokkan titik dan mencari rute tercepat di jalan asli..."):
-                n_cluster = math.ceil(len(df) / max_points_per_route)
+                n_cluster = target_routes or math.ceil(len(df) / max_points_per_route)
                 n_cluster = max(1, min(n_cluster, len(df)))
-                if n_cluster > 1 and split_mode == SPLIT_FULL:
+                if target_routes is None and n_cluster > 1 and split_mode == SPLIT_FULL:
                     df["route"] = fill_clusters(df, max_points_per_route)
                 else:
                     coords = df[["latitude", "longitude"]]
@@ -1157,6 +1551,10 @@ if st.session_state.page == "Routing":
                 all_routes = []
                 route_summaries = []
                 any_fallback_used = False
+                osrm_errors = []
+                base_date = datetime.date.today()
+                start_dt = datetime.datetime.combine(base_date, start_time)
+                visit_sec = int(visit_minutes) * 60
                 for route_id in sorted(df["route"].unique()):
                     route_df = df[df["route"] == route_id].reset_index(drop=True)
 
@@ -1166,14 +1564,24 @@ if st.session_state.page == "Routing":
                         )
                         route_df = pd.concat([start_df, route_df], ignore_index=True)
 
-                    distance_matrix, duration_matrix, used_real_roads = get_route_matrices(route_df)
+                    distance_matrix, duration_matrix, used_real_roads, osrm_error = get_route_matrices(route_df)
                     any_fallback_used = any_fallback_used or not used_real_roads
+                    if osrm_error:
+                        osrm_errors.append(osrm_error)
 
                     has_start = bool(start_lat and start_lon)
                     best_route = solve_tsp(distance_matrix, round_trip=round_trip, fixed_start=has_start)
                     optimized_df = route_df.iloc[best_route].reset_index(drop=True)
                     optimized_df["sequence"] = optimized_df.index + 1
                     optimized_df["route_name"] = f"Route {route_id + 1}"
+
+                    arrivals, departs, back_dt, finish_dt = build_schedule(
+                        duration_matrix, best_route, start_dt, visit_sec, has_start, round_trip
+                    )
+                    optimized_df["jam_tiba"] = [_clock(t, base_date) for t in arrivals]
+                    if visit_sec:
+                        optimized_df["jam_selesai"] = [_clock(t, base_date) for t in departs]
+                    n_visits = len(best_route) - (1 if has_start else 0)
                     all_routes.append(optimized_df)
 
                     route_distance_km = route_leg_sum(distance_matrix, best_route, round_trip) / 1000
@@ -1185,6 +1593,9 @@ if st.session_state.page == "Routing":
                             "df": optimized_df,
                             "distance_km": route_distance_km,
                             "duration_sec": route_duration_sec,
+                            "visit_sec": visit_sec * n_visits,
+                            "finish_label": _clock(finish_dt, base_date),
+                            "real_roads": used_real_roads,
                             "round_trip": round_trip,
                         }
                     )
@@ -1207,6 +1618,7 @@ if st.session_state.page == "Routing":
                 "start_ok": bool(start_lat and start_lon),
                 "start_link_given": bool(starting_link),
                 "used_real_roads": not any_fallback_used,
+                "osrm_error": osrm_errors[-1] if osrm_errors else None,
             }
 
         result = st.session_state.get("route_result")
@@ -1215,10 +1627,14 @@ if st.session_state.page == "Routing":
                 st.warning("⚠️ Link Google Maps titik awal tidak dikenali, jadi dilewati — rute tetap dibuat tanpa titik awal khusus.")
 
             if not result.get("used_real_roads", True):
+                reason = result.get("osrm_error")
                 st.warning(
-                    "⚠️ Tidak bisa terhubung ke layanan rute jalan asli (OSRM) — jarak & waktu tempuh "
-                    "di bawah ini dihitung dari estimasi garis lurus, jadi bisa kurang akurat "
-                    "dibanding kondisi jalan sebenarnya."
+                    "⚠️ Layanan rute jalan asli (OSRM) tidak bisa dipakai untuk sebagian/seluruh rute — "
+                    "rute bertanda ⚠️ memakai estimasi garis lurus (±30 km/jam), jadi jarak & waktunya bisa "
+                    "kurang akurat."
+                    + (f" Penyebab terakhir: {reason}." if reason else "")
+                    + " Coba tekan **Buat Rute Optimal** lagi, atau arahkan ke server OSRM sendiri lewat "
+                    "pengaturan `OSRM_BASE_URL` di Secrets."
                 )
 
             route_summaries = result["route_summaries"]
@@ -1226,6 +1642,7 @@ if st.session_state.page == "Routing":
 
             total_distance = sum(r["distance_km"] for r in route_summaries)
             total_duration = sum(r["duration_sec"] for r in route_summaries)
+            total_visit = sum(r.get("visit_sec", 0) for r in route_summaries)
             with st.container(key="grid4"):
                 m1, m2, m3, m4 = st.columns(4)
                 with m1:
@@ -1235,7 +1652,11 @@ if st.session_state.page == "Routing":
                 with m3:
                     metric_card("📏", "Estimasi Total Jarak", f"{total_distance:.1f} km")
                 with m4:
-                    metric_card("⏱️", "Estimasi Waktu Tempuh", format_duration(total_duration))
+                    metric_card(
+                        "⏱️",
+                        "Waktu Total (jalan + kunjungan)" if total_visit else "Estimasi Waktu Tempuh",
+                        format_duration(total_duration + total_visit),
+                    )
 
             section_header(
                 "3️⃣", "Rute yang Sudah Dioptimalkan",
@@ -1248,15 +1669,30 @@ if st.session_state.page == "Routing":
                 color = ROUTE_COLORS[route_id % len(ROUTE_COLORS)]
                 emoji = ROUTE_EMOJIS[route_id % len(ROUTE_EMOJIS)]
 
+                route_total_sec = r["duration_sec"] + r.get("visit_sec", 0)
+                warn_mark = "" if r.get("real_roads", True) else " ⚠️ estimasi"
                 with st.expander(
                     f"{emoji} Route {route_id + 1} — {len(optimized_df)} titik — "
-                    f"~{r['distance_km']:.1f} km — ~{format_duration(r['duration_sec'])}",
+                    f"~{r['distance_km']:.1f} km — ~{format_duration(route_total_sec)}{warn_mark}",
                     expanded=(route_id == first_route_id),
                 ):
+                    parts = [f"🚗 Perjalanan {format_duration(r['duration_sec'])}"]
+                    if r.get("visit_sec"):
+                        parts.append(f"🏪 Kunjungan {format_duration(r['visit_sec'])}")
+                    if r.get("finish_label"):
+                        parts.append(
+                            f"🏁 Selesai ±{r['finish_label']}"
+                            + (" (sudah termasuk pulang)" if r.get("round_trip") else "")
+                        )
+                    st.caption(" · ".join(parts))
                     left, right = st.columns([1, 1.4])
                     with left:
                         st.dataframe(
-                            optimized_df[["sequence", "merchant_name", "latitude", "longitude"]],
+                            optimized_df[
+                                ["sequence", "merchant_name"]
+                                + [c for c in ("jam_tiba", "jam_selesai") if c in optimized_df.columns]
+                                + ["latitude", "longitude"]
+                            ],
                             width='stretch',
                             **TABLE_KW,
                             hide_index=True,
@@ -1285,6 +1721,18 @@ if st.session_state.page == "Routing":
                                     url,
                                     width='stretch',
                                 )
+
+                        wa_text = build_whatsapp_text(r, map_links)
+                        wa_url = "https://wa.me/?text=" + quote(wa_text, safe="")
+                        if len(wa_url) <= 3800:
+                            st.link_button("📲 Kirim via WhatsApp", wa_url, width='stretch')
+                        else:
+                            st.caption(
+                                "ℹ️ Teks rute terlalu panjang untuk tombol langsung — "
+                                "salin lewat tombol di bawah lalu tempel di WhatsApp."
+                            )
+                        with st.popover("📋 Salin teks rute"):
+                            st.code(wa_text, language=None)
 
                     with right:
                         center_lat = optimized_df["latitude"].mean()
@@ -1319,7 +1767,7 @@ if st.session_state.page == "Routing":
         empty_state(
             "📂",
             "Belum ada data untuk diproses",
-            "Upload file Excel di atas, atau centang opsi data dari Maps Extractor untuk mulai membuat rute optimal.",
+            "Upload file Excel/CSV di atas, atau centang opsi data dari Maps Extractor untuk mulai membuat rute optimal.",
         )
 
 # ================================================================
