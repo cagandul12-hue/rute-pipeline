@@ -516,6 +516,24 @@ if "extracted_data" not in st.session_state:
     st.session_state.extracted_data = []
 if "routing_df" not in st.session_state:
     st.session_state.routing_df = None
+# Streamlit membuang state widget yang tidak dirender (mis. saat pindah halaman).
+# Karena itu input halaman Routing disimpan di session_state biasa, bukan di widget.
+if "uploaded_store" not in st.session_state:
+    st.session_state.uploaded_store = {}  # {nama_file: bytes}
+if "uploader_nonce" not in st.session_state:
+    st.session_state.uploader_nonce = 0  # ganti key uploader supaya kosong setelah file disimpan
+if "use_extracted_flag" not in st.session_state:
+    st.session_state.use_extracted_flag = False
+if "starting_link_saved" not in st.session_state:
+    st.session_state.starting_link_saved = ""
+
+
+def _sync_use_extracted():
+    st.session_state.use_extracted_flag = st.session_state._use_extracted_widget
+
+
+def _sync_starting_link():
+    st.session_state.starting_link_saved = st.session_state._starting_link_widget
 
 # ==========================================================================================
 # SIDEBAR NAVIGATION
@@ -595,24 +613,49 @@ if st.session_state.page == "Routing":
     with col_link:
         starting_link = st.text_input(
             "📍 Titik Awal (opsional)",
+            value=st.session_state.starting_link_saved,
+            key="_starting_link_widget",
+            on_change=_sync_starting_link,
             placeholder="Tempel link Google Maps di sini",
             help="Misalnya lokasi gudang atau toko pusat. Kalau diisi, titik ini otomatis jadi awal setiap rute.",
         )
     with col_upload:
-        uploaded_files = st.file_uploader(
+        new_files = st.file_uploader(
             "📂 Upload Data Excel",
             type=["xlsx"],
             accept_multiple_files=True,
-            help="Kolom wajib: merchant_name, latitude, longitude. Bisa pilih beberapa file sekaligus — nanti otomatis digabung.",
+            key=f"uploader_{st.session_state.uploader_nonce}",
+            help="Kolom wajib: merchant_name, latitude, longitude. Bisa pilih beberapa file sekaligus — nanti otomatis digabung. File yang sudah diupload tetap tersimpan walau kamu pindah ke Maps Extractor.",
         )
+        if new_files:
+            for nf in new_files:
+                st.session_state.uploaded_store[nf.name] = nf.getvalue()
+            st.session_state.uploader_nonce += 1
+            st.rerun()
+
+    # Daftar file yang tersimpan (tetap ada setelah pindah halaman)
+    if st.session_state.uploaded_store:
+        st.caption(f"📎 {len(st.session_state.uploaded_store)} file tersimpan")
+        for fname in list(st.session_state.uploaded_store.keys()):
+            fc1, fc2 = st.columns([6, 1])
+            with fc1:
+                st.markdown(f"📄 `{fname}`")
+            with fc2:
+                if st.button("✖", key=f"rm_{fname}", help=f"Hapus {fname}"):
+                    st.session_state.uploaded_store.pop(fname, None)
+                    st.rerun()
 
     use_extracted = False
     if st.session_state.extracted_data:
         use_extracted = st.checkbox(
             f"📋 Pakai {len(st.session_state.extracted_data)} data dari Maps Extractor",
-            value=False,
+            value=st.session_state.use_extracted_flag,
+            key="_use_extracted_widget",
+            on_change=_sync_use_extracted,
             help="Bisa dicentang bersamaan dengan upload Excel di atas — keduanya akan digabung otomatis.",
         )
+    else:
+        st.session_state.use_extracted_flag = False
 
     st.download_button(
         "⬇️ Download Template Excel",
@@ -626,21 +669,21 @@ if st.session_state.page == "Routing":
     valid_parts = []
     file_errors = []
 
-    for f in uploaded_files or []:
+    for fname, fbytes in st.session_state.uploaded_store.items():
         try:
-            file_df = pd.read_excel(f)
+            file_df = pd.read_excel(io.BytesIO(fbytes))
         except Exception as e:
-            file_errors.append(f"**{f.name}**: gagal dibaca ({e})")
+            file_errors.append(f"**{fname}**: gagal dibaca ({e})")
             continue
 
         is_valid, errors = validate_dataframe(file_df)
         if not is_valid:
             for err in errors:
-                file_errors.append(f"**{f.name}**: {err}")
+                file_errors.append(f"**{fname}**: {err}")
             continue
 
         file_df = file_df.copy()
-        file_df["source_file"] = f.name
+        file_df["source_file"] = fname
         valid_parts.append(file_df)
 
     if use_extracted:
@@ -659,14 +702,14 @@ if st.session_state.page == "Routing":
 
     if valid_parts:
         df = pd.concat(valid_parts, ignore_index=True)
-        total_sources = len(uploaded_files or []) + (1 if use_extracted else 0)
+        total_sources = len(st.session_state.uploaded_store) + (1 if use_extracted else 0)
         skipped = total_sources - len(valid_parts)
         msg = f"✅ {len(valid_parts)} sumber data berhasil digabung — total {len(df)} baris."
         if skipped:
             msg += f" ({skipped} sumber dilewati karena error di atas)"
         if len(valid_parts) > 1:
             st.success(msg)
-    elif (uploaded_files or use_extracted) and not file_errors:
+    elif (st.session_state.uploaded_store or use_extracted) and not file_errors:
         # Shouldn't normally happen, but avoid silently doing nothing.
         st.info("Tidak ada data untuk diproses.")
     elif file_errors:
@@ -1092,6 +1135,7 @@ elif st.session_state.page == "Extract":
             )
         with col3:
             if st.button("➡️ Pakai di Routing Optimizer", type="primary", width='stretch'):
+                st.session_state.use_extracted_flag = True
                 st.session_state.page = "Routing"
                 st.rerun()
     else:
