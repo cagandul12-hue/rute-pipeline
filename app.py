@@ -9,6 +9,7 @@ import folium
 import re
 import io
 import requests
+import datetime
 from urllib.parse import unquote
 from sklearn.cluster import KMeans
 from ortools.constraint_solver import pywrapcp
@@ -17,7 +18,7 @@ from streamlit_folium import st_folium
 
 st.set_page_config(
     page_title="Routing & Extractor System",
-    page_icon="🏎️",
+    page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -139,6 +140,42 @@ st.markdown(
     }
 
     div[data-testid="stSidebarNav"] {display: none;}
+
+    /* ---------- Footer ---------- */
+    .app-footer {
+        margin-top: 56px; padding: 26px 0 8px 0; text-align: center;
+        border-top: 1px solid rgba(128,128,128,0.18);
+        position: relative;
+    }
+    .app-footer::before {
+        content: ""; position: absolute; top: -2px; left: 50%; transform: translateX(-50%);
+        width: 120px; height: 3px; border-radius: 3px;
+        background: linear-gradient(135deg, #4F46E5 0%, #0EA5E9 100%);
+    }
+    .app-footer .f-brand {font-weight: 800; font-size: 1rem; letter-spacing: 0.01em;}
+    .app-footer .f-bolt {display: inline-block; animation: boltPulse 2.4s ease-in-out infinite;}
+    @keyframes boltPulse {
+        0%, 100% {transform: scale(1); filter: drop-shadow(0 0 0 rgba(14,165,233,0));}
+        50% {transform: scale(1.18); filter: drop-shadow(0 0 6px rgba(14,165,233,0.75));}
+    }
+    .app-footer .f-dev {font-size: 0.88rem; margin-top: 8px; opacity: 0.85;}
+    .app-footer .f-name {
+        font-weight: 800;
+        background: linear-gradient(135deg, #4F46E5 0%, #0EA5E9 100%);
+        -webkit-background-clip: text; background-clip: text;
+        -webkit-text-fill-color: transparent; color: transparent;
+    }
+    .app-footer .f-heart {color: #ef4444; display: inline-block; animation: heartBeat 1.8s ease-in-out infinite;}
+    @keyframes heartBeat {0%, 100% {transform: scale(1);} 50% {transform: scale(1.25);}}
+    .app-footer .f-tech {
+        display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin-top: 12px;
+    }
+    .app-footer .f-chip {
+        font-size: 0.7rem; font-weight: 600; padding: 3px 10px; border-radius: 999px;
+        background: rgba(128,128,128,0.10); border: 1px solid rgba(128,128,128,0.2);
+        opacity: 0.85;
+    }
+    .app-footer .f-copy {font-size: 0.72rem; opacity: 0.5; margin-top: 12px;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -181,6 +218,23 @@ def empty_state(icon, title, desc):
             <div class="emoji">{icon}</div>
             <div class="title">{title}</div>
             <div class="desc">{desc}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_footer():
+    year = datetime.date.today().year
+    chips = ["Streamlit", "scikit-learn", "OR-Tools", "OSRM", "OpenStreetMap"]
+    chips_html = "".join(f'<span class="f-chip">{c}</span>' for c in chips)
+    st.markdown(
+        f"""
+        <div class="app-footer">
+            <div class="f-brand"><span class="f-bolt">⚡</span> Routing &amp; Extractor</div>
+            <div class="f-dev">Developed with <span class="f-heart">♥</span> by <span class="f-name">Abdillah</span></div>
+            <div class="f-tech">{chips_html}</div>
+            <div class="f-copy">© {year} Abdillah · All rights reserved</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -460,7 +514,7 @@ def balance_clusters(df, max_points_per_route):
 
 
 def _max_points_control(df):
-    """Slider 'maksimal titik per route' (dipakai di mode Desktop & Handphone)."""
+    """Slider 'maksimal titik per route' (dipakai di mode Desktop & Mobile)."""
     slider_max = max(2, len(df))
     if slider_max <= 2:
         # st.slider needs min_value < max_value; with only 2
@@ -544,17 +598,17 @@ if "starting_link_saved" not in st.session_state:
 
 
 def _detect_default_mode():
-    """Tebak mode awal dari User-Agent: HP -> Handphone, selain itu Desktop."""
+    """Tebak mode awal dari User-Agent: HP -> Mobile, selain itu Desktop."""
     try:
         ua = (st.context.headers.get("User-Agent") or "").lower()
     except Exception:
         return "Desktop"
-    return "Handphone" if ("iphone" in ua or "ipod" in ua or "mobile" in ua) else "Desktop"
+    return "Mobile" if ("iphone" in ua or "ipod" in ua or "mobile" in ua) else "Desktop"
 
 
 if "view_mode" not in st.session_state:
     st.session_state.view_mode = _detect_default_mode()
-IS_MOBILE = st.session_state.view_mode == "Handphone"
+IS_MOBILE = st.session_state.view_mode == "Mobile"
 
 MOBILE_CSS = """
 <style>
@@ -649,7 +703,7 @@ def _set_mode(mode):
 
 
 def render_mode_toggle(prefix):
-    """Dua tombol: 🖥️ Desktop | 📱 Handphone."""
+    """Dua tombol: 🖥️ Desktop | 📱 Mobile."""
     mode = st.session_state.view_mode
     m1, m2 = st.columns(2)
     with m1:
@@ -660,9 +714,9 @@ def render_mode_toggle(prefix):
         )
     with m2:
         st.button(
-            "📱 Handphone", key=f"{prefix}_mode_mobile", width='stretch',
-            type="primary" if mode == "Handphone" else "secondary",
-            on_click=_set_mode, args=("Handphone",),
+            "📱 Mobile", key=f"{prefix}_mode_mobile", width='stretch',
+            type="primary" if mode == "Mobile" else "secondary",
+            on_click=_set_mode, args=("Mobile",),
         )
 
 
@@ -726,7 +780,7 @@ else:
         st.markdown(
             """
             <div class="sidebar-brand">
-                <span class="emoji">🏎️</span>
+                <span class="emoji">⚡</span>
                 <div>
                     <div class="title">Routing &amp; Extractor</div>
                     <div class="subtitle">Rute otomatis, lebih singkat & rapi</div>
@@ -742,6 +796,7 @@ else:
         render_mode_toggle("side")
         st.markdown("---")
         render_howto()
+        st.caption("⚡ Developed by **Abdillah**")
 
 
 # ================================================================
@@ -1302,3 +1357,6 @@ elif st.session_state.page == "Extract":
             "Belum ada lokasi yang dikumpulkan",
             "Tempel link Google Maps, cari nama merchant, atau isi manual lewat tab di atas untuk mulai mengumpulkan data.",
         )
+
+
+render_footer()
