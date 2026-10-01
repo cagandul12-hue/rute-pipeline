@@ -30,7 +30,7 @@ st.set_page_config(
 # ==========================================================================================
 # STYLING
 # ==========================================================================================
-ACCENT_GRADIENT = "linear-gradient(135deg, #4F46E5 0%, #0EA5E9 100%)"
+ACCENT_GRADIENT = "linear-gradient(135deg, #4F46E5 0%, #0277B6 100%)"
 
 st.markdown(
     """
@@ -45,7 +45,7 @@ st.markdown(
 
     /* ---------- Hero header ---------- */
     .hero-header {
-        background: linear-gradient(135deg, #4F46E5 0%, #0EA5E9 100%);
+        background: linear-gradient(135deg, #4F46E5 0%, #0277B6 100%);
         border-radius: 18px;
         padding: 26px 32px;
         margin-bottom: 22px;
@@ -59,7 +59,7 @@ st.markdown(
         line-height: 1.3;
     }
     .hero-header p {
-        color: rgba(255,255,255,0.92) !important;
+        color: #ffffff !important;
         margin: 6px 0 0 0 !important;
         font-size: 0.95rem;
     }
@@ -74,7 +74,7 @@ st.markdown(
     }
     .metric-card .metric-icon {font-size: 1.4rem; line-height: 1;}
     .metric-card .metric-label {
-        font-size: 0.78rem; opacity: 0.7; margin-top: 8px; font-weight: 600;
+        font-size: 0.78rem; opacity: 0.82; margin-top: 8px; font-weight: 600;
         text-transform: uppercase; letter-spacing: 0.03em;
     }
     .metric-card .metric-value {font-size: 1.5rem; font-weight: 800; margin-top: 2px;}
@@ -83,7 +83,7 @@ st.markdown(
     .sidebar-brand {display: flex; align-items: center; gap: 10px;}
     .sidebar-brand .emoji {font-size: 1.9rem; line-height: 1;}
     .sidebar-brand .title {font-weight: 800; font-size: 1.08rem; line-height: 1.2;}
-    .sidebar-brand .subtitle {font-size: 0.78rem; opacity: 0.65;}
+    .sidebar-brand .subtitle {font-size: 0.78rem; opacity: 0.82;}
     section[data-testid="stSidebar"] button {border-radius: 10px !important;}
 
     /* ---------- Buttons ---------- */
@@ -91,10 +91,31 @@ st.markdown(
         border-radius: 10px !important;
         font-weight: 600 !important;
     }
-    .stButton > button[kind="primary"], .stDownloadButton > button[kind="primary"] {
-        background: linear-gradient(135deg, #4F46E5 0%, #0EA5E9 100%) !important;
+    /* tombol sekunder (termasuk menu yang tidak aktif): batas & latar terlihat di tema terang maupun gelap */
+    .stButton > button:not([kind="primary"]):not([data-testid="stBaseButton-primary"]),
+    .stDownloadButton > button:not([kind="primary"]):not([data-testid="stBaseButton-primary"]),
+    .stLinkButton > a:not([data-testid="stBaseLinkButton-primary"]) {
+        border: 1.5px solid rgba(128,128,128,0.8) !important;
+        border: 1.5px solid color-mix(in srgb, currentColor 55%, transparent) !important;
+        background: rgba(128,128,128,0.08) !important;
+        background: color-mix(in srgb, currentColor 6%, transparent) !important;
+    }
+    .stButton > button:not([kind="primary"]):not([data-testid="stBaseButton-primary"]):hover,
+    .stDownloadButton > button:not([kind="primary"]):not([data-testid="stBaseButton-primary"]):hover,
+    .stLinkButton > a:not([data-testid="stBaseLinkButton-primary"]):hover {
+        border-color: #4F46E5 !important;
+        background: rgba(79,70,229,0.10) !important;
+    }
+    .stButton > button[kind="primary"], .stButton > button[data-testid="stBaseButton-primary"],
+    .stDownloadButton > button[kind="primary"], .stDownloadButton > button[data-testid="stBaseButton-primary"] {
+        background: linear-gradient(135deg, #4F46E5 0%, #0277B6 100%) !important;
         border: none !important;
+        color: #ffffff !important;
         box-shadow: 0 4px 14px rgba(79,70,229,0.32);
+    }
+    .stButton > button[kind="primary"] *, .stButton > button[data-testid="stBaseButton-primary"] *,
+    .stDownloadButton > button[kind="primary"] *, .stDownloadButton > button[data-testid="stBaseButton-primary"] * {
+        color: #ffffff !important;
     }
 
     /* ---------- Expanders (route cards) ---------- */
@@ -120,12 +141,12 @@ st.markdown(
     }
     .section-header .badge {
         width: 36px; height: 36px; border-radius: 10px; flex-shrink: 0;
-        background: linear-gradient(135deg, #4F46E5 0%, #0EA5E9 100%);
+        background: linear-gradient(135deg, #4F46E5 0%, #0277B6 100%);
         display: flex; align-items: center; justify-content: center;
         font-size: 1.05rem;
     }
     .section-header .title {font-weight: 800; font-size: 1.08rem; line-height: 1.3;}
-    .section-header .subtitle {font-size: 0.82rem; opacity: 0.65; margin-top: 1px;}
+    .section-header .subtitle {font-size: 0.82rem; opacity: 0.82; margin-top: 1px;}
 
     /* ---------- Empty state ---------- */
     .empty-state {
@@ -139,7 +160,7 @@ st.markdown(
     .empty-state .emoji {font-size: 2.3rem;}
     .empty-state .title {font-weight: 700; font-size: 1.05rem; margin-top: 12px;}
     .empty-state .desc {
-        font-size: 0.86rem; opacity: 0.7; margin-top: 4px;
+        font-size: 0.86rem; opacity: 0.82; margin-top: 4px;
         max-width: 440px; margin-left: auto; margin-right: auto; line-height: 1.5;
     }
 
@@ -147,14 +168,14 @@ st.markdown(
 
     /* ---------- Penanda langkah ---------- */
     .stepper {display: flex; align-items: center; gap: 8px; margin: 4px 0 18px 0;}
-    .stepper .step {display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 0.9rem; opacity: 0.55;}
+    .stepper .step {display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 0.9rem; opacity: 0.75;}
     .stepper .step .dot {
         width: 26px; height: 26px; border-radius: 50%; display: inline-flex; align-items: center;
         justify-content: center; font-size: 0.8rem; border: 2px solid rgba(128,128,128,0.5);
     }
     .stepper .step.active, .stepper .step.done {opacity: 1;}
-    .stepper .step.active .dot {border-color: #4F46E5; color: #4F46E5; box-shadow: 0 0 0 4px rgba(79,70,229,0.15);}
-    .stepper .step.done .dot {background: linear-gradient(135deg, #4F46E5 0%, #0EA5E9 100%); border-color: transparent; color: #fff;}
+    .stepper .step.active .dot {background: linear-gradient(135deg, #4F46E5 0%, #0277B6 100%); border-color: transparent; color: #fff; box-shadow: 0 0 0 4px rgba(79,70,229,0.22);}
+    .stepper .step.done .dot {background: linear-gradient(135deg, #4F46E5 0%, #0277B6 100%); border-color: transparent; color: #fff;}
     .stepper .bar {flex: 1 1 16px; height: 2px; background: rgba(128,128,128,0.3); min-width: 12px;}
 
     /* ---------- Footer ---------- */
@@ -166,7 +187,7 @@ st.markdown(
     .app-footer::before {
         content: ""; position: absolute; top: -2px; left: 50%; transform: translateX(-50%);
         width: 120px; height: 3px; border-radius: 3px;
-        background: linear-gradient(135deg, #4F46E5 0%, #0EA5E9 100%);
+        background: linear-gradient(135deg, #4F46E5 0%, #0277B6 100%);
     }
     .app-footer .f-brand {font-weight: 800; font-size: 1rem; letter-spacing: 0.01em;}
     .app-footer .f-bolt {display: inline-block; animation: boltPulse 2.4s ease-in-out infinite;}
@@ -176,10 +197,8 @@ st.markdown(
     }
     .app-footer .f-dev {font-size: 0.88rem; margin-top: 8px; opacity: 0.85;}
     .app-footer .f-name {
-        font-weight: 800;
-        background: linear-gradient(135deg, #4F46E5 0%, #0EA5E9 100%);
-        -webkit-background-clip: text; background-clip: text;
-        -webkit-text-fill-color: transparent; color: transparent;
+        font-weight: 800; color: inherit; padding-bottom: 2px;
+        background: linear-gradient(135deg, #4F46E5 0%, #0277B6 100%) no-repeat 0 100% / 100% 3px;
     }
     .app-footer .f-heart {color: #ef4444; display: inline-block; animation: heartBeat 1.8s ease-in-out infinite;}
     @keyframes heartBeat {0%, 100% {transform: scale(1);} 50% {transform: scale(1.25);}}
@@ -191,7 +210,7 @@ st.markdown(
         background: rgba(128,128,128,0.10); border: 1px solid rgba(128,128,128,0.2);
         opacity: 0.85;
     }
-    .app-footer .f-copy {font-size: 0.72rem; opacity: 0.5; margin-top: 12px;}
+    .app-footer .f-copy {font-size: 0.72rem; opacity: 0.75; margin-top: 12px;}
     </style>
     """,
     unsafe_allow_html=True,
