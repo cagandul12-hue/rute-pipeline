@@ -14,7 +14,9 @@ import os
 import json
 import time
 import base64
+import unicodedata
 from urllib.parse import unquote, quote
+from xml.sax.saxutils import escape as xml_escape
 from sklearn.cluster import KMeans
 from ortools.constraint_solver import pywrapcp
 from ortools.constraint_solver import routing_enums_pb2
@@ -280,9 +282,10 @@ def render_footer():
 
 
 ROUTE_COLORS = [
-    "#e6194B", "#3cb44b", "#4363d8", "#f58231", "#911eb4",
+    "#e6194B", "#3cb44b", "#4363d8", "#f58231", "#911eb4",   # 🔴 🟢 🔵 🟠 🟣
+    "#ffe119", "#9A6324", "#2b2b2b", "#aab2bd",               # 🟡 🟤 ⚫ ⚪
     "#42d4f4", "#f032e6", "#bfef45", "#fabed4", "#469990",
-    "#dcbeff", "#9A6324", "#800000", "#aaffc3", "#000075",
+    "#dcbeff", "#800000", "#aaffc3", "#000075",
 ]
 ROUTE_EMOJIS = ["🔴", "🟢", "🔵", "🟠", "🟣", "🟡", "🟤", "⚫", "⚪"]
 
@@ -946,6 +949,459 @@ def build_whatsapp_text(r, map_links):
     return "\n".join(lines)
 
 
+# ==========================================================================================
+# HASIL RUTE: finalisasi, ubah urutan manual, peta gabungan, lembar PDF
+# ==========================================================================================
+def finalize_route(route_df, order, distance_matrix, duration_matrix, route_id,
+                   start_dt, visit_sec, has_start, round_trip, base_date):
+    """Bangun tabel rute + jadwal + total jarak/waktu dari sebuah URUTAN.
+
+    Dipakai saat rute pertama kali dibuat (urutan dari TSP) dan saat pengguna
+    mengubah urutan secara manual — matriks jarak/waktu dipakai ulang, jadi
+    tidak perlu memanggil OSRM lagi.
+    """
+    optimized_df = route_df.iloc[order].reset_index(drop=True)
+    optimized_df["sequence"] = optimized_df.index + 1
+    optimized_df["route_name"] = f"Rute {route_id + 1}"
+    arrivals, departs, back_dt, finish_dt = build_schedule(
+        duration_matrix, order, start_dt, visit_sec, has_start, round_trip
+    )
+    optimized_df["jam_tiba"] = [_clock(t, base_date) for t in arrivals]
+    if visit_sec:
+        optimized_df["jam_selesai"] = [_clock(t, base_date) for t in departs]
+    n_visits = len(order) - (1 if has_start else 0)
+    return {
+        "df": optimized_df,
+        "distance_km": route_leg_sum(distance_matrix, order, round_trip) / 1000,
+        "duration_sec": route_leg_sum(duration_matrix, order, round_trip),
+        "visit_sec": visit_sec * n_visits,
+        "finish_label": _clock(finish_dt, base_date),
+        "back_label": _clock(back_dt, base_date) if back_dt else None,
+    }
+
+
+def build_excel_bytes(route_summaries):
+    final_df = pd.concat([r["df"] for r in route_summaries], ignore_index=True)
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        final_df.to_excel(writer, index=False, sheet_name="Semua Rute")
+        for r in route_summaries:
+            sheet_name = f"Rute {r['route_id'] + 1}"[:31]
+            r["df"].to_excel(writer, index=False, sheet_name=sheet_name)
+    return buffer.getvalue()
+
+
+def route_links_info(r, max_waypoints):
+    """Link Google Maps + nomor urut titik untuk sebuah rute (termasuk kaki pulang bila pulang-pergi)."""
+    df = r["df"]
+    is_round = bool(r.get("round_trip"))
+    link_df = pd.concat([df, df.iloc[[0]]], ignore_index=True) if is_round else df
+    seq_nums = list(df["sequence"]) + ([df["sequence"].iloc[0]] if is_round else [])
+    return generate_google_maps_links(link_df, max_waypoints), seq_nums, link_df
+
+
+def _move_stop(route_id, action):
+    """Callback tombol ubah-urutan: up / down / top / bottom / reset."""
+    res = st.session_state.get("route_result")
+    if not res:
+        return
+    r = next((x for x in res["route_summaries"] if x["route_id"] == route_id), None)
+    if r is None:
+        return
+    order = list(r["order"])
+    min_pos = 1 if r["has_start"] else 0  # titik awal (kalau ada) terkunci di urutan pertama
+    if action == "reset":
+        new_order = list(r["optimal_order"])
+    else:
+        node = st.session_state.get(f"mv_sel_{route_id}")
+        if node not in order:
+            return
+        p = order.index(node)
+        if p < min_pos:
+            return
+        if action == "up" and p > min_pos:
+            order[p - 1], order[p] = order[p], order[p - 1]
+        elif action == "down" and p < len(order) - 1:
+            order[p + 1], order[p] = order[p], order[p + 1]
+        elif action == "top":
+            order.insert(min_pos, order.pop(p))
+        elif action == "bottom":
+            order.append(order.pop(p))
+        new_order = order
+    r.update(
+        finalize_route(
+            r["route_df"], new_order, r["distance_matrix"], r["duration_matrix"], route_id,
+            r["start_dt"], r["visit_sec_each"], r["has_start"], r["round_trip"], r["base_date"],
+        )
+    )
+    r["order"] = new_order
+    r["manual"] = new_order != r["optimal_order"]
+    res["excel_bytes"] = build_excel_bytes(res["route_summaries"])
+
+
+def render_reorder_controls(r):
+    """Pilih satu merchant lalu geser naik/turun — sederhana dan nyaman di HP."""
+    rid = r["route_id"]
+    order, route_df = r["order"], r["route_df"]
+    min_pos = 1 if r["has_start"] else 0
+    movable = order[min_pos:]
+    if len(movable) < 2:
+        st.caption("Rute ini hanya punya satu merchant, tidak ada yang perlu diurutkan ulang.")
+        return
+    key = f"mv_sel_{rid}"
+    if st.session_state.get(key) not in movable:
+        st.session_state.pop(key, None)
+    st.selectbox(
+        "Pilih merchant yang mau dipindah",
+        movable,
+        format_func=lambda n, _o=order, _d=route_df: f"{_o.index(n) + 1}. {_d.loc[n, 'merchant_name']}",
+        key=key,
+    )
+    with st.container(key=f"mvrow_a_{rid}"):
+        b1, b2 = st.columns(2)
+        with b1:
+            st.button("⬆️ Naik", key=f"mv_up_{rid}", on_click=_move_stop, args=(rid, "up"), width='stretch')
+        with b2:
+            st.button("⬇️ Turun", key=f"mv_down_{rid}", on_click=_move_stop, args=(rid, "down"), width='stretch')
+    with st.container(key=f"mvrow_b_{rid}"):
+        b3, b4 = st.columns(2)
+        with b3:
+            st.button("⏫ Ke awal", key=f"mv_top_{rid}", on_click=_move_stop, args=(rid, "top"), width='stretch')
+        with b4:
+            st.button("⏬ Ke akhir", key=f"mv_bottom_{rid}", on_click=_move_stop, args=(rid, "bottom"), width='stretch')
+    st.button(
+        "↩️ Kembalikan ke urutan optimal", key=f"mv_reset_{rid}", on_click=_move_stop,
+        args=(rid, "reset"), disabled=not r.get("manual"), width='stretch',
+    )
+    if r.get("manual"):
+        dk = r["distance_km"] - r["optimal_distance_km"]
+        dm = (r["duration_sec"] - r["optimal_duration_sec"]) / 60
+        st.caption(f"✏️ Urutan diubah manual: {dk:+.1f} km · {dm:+.0f} menit dibanding urutan optimal.")
+    if r["has_start"]:
+        st.caption("Titik awal selalu di urutan pertama dan tidak bisa dipindah.")
+
+
+def _text_color_for(hex_color):
+    """Hitam/putih mana yang lebih terbaca di atas warna latar ini."""
+    h = hex_color.lstrip("#")
+    rr, gg, bb = (int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    lin = [v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4 for v in (rr, gg, bb)]
+    lum = 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+    return "#1f2937" if lum > 0.40 else "#ffffff"
+
+
+def numbered_icon(label, color, is_start=False):
+    """Penanda bulat bernomor berwarna sesuai rute (S = titik awal)."""
+    bg = "#111827" if is_start else color
+    fg = "#ffffff" if is_start else _text_color_for(color)
+    size = 28 if len(str(label)) >= 3 else 24
+    html = (
+        f'<div style="background:{bg};color:{fg};border:2px solid #fff;border-radius:50%;'
+        f'width:{size}px;height:{size}px;line-height:{size - 4}px;text-align:center;'
+        f'font:700 12px/{size - 4}px sans-serif;box-shadow:0 1px 5px rgba(0,0,0,.45);">{label}</div>'
+    )
+    return folium.DivIcon(html=html, icon_size=(size, size), icon_anchor=(size // 2, size // 2))
+
+
+def build_combined_map(route_summaries):
+    """Satu peta untuk semua rute: warna berbeda per rute, bisa dinyalakan/dimatikan."""
+    lats = [v for r in route_summaries for v in r["df"]["latitude"]]
+    lons = [v for r in route_summaries for v in r["df"]["longitude"]]
+    fmap = folium.Map(
+        location=[sum(lats) / len(lats), sum(lons) / len(lons)], zoom_start=11, control_scale=True
+    )
+    start_drawn = False
+    for r in route_summaries:
+        rid = r["route_id"]
+        df = r["df"]
+        color = ROUTE_COLORS[rid % len(ROUTE_COLORS)]
+        dot = (
+            f'<span style="display:inline-block;width:12px;height:12px;border-radius:50%;'
+            f'background:{color};margin-right:6px;vertical-align:middle;"></span>'
+        )
+        n_stops = len(df) - (1 if r.get("has_start") else 0)
+        group = folium.FeatureGroup(
+            name=f"{dot}Rute {rid + 1} · {n_stops} titik · {r['distance_km']:.1f} km", show=True
+        )
+        coords = [[row["latitude"], row["longitude"]] for _, row in df.iterrows()]
+        line = coords + ([coords[0]] if r.get("round_trip") else [])
+        folium.PolyLine(line, weight=4, color=color, opacity=0.85).add_to(group)
+        for idx, row in df.iterrows():
+            is_start = bool(r.get("has_start")) and idx == 0
+            if is_start:
+                if start_drawn:
+                    continue  # titik awal sama untuk semua rute: gambar sekali saja
+                start_drawn = True
+            eta = row["jam_tiba"] if "jam_tiba" in df.columns else ""
+            tip = ("Titik awal" if is_start else f"Rute {rid + 1} · {int(row['sequence'])}") + f" · {row['merchant_name']}"
+            folium.Marker(
+                [row["latitude"], row["longitude"]],
+                icon=numbered_icon("S" if is_start else int(row["sequence"]), color, is_start),
+                tooltip=tip,
+                popup=folium.Popup(f"{tip}" + (f"<br>Tiba ±{eta}" if eta else ""), max_width=260),
+            ).add_to(group)
+        group.add_to(fmap)
+    folium.LayerControl(collapsed=False).add_to(fmap)
+    fmap.fit_bounds([[min(lats), min(lons)], [max(lats), max(lons)]], padding=(30, 30))
+    return fmap
+
+
+# --- PDF-START ---
+try:
+    from reportlab.lib import colors as rl_colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (
+        BaseDocTemplate, Frame, PageTemplate, Paragraph, Spacer, Table, TableStyle,
+        PageBreak, KeepTogether, Flowable,
+    )
+    from reportlab.graphics.barcode.qr import QrCodeWidget
+    from reportlab.graphics.shapes import Drawing
+
+    PDF_OK = True
+except Exception:  # reportlab belum terpasang -> fitur PDF disembunyikan, aplikasi tetap jalan
+    PDF_OK = False
+
+PDF_BRAND = "#2563EB"
+_ID_MONTHS = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli",
+              "Agustus", "September", "Oktober", "November", "Desember"]
+
+
+def _pdf_safe(text):
+    """Font bawaan PDF hanya mengenal Latin-1: samakan tanda baca umum, buang karakter yang tak didukung."""
+    t = str(text if text is not None else "")
+    for a, b in (("\u2013", "-"), ("\u2014", "-"), ("\u2018", "'"), ("\u2019", "'"),
+                 ("\u201c", '"'), ("\u201d", '"'), ("\u00a0", " "), ("\u2022", "-")):
+        t = t.replace(a, b)
+    out = []
+    for ch in t:
+        try:
+            ch.encode("latin-1")
+            out.append(ch)
+        except UnicodeEncodeError:
+            plain = "".join(c for c in unicodedata.normalize("NFKD", ch) if not unicodedata.combining(c))
+            try:
+                plain.encode("latin-1")
+                out.append(plain)
+            except UnicodeEncodeError:
+                pass  # emoji dsb. dibuang
+    return "".join(out).strip()
+
+
+def _fmt_date_id(iso):
+    try:
+        d = datetime.date.fromisoformat(iso)
+        return f"{d.day} {_ID_MONTHS[d.month - 1]} {d.year}"
+    except Exception:
+        return ""
+
+
+def _pdf_payload(r, links, seq_nums, result):
+    """Ringkas satu rute jadi data polos (mudah di-cache) untuk dibuat PDF-nya."""
+    df = r["df"]
+    rows = []
+    for _, row in df.iterrows():
+        rows.append({
+            "seq": int(row["sequence"]), "name": str(row["merchant_name"]),
+            "lat": float(row["latitude"]), "lon": float(row["longitude"]),
+            "tiba": str(row["jam_tiba"]) if "jam_tiba" in df.columns else "",
+            "selesai": str(row["jam_selesai"]) if "jam_selesai" in df.columns else "",
+        })
+    return {
+        "route_no": int(r["route_id"]) + 1, "rows": rows,
+        "has_start": bool(r.get("has_start")), "round_trip": bool(r.get("round_trip")),
+        "back_label": r.get("back_label") or "", "manual": bool(r.get("manual")),
+        "distance_km": float(r["distance_km"]), "duration_sec": float(r["duration_sec"]),
+        "visit_sec": float(r.get("visit_sec", 0)), "finish_label": r.get("finish_label") or "",
+        "show_selesai": "jam_selesai" in df.columns,
+        "links": [(int(a), int(b), u) for a, b, u in links],
+        "seq_nums": [int(x) for x in seq_nums],
+        "date": result.get("base_date", ""), "start_label": result.get("start_label", ""),
+    }
+
+
+if PDF_OK:
+    class _SetRoute(Flowable):
+        """Penanda tak terlihat: memberi tahu footer halaman ini milik rute yang mana."""
+        def __init__(self, label):
+            super().__init__()
+            self.label = label
+            self.width = self.height = 0
+
+        def draw(self):
+            self.canv._route_label = self.label
+
+    class _CheckBox(Flowable):
+        """Kotak kosong untuk dicentang kurir dengan pena."""
+        def __init__(self, size=5.0 * mm):
+            super().__init__()
+            self.size = size
+            self.width = self.height = size
+
+        def draw(self):
+            self.canv.setStrokeColor(rl_colors.HexColor("#6B7280"))
+            self.canv.setLineWidth(1)
+            self.canv.roundRect(0, 0, self.size, self.size, 1.2 * mm, stroke=1, fill=0)
+
+
+def _qr_shorten(url):
+    """Perpendek URL untuk QR supaya kodenya tidak terlalu padat (lebih mudah dipindai):
+    koordinat dibulatkan ke 5 desimal (~1 m) dan travelmode dibuang (Maps default-nya mobil)."""
+    url = url.replace("&travelmode=driving", "")
+    return re.sub(r"-?\d+\.\d{6,}", lambda m: f"{float(m.group(0)):.5f}", url)
+
+
+def _qr_drawing(url, size):
+    widget = QrCodeWidget(_qr_shorten(url), barLevel="L")
+    x0, y0, x1, y1 = widget.getBounds()
+    w, h = x1 - x0, y1 - y0
+    d = Drawing(size, size, transform=[size / w, 0, 0, size / h, 0, 0])
+    d.add(widget)
+    return d
+
+
+def build_routes_pdf(payloads):
+    """Satu PDF; tiap rute mulai di halaman baru. Untuk satu rute = lembar cetak per kurir."""
+    buf = io.BytesIO()
+    doc = BaseDocTemplate(
+        buf, pagesize=A4, leftMargin=14 * mm, rightMargin=14 * mm,
+        topMargin=14 * mm, bottomMargin=18 * mm,
+        title="Lembar Rute", author="Routing & Extractor",
+    )
+    state = {"label": None, "page": 0}
+
+    def footer(canvas, _doc):
+        label = getattr(canvas, "_route_label", "")
+        state["page"] = 1 if label != state["label"] else state["page"] + 1
+        state["label"] = label
+        canvas.saveState()
+        canvas.setStrokeColor(rl_colors.HexColor("#D1D5DB"))
+        canvas.line(14 * mm, 13 * mm, A4[0] - 14 * mm, 13 * mm)
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(rl_colors.HexColor("#6B7280"))
+        canvas.drawString(14 * mm, 8.5 * mm, f"{label}  -  Halaman {state['page']}")
+        canvas.drawRightString(A4[0] - 14 * mm, 8.5 * mm, "Routing & Extractor")
+        canvas.restoreState()
+
+    frame = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height,
+                  leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)
+    doc.addPageTemplates([PageTemplate(id="main", frames=[frame], onPageEnd=footer)])
+
+    st_title = ParagraphStyle("t", fontName="Helvetica-Bold", fontSize=24, leading=28, textColor=rl_colors.white)
+    st_kicker = ParagraphStyle("k", fontName="Helvetica", fontSize=8.5, leading=11, textColor=rl_colors.HexColor("#DBEAFE"))
+    st_right = ParagraphStyle("r", fontName="Helvetica", fontSize=9.5, leading=13, textColor=rl_colors.white, alignment=2)
+    st_meta = ParagraphStyle("m", fontName="Helvetica", fontSize=9.5, leading=14, textColor=rl_colors.HexColor("#111827"))
+    st_cell = ParagraphStyle("c", fontName="Helvetica", fontSize=9.5, leading=12, textColor=rl_colors.HexColor("#111827"))
+    st_head = ParagraphStyle("h", fontName="Helvetica-Bold", fontSize=8.5, leading=11, textColor=rl_colors.white)
+    st_small = ParagraphStyle("s", fontName="Helvetica", fontSize=8, leading=10, textColor=rl_colors.HexColor("#6B7280"))
+    st_h2 = ParagraphStyle("h2", fontName="Helvetica-Bold", fontSize=10, leading=13, textColor=rl_colors.HexColor("#111827"))
+
+    story = []
+    for pi, p in enumerate(payloads):
+        if pi > 0:
+            story.append(PageBreak())
+        label = f"Rute {p['route_no']}"
+        story.append(_SetRoute(label))
+
+        band = Table(
+            [[[Paragraph("LEMBAR RUTE", st_kicker), Paragraph(label, st_title)],
+              Paragraph(
+                  xml_escape(_fmt_date_id(p["date"]))
+                  + (f"<br/>Mulai {xml_escape(p['start_label'])}" if p["start_label"] else ""), st_right)]],
+            colWidths=[doc.width * 0.62, doc.width * 0.38],
+        )
+        band.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), rl_colors.HexColor(PDF_BRAND)),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 12), ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+            ("TOPPADDING", (0, 0), (-1, -1), 10), ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+        ]))
+        story += [band, Spacer(1, 4 * mm)]
+
+        n_stops = len(p["rows"]) - (1 if p["has_start"] else 0)
+        parts = [f"<b>{n_stops}</b> merchant", f"<b>~{p['distance_km']:.1f} km</b>",
+                 f"Perjalanan {xml_escape(format_duration(p['duration_sec']))}"]
+        if p["visit_sec"]:
+            parts.append(f"Kunjungan {xml_escape(format_duration(p['visit_sec']))}")
+        if p["finish_label"]:
+            parts.append(f"Selesai +/-{xml_escape(p['finish_label'])}" + (" (sudah pulang)" if p["round_trip"] else ""))
+        story.append(Paragraph("  |  ".join(parts), st_meta))
+        story.append(Spacer(1, 2 * mm))
+        story.append(Paragraph(
+            "Kurir: ________________________________ &nbsp;&nbsp;&nbsp; Kendaraan / Plat: ____________________", st_meta))
+        if p["manual"]:
+            story.append(Spacer(1, 1.5 * mm))
+            story.append(Paragraph("Urutan kunjungan telah disesuaikan secara manual.", st_small))
+        story.append(Spacer(1, 4 * mm))
+
+        # tabel kunjungan
+        head = ["No", "Merchant", "Tiba"] + (["Selesai"] if p["show_selesai"] else []) + ["Cek", "Catatan"]
+        data = [[Paragraph(h, st_head) for h in head]]
+
+        def row_cells(no, name_html, tiba, selesai):
+            cells = [Paragraph(no, st_cell), Paragraph(name_html, st_cell), Paragraph(xml_escape(tiba), st_cell)]
+            if p["show_selesai"]:
+                cells.append(Paragraph(xml_escape(selesai), st_cell))
+            cells += [_CheckBox(), ""]
+            return cells
+
+        for i, row in enumerate(p["rows"]):
+            is_start = p["has_start"] and i == 0
+            name = xml_escape(_pdf_safe(row["name"])) or "-"
+            prefix = "<font color='#2563EB'><b>[TITIK AWAL]</b></font> " if is_start else ""
+            coord = f"<br/><font size='7' color='#6B7280'>{row['lat']:.6f}, {row['lon']:.6f}</font>"
+            data.append(row_cells("S" if is_start else str(row["seq"]), f"{prefix}<b>{name}</b>{coord}",
+                                  row["tiba"], row["selesai"]))
+        if p["round_trip"] and p["rows"]:
+            data.append(row_cells("-", "<i>Kembali ke titik awal</i>", p["back_label"], ""))
+
+        fixed = 11 + 20 + (20 if p["show_selesai"] else 0) + 12
+        merch_w = 70
+        notes_w = max(30, doc.width / mm - fixed - merch_w)
+        widths = [11 * mm, merch_w * mm, 20 * mm] + ([20 * mm] if p["show_selesai"] else []) + [12 * mm, notes_w * mm]
+        tbl = Table(data, colWidths=widths, repeatRows=1)
+        tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), rl_colors.HexColor("#1E3A8A")),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [rl_colors.white, rl_colors.HexColor("#F3F6FC")]),
+            ("GRID", (0, 0), (-1, -1), 0.5, rl_colors.HexColor("#CBD5E1")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("ALIGN", (-2, 1), (-2, -1), "CENTER"),
+            ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ("LEFTPADDING", (0, 0), (-1, -1), 5), ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ]))
+        story.append(tbl)
+
+        # QR Google Maps: 50 mm (cukup besar untuk dipindai kamera HP), maks. 3 per baris, maks. 6 bagian
+        if p["links"]:
+            story.append(Spacer(1, 6 * mm))
+            total = len(p["links"])
+            qr_cells = []
+            for i, (ia, ib, url) in enumerate(p["links"][:6], start=1):
+                cap = ("Buka seluruh rute di Google Maps" if total == 1
+                       else f"Bagian {i}/{total}: titik {p['seq_nums'][ia]} - {p['seq_nums'][ib]}")
+                qr_cells.append([_qr_drawing(url, 50 * mm), Paragraph(xml_escape(cap), st_small)])
+            qr_rows = [qr_cells[k:k + 3] for k in range(0, len(qr_cells), 3)]
+            qr_tbl = Table(qr_rows, colWidths=[58 * mm] * min(3, len(qr_cells)), hAlign="LEFT")
+            qr_tbl.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"),
+                                        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                                        ("BOTTOMPADDING", (0, 0), (-1, -1), 6)]))
+            block = [Paragraph("Scan dengan kamera HP untuk membuka rute di Google Maps", st_h2),
+                     Spacer(1, 2 * mm), qr_tbl]
+            if total > 6:
+                block.append(Paragraph(f"Rute panjang dibagi {total} bagian; 6 bagian pertama ditampilkan.", st_small))
+            story.append(KeepTogether(block))
+
+    doc.build(story)
+    return buf.getvalue()
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def _routes_pdf_cached(payloads):
+    return build_routes_pdf(payloads)
+# --- PDF-END ---
+
+
 def _template_df():
     return pd.DataFrame(
         {
@@ -1035,13 +1491,16 @@ input, textarea, [data-baseweb="select"] {font-size: 16px !important;}
 /* pengecualian: baris yang tetap berdampingan */
 .st-key-navrow [data-testid="stHorizontalBlock"],
 .st-key-moderow [data-testid="stHorizontalBlock"],
+[class*="st-key-mvrow"] [data-testid="stHorizontalBlock"],
 [class*="st-key-filerow"] [data-testid="stHorizontalBlock"] {
     flex-direction: row !important; flex-wrap: nowrap !important; gap: 0.5rem !important;
 }
 .st-key-navrow [data-testid="stHorizontalBlock"] > [data-testid="stColumn"],
 .st-key-moderow [data-testid="stHorizontalBlock"] > [data-testid="stColumn"],
+[class*="st-key-mvrow"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"],
 .st-key-navrow [data-testid="stHorizontalBlock"] > [data-testid="column"],
-.st-key-moderow [data-testid="stHorizontalBlock"] > [data-testid="column"] {
+.st-key-moderow [data-testid="stHorizontalBlock"] > [data-testid="column"],
+[class*="st-key-mvrow"] [data-testid="stHorizontalBlock"] > [data-testid="column"] {
     width: auto !important; flex: 1 1 0 !important; min-width: 0 !important;
 }
 .st-key-moderow .stButton > button {min-height: 2.4rem; font-size: 0.85rem !important;}
@@ -1076,6 +1535,7 @@ if IS_MOBILE:
     st.markdown(MOBILE_CSS, unsafe_allow_html=True)
 
 MAP_H = 260 if IS_MOBILE else 350
+COMBINED_MAP_H = 380 if IS_MOBILE else 520
 # Hanya kirim `height` di mode Mobile; height=None ditolak Streamlit versi baru.
 TABLE_KW = {"height": 260} if IS_MOBILE else {}
 
@@ -1757,42 +2217,34 @@ if st.session_state.page == "Routing":
 
                     has_start = bool(start_lat and start_lon)
                     best_route = solve_tsp(distance_matrix, round_trip=round_trip, fixed_start=has_start)
-                    optimized_df = route_df.iloc[best_route].reset_index(drop=True)
-                    optimized_df["sequence"] = optimized_df.index + 1
-                    optimized_df["route_name"] = f"Rute {route_id + 1}"
-
-                    arrivals, departs, back_dt, finish_dt = build_schedule(
-                        duration_matrix, best_route, start_dt, visit_sec, has_start, round_trip
+                    fin = finalize_route(
+                        route_df, best_route, distance_matrix, duration_matrix, route_id,
+                        start_dt, visit_sec, has_start, round_trip, base_date,
                     )
-                    optimized_df["jam_tiba"] = [_clock(t, base_date) for t in arrivals]
-                    if visit_sec:
-                        optimized_df["jam_selesai"] = [_clock(t, base_date) for t in departs]
-                    n_visits = len(best_route) - (1 if has_start else 0)
-                    all_routes.append(optimized_df)
-
-                    route_distance_km = route_leg_sum(distance_matrix, best_route, round_trip) / 1000
-                    route_duration_sec = route_leg_sum(duration_matrix, best_route, round_trip)
-
+                    all_routes.append(fin["df"])
                     route_summaries.append(
                         {
                             "route_id": route_id,
-                            "df": optimized_df,
-                            "distance_km": route_distance_km,
-                            "duration_sec": route_duration_sec,
-                            "visit_sec": visit_sec * n_visits,
-                            "finish_label": _clock(finish_dt, base_date),
+                            **fin,
                             "real_roads": used_real_roads,
                             "round_trip": round_trip,
+                            "has_start": has_start,
+                            # data mentah untuk ubah-urutan manual (tanpa memanggil OSRM lagi)
+                            "route_df": route_df,
+                            "distance_matrix": distance_matrix,
+                            "duration_matrix": duration_matrix,
+                            "order": list(best_route),
+                            "optimal_order": list(best_route),
+                            "optimal_distance_km": fin["distance_km"],
+                            "optimal_duration_sec": fin["duration_sec"],
+                            "manual": False,
+                            "start_dt": start_dt,
+                            "visit_sec_each": visit_sec,
+                            "base_date": base_date,
                         }
                     )
 
-            final_df = pd.concat([r["df"] for r in route_summaries], ignore_index=True)
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-                final_df.to_excel(writer, index=False, sheet_name="Semua Rute")
-                for r in route_summaries:
-                    sheet_name = f"Rute {r['route_id'] + 1}"[:31]
-                    r["df"].to_excel(writer, index=False, sheet_name=sheet_name)
+            excel_bytes = build_excel_bytes(route_summaries)
 
             # Persist everything needed to render the result, so later reruns
             # (e.g. clicking the map or the download button) don't wipe it out.
@@ -1800,7 +2252,9 @@ if st.session_state.page == "Routing":
                 "fingerprint": data_fingerprint,
                 "route_summaries": route_summaries,
                 "total_points": len(df) + (1 if start_lat and start_lon else 0) * len(route_summaries),
-                "excel_bytes": buffer.getvalue(),
+                "excel_bytes": excel_bytes,
+                "base_date": base_date.isoformat(),
+                "start_label": start_time.strftime("%H:%M"),
                 "start_ok": bool(start_lat and start_lon),
                 "start_link_given": bool(starting_link),
                 "used_real_roads": not any_fallback_used,
@@ -1845,6 +2299,16 @@ if st.session_state.page == "Routing":
                         format_duration(total_duration + total_visit),
                     )
 
+            if len(route_summaries) >= 2:
+                section_header(
+                    "🗺️", "Peta Semua Rute",
+                    "Gambaran keseluruhan — nyalakan atau matikan tiap rute lewat kontrol di pojok kanan atas peta",
+                )
+                st_folium(
+                    build_combined_map(route_summaries), width=None, height=COMBINED_MAP_H,
+                    key="map_all", returned_objects=[],
+                )
+
             section_header(
                 "3️⃣", "Rute yang Sudah Dioptimalkan",
                 "Klik tiap rute untuk lihat urutan kunjungan dan petanya",
@@ -1858,10 +2322,12 @@ if st.session_state.page == "Routing":
 
                 route_total_sec = r["duration_sec"] + r.get("visit_sec", 0)
                 warn_mark = "" if r.get("real_roads", True) else " ⚠️ estimasi"
+                manual_mark = " ✏️ manual" if r.get("manual") else ""
                 with st.expander(
                     f"{emoji} Rute {route_id + 1} — {len(optimized_df)} titik — "
-                    f"~{r['distance_km']:.1f} km — ~{format_duration(route_total_sec)}{warn_mark}",
-                    expanded=(route_id == first_route_id),
+                    f"~{r['distance_km']:.1f} km — ~{format_duration(route_total_sec)}{warn_mark}{manual_mark}",
+                    # tetap terbuka saat sedang diedit (judulnya berubah tiap urutan digeser)
+                    expanded=(route_id == first_route_id) or bool(st.session_state.get(f"edit_{route_id}", False)),
                 ):
                     parts = [f"🚗 Perjalanan {format_duration(r['duration_sec'])}"]
                     if r.get("visit_sec"):
@@ -1884,14 +2350,11 @@ if st.session_state.page == "Routing":
                             **TABLE_KW,
                             hide_index=True,
                         )
-                        is_round = bool(r.get("round_trip"))
-                        link_df = (
-                            pd.concat([optimized_df, optimized_df.iloc[[0]]], ignore_index=True)
-                            if is_round else optimized_df
-                        )
-                        seq_nums = list(optimized_df["sequence"]) + (
-                            [optimized_df["sequence"].iloc[0]] if is_round else []
-                        )
+                        if st.checkbox("✏️ Ubah urutan manual", key=f"edit_{route_id}",
+                                       help="Geser merchant naik/turun, misalnya karena toko tutup jam tertentu atau ada janji. "
+                                            "Jarak, jam tiba, peta, Excel, WhatsApp, dan PDF ikut diperbarui."):
+                            render_reorder_controls(r)
+                        map_links, seq_nums, link_df = route_links_info(r, MAPS_MAX_WAYPOINTS_DESKTOP)
                         # Batas 9 titik singgah berlaku untuk aplikasi Google Maps (Android/iOS)
                         # MAUPUN desktop — dan tap link di HP hampir selalu membuka aplikasi
                         # tersebut (deep-link), bukan browser HP. Batas 3 titik singgah menurut
@@ -1900,7 +2363,6 @@ if st.session_state.page == "Routing":
                         # alasan untuk kasus paling umum, dan cukup beri catatan untuk skenario
                         # browser-HP yang lebih jarang terjadi.
                         max_wp = MAPS_MAX_WAYPOINTS_DESKTOP
-                        map_links = generate_google_maps_links(link_df, max_wp)
                         link_waypoints = max(0, len(link_df) - 2)
                         if len(map_links) == 1:
                             st.link_button("🚗 Buka di Google Maps", map_links[0][2], width='stretch')
@@ -1934,6 +2396,15 @@ if st.session_state.page == "Routing":
                             )
                         with st.popover("📋 Salin teks rute"):
                             st.code(wa_text, language=None)
+                        if PDF_OK:
+                            st.download_button(
+                                "🖨️ Unduh PDF (siap cetak)",
+                                data=_routes_pdf_cached([_pdf_payload(r, map_links, seq_nums, result)]),
+                                file_name=f"lembar_rute_{route_id + 1}.pdf",
+                                mime="application/pdf",
+                                key=f"pdf_{route_id}",
+                                width='stretch',
+                            )
 
                     with right:
                         center_lat = optimized_df["latitude"].mean()
@@ -1943,25 +2414,47 @@ if st.session_state.page == "Routing":
                         for idx, row in optimized_df.iterrows():
                             coord = [row["latitude"], row["longitude"]]
                             polyline_coords.append(coord)
+                            is_start_pt = bool(r.get("has_start")) and idx == 0
                             folium.Marker(
                                 coord,
                                 popup=f"{idx + 1}. {row['merchant_name']}",
-                                icon=folium.Icon(color="blue" if idx > 0 else "green"),
+                                tooltip=f"{'Titik awal' if is_start_pt else idx + 1} · {row['merchant_name']}",
+                                icon=numbered_icon("S" if is_start_pt else idx + 1, color, is_start_pt),
                             ).add_to(fmap)
                         if r.get("round_trip") and polyline_coords:
                             polyline_coords.append(polyline_coords[0])
                         folium.PolyLine(polyline_coords, weight=4, color=color).add_to(fmap)
                         st_folium(fmap, width=None, height=MAP_H, key=f"map_{route_id}", returned_objects=[])
 
-            section_header("📥", "Unduh Hasil", "Satu file Excel berisi semua rute, rapi per-sheet")
-            st.download_button(
-                label="📥 Download Hasil Routing (Excel)",
-                data=result["excel_bytes"],
-                file_name="hasil_routing.xlsx",
-                mime="application/vnd.ms-excel",
-                type="primary",
-                width='stretch',
+            section_header(
+                "📥", "Unduh Hasil",
+                "Excel berisi semua rute per-sheet, dan PDF siap cetak untuk dibawa kurir",
             )
+            dl1, dl2 = st.columns(2)
+            with dl1:
+                st.download_button(
+                    label="📥 Excel (semua rute)",
+                    data=result["excel_bytes"],
+                    file_name="hasil_routing.xlsx",
+                    mime="application/vnd.ms-excel",
+                    type="primary",
+                    width='stretch',
+                )
+            with dl2:
+                if PDF_OK:
+                    all_payloads = []
+                    for _r in route_summaries:
+                        _links, _seq, _ = route_links_info(_r, MAPS_MAX_WAYPOINTS_DESKTOP)
+                        all_payloads.append(_pdf_payload(_r, _links, _seq, result))
+                    st.download_button(
+                        label="🖨️ PDF semua rute (1 rute/halaman)",
+                        data=_routes_pdf_cached(all_payloads),
+                        file_name="lembar_rute_semua.pdf",
+                        mime="application/pdf",
+                        width='stretch',
+                    )
+                else:
+                    st.caption("PDF belum tersedia: pustaka `reportlab` belum terpasang di server.")
         elif result and result["fingerprint"] != data_fingerprint:
             st.info("ℹ️ Pengaturan atau data berubah — tekan **Buat Rute Optimal Sekarang** lagi untuk memperbarui hasil.")
     else:
