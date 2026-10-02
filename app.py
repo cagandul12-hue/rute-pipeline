@@ -598,6 +598,9 @@ def search_nominatim(query, limit=8):
         "q": query,
         "format": "jsonv2",
         "addressdetails": 1,
+        "namedetails": 1,  # gives the place's own OSM "name" tag — needed to
+                           # tell apart results that share a generic search
+                           # term (e.g. several "SPBU" with different codes)
         "limit": limit,
         "countrycodes": "id",
     }
@@ -609,6 +612,29 @@ def search_nominatim(query, limit=8):
         return resp.json()
     except Exception:
         return []
+
+
+def nominatim_result_name(result, fallback_query=""):
+    """Picks the most specific name available for a Nominatim result, so
+    that results sharing a generic search term (e.g. several "SPBU") stay
+    distinguishable instead of all being saved under the same name.
+
+    Priority: the place's own OSM name tag > the first segment of its full
+    address string (usually the specific place name) > the search term the
+    user typed > a generic placeholder.
+    """
+    namedetails = result.get("namedetails") or {}
+    specific_name = namedetails.get("name") or namedetails.get("name:id")
+    if specific_name:
+        return specific_name.strip()
+
+    display_name = result.get("display_name", "")
+    if display_name:
+        first_segment = display_name.split(",")[0].strip()
+        if first_segment:
+            return first_segment
+
+    return fallback_query.strip() or "Lokasi"
 
 
 def resolve_short_link(link):
@@ -2030,8 +2056,8 @@ elif st.session_state.page == "Extract":
                 except (KeyError, ValueError, TypeError):
                     st.error("❌ Data koordinat dari hasil pencarian tidak valid.")
                 else:
-                    name = st.session_state.get("nominatim_query_name") or chosen.get(
-                        "display_name", "Lokasi"
+                    name = nominatim_result_name(
+                        chosen, fallback_query=st.session_state.get("nominatim_query_name", "")
                     )
                     is_duplicate = any(
                         abs(d["latitude"] - lat) < 1e-5 and abs(d["longitude"] - lon) < 1e-5
