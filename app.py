@@ -1828,10 +1828,24 @@ if st.session_state.page == "Routing":
                         seq_nums = list(optimized_df["sequence"]) + (
                             [optimized_df["sequence"].iloc[0]] if is_round else []
                         )
-                        max_wp = MAPS_MAX_WAYPOINTS_MOBILE if IS_MOBILE else MAPS_MAX_WAYPOINTS_DESKTOP
+                        # Batas 9 titik singgah berlaku untuk aplikasi Google Maps (Android/iOS)
+                        # MAUPUN desktop — dan tap link di HP hampir selalu membuka aplikasi
+                        # tersebut (deep-link), bukan browser HP. Batas 3 titik singgah menurut
+                        # Google hanya berlaku kalau link dibuka di BROWSER HP secara spesifik,
+                        # jadi kita pakai 9 sebagai default supaya tidak kepecah link-nya tanpa
+                        # alasan untuk kasus paling umum, dan cukup beri catatan untuk skenario
+                        # browser-HP yang lebih jarang terjadi.
+                        max_wp = MAPS_MAX_WAYPOINTS_DESKTOP
                         map_links = generate_google_maps_links(link_df, max_wp)
+                        link_waypoints = max(0, len(link_df) - 2)
                         if len(map_links) == 1:
                             st.link_button("🚗 Buka di Google Maps", map_links[0][2], width='stretch')
+                            if IS_MOBILE and link_waypoints > MAPS_MAX_WAYPOINTS_MOBILE:
+                                st.caption(
+                                    "ℹ️ Kalau link ini dibuka di **browser HP** (bukan aplikasi Google "
+                                    f"Maps), Google Maps mungkin hanya menampilkan {MAPS_MAX_WAYPOINTS_MOBILE} "
+                                    "titik singgah pertama. Buka lewat aplikasi Google Maps untuk rute lengkap."
+                                )
                         elif len(map_links) > 1:
                             st.caption(
                                 f"ℹ️ Google Maps membatasi titik singgah (maks. {max_wp} per link), "
