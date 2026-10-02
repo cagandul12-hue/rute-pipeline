@@ -592,7 +592,15 @@ SHORT_LINK_DOMAINS = ("maps.app.goo.gl", "goo.gl/maps", "app.goo.gl")
 def search_nominatim(query, limit=8):
     """Free OpenStreetMap place search — no API key needed. Coverage of
     small/local merchants in Indonesia is thinner than Google, so this is
-    best used with a specific name plus a city/area hint."""
+    best used with a specific name plus a city/area hint.
+
+    Returns (results, error_message). error_message is None on a normal
+    request (even if it legitimately found zero places) and is set only
+    when the request itself failed — e.g. the public Nominatim server
+    rate-limited us (it's free but usage-capped) or the network timed out
+    — so the UI can tell "genuinely no match" apart from "couldn't even
+    ask", which previously both looked like a plain empty result.
+    """
     url = "https://nominatim.openstreetmap.org/search"
     params = {
         "q": query,
@@ -608,10 +616,18 @@ def search_nominatim(query, limit=8):
     headers = {"User-Agent": "RutePipelineOptimizerApp/1.0 (streamlit-community-app)"}
     try:
         resp = requests.get(url, params=params, headers=headers, timeout=8)
+        if resp.status_code == 429:
+            return [], "Layanan pencarian sedang dibatasi (terlalu banyak permintaan). Coba lagi dalam beberapa detik."
+        if resp.status_code == 403:
+            return [], "Layanan pencarian menolak permintaan ini (kemungkinan dibatasi sementara). Coba lagi nanti."
         resp.raise_for_status()
-        return resp.json()
+        return resp.json(), None
+    except requests.exceptions.Timeout:
+        return [], "Layanan pencarian tidak merespons (timeout). Coba lagi."
+    except requests.exceptions.RequestException:
+        return [], "Gagal menghubungi layanan pencarian — periksa koneksi internet, lalu coba lagi."
     except Exception:
-        return []
+        return [], "Terjadi kesalahan tak terduga saat mencari. Coba lagi."
 
 
 def nominatim_result_name(result, fallback_query=""):
@@ -1086,19 +1102,33 @@ if "dedupe_flag" not in st.session_state:
 
 
 def _sync_round_trip():
-    st.session_state.round_trip_flag = st.session_state._round_trip_widget
+    # .get() with a fallback — not direct attribute access — because
+    # "Buka Sesi" deliberately pops these widget keys to force a refresh,
+    # and if that happens to land in the same batch as this callback
+    # (e.g. the user edits a field then immediately clicks "Buka Sesi"
+    # before it blurs), the key can be briefly missing. Attribute access
+    # would crash the whole app in that case; .get() just no-ops safely.
+    st.session_state.round_trip_flag = st.session_state.get(
+        "_round_trip_widget", st.session_state.round_trip_flag
+    )
 
 
 def _sync_dedupe():
-    st.session_state.dedupe_flag = st.session_state._dedupe_widget
+    st.session_state.dedupe_flag = st.session_state.get(
+        "_dedupe_widget", st.session_state.dedupe_flag
+    )
 
 
 def _sync_use_extracted():
-    st.session_state.use_extracted_flag = st.session_state._use_extracted_widget
+    st.session_state.use_extracted_flag = st.session_state.get(
+        "_use_extracted_widget", st.session_state.use_extracted_flag
+    )
 
 
 def _sync_starting_link():
-    st.session_state.starting_link_saved = st.session_state._starting_link_widget
+    st.session_state.starting_link_saved = st.session_state.get(
+        "_starting_link_widget", st.session_state.starting_link_saved
+    )
 
 
 PLAN_MAX = "📏 Maksimal titik per rute"
@@ -1115,19 +1145,27 @@ for _k, _v in {
 
 
 def _sync_plan():
-    st.session_state.plan_mode_flag = st.session_state._plan_widget
+    st.session_state.plan_mode_flag = st.session_state.get(
+        "_plan_widget", st.session_state.plan_mode_flag
+    )
 
 
 def _sync_target():
-    st.session_state.target_routes_flag = int(st.session_state._target_widget)
+    st.session_state.target_routes_flag = int(
+        st.session_state.get("_target_widget", st.session_state.target_routes_flag)
+    )
 
 
 def _sync_visit():
-    st.session_state.visit_minutes_flag = int(st.session_state._visit_widget)
+    st.session_state.visit_minutes_flag = int(
+        st.session_state.get("_visit_widget", st.session_state.visit_minutes_flag)
+    )
 
 
 def _sync_start_time():
-    st.session_state.start_time_flag = st.session_state._start_time_widget
+    st.session_state.start_time_flag = st.session_state.get(
+        "_start_time_widget", st.session_state.start_time_flag
+    )
 
 
 # ---------- Simpan / buka sesi ----------
@@ -2024,12 +2062,14 @@ elif st.session_state.page == "Extract":
                     else search_query.strip()
                 )
                 with st.spinner("Mencari di OpenStreetMap..."):
-                    results = search_nominatim(full_query)
+                    results, search_error = search_nominatim(full_query)
                 st.session_state.nominatim_results = results
                 st.session_state.nominatim_searched_for = full_query
                 st.session_state.nominatim_query_name = search_query.strip()
                 st.session_state.pop("nominatim_selected_idx", None)
-                if not results:
+                if search_error:
+                    st.error(f"⚠️ {search_error}")
+                elif not results:
                     st.warning(
                         "Tidak ditemukan hasil. Coba nama yang lebih spesifik, tambahkan "
                         "kota/wilayah, atau gunakan tab **Dari Link Google Maps** sebagai alternatif "
