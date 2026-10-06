@@ -1274,7 +1274,8 @@ def build_combined_map(route_summaries):
     fmap = folium.Map(
         location=[sum(lats) / len(lats), sum(lons) / len(lons)], zoom_start=11, control_scale=True
     )
-    start_drawn = False
+    drawn_start_coords = set()  # dedup per KOORDINAT, bukan sekali untuk semua rute —
+                                 # penting untuk multi-depot, karena titik awal bisa beda-beda per rute
     for r in route_summaries:
         rid = r["route_id"]
         df = r["df"]
@@ -1293,11 +1294,13 @@ def build_combined_map(route_summaries):
         for idx, row in df.iterrows():
             is_start = bool(r.get("has_start")) and idx == 0
             if is_start:
-                if start_drawn:
-                    continue  # titik awal sama untuk semua rute: gambar sekali saja
-                start_drawn = True
+                coord_key = (round(row["latitude"], 6), round(row["longitude"], 6))
+                if coord_key in drawn_start_coords:
+                    continue  # titik awal persis sama sudah digambar — hindari tumpuk-tindih
+                drawn_start_coords.add(coord_key)
             eta = row["jam_tiba"] if "jam_tiba" in df.columns else ""
-            tip = ("Titik awal" if is_start else f"Rute {rid + 1} · {int(row['sequence'])}") + f" · {row['merchant_name']}"
+            start_label = f"Titik awal · {row['merchant_name']}" if is_start else f"Rute {rid + 1} · {int(row['sequence'])}"
+            tip = start_label if is_start else f"{start_label} · {row['merchant_name']}"
             folium.Marker(
                 [row["latitude"], row["longitude"]],
                 icon=numbered_icon("S" if is_start else int(row["sequence"]), color, is_start),
@@ -2848,6 +2851,33 @@ if st.session_state.page == "Routing":
                     )
                 else:
                     st.caption("PDF belum tersedia: pustaka `reportlab` belum terpasang di server.")
+
+            section_header(
+                "📲", "Kirim via WhatsApp",
+                "Satu pesan ringkas berisi semua rute sekaligus",
+            )
+            _all_wa_parts = []
+            for _r in route_summaries:
+                _links, _, _ = route_links_info(_r, MAPS_MAX_WAYPOINTS_DESKTOP)
+                _all_wa_parts.append(build_whatsapp_text(_r, _links))
+            wa_text_all = (
+                f"*Ringkasan {len(route_summaries)} Rute*\n\n"
+                + ("\n\n" + "━" * 20 + "\n\n").join(_all_wa_parts)
+            )
+            wa_url_all = "https://wa.me/?text=" + quote(wa_text_all, safe="")
+            if len(wa_url_all) <= 3800:
+                st.link_button(
+                    "📲 Kirim Semua Rute via WhatsApp", wa_url_all, type="primary", width='stretch'
+                )
+            else:
+                st.caption(
+                    f"ℹ️ Teks gabungan {len(route_summaries)} rute ini terlalu panjang untuk tombol "
+                    "WhatsApp langsung. Salin manual lewat tombol di bawah, atau kirim tiap rute "
+                    "terpisah lewat tombol WhatsApp di masing-masing rute di atas (lebih aman untuk "
+                    "rute dengan banyak titik)."
+                )
+            with st.popover("📋 Salin teks semua rute"):
+                st.code(wa_text_all, language=None)
         elif result and result["fingerprint"] != data_fingerprint:
             st.info("ℹ️ Pengaturan atau data berubah — tekan **Buat Rute Optimal Sekarang** lagi untuk memperbarui hasil.")
     else:
