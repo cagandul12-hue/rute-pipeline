@@ -554,6 +554,136 @@ def route_leg_sum(matrix, order, round_trip=False):
     return sum(matrix[path[i]][path[i + 1]] for i in range(len(path) - 1))
 
 
+# ---------- Merchant prioritas ----------
+TRUTHY_STRINGS = {"ya", "yes", "y", "true", "1", "benar", "prioritas", "penting", "high"}
+
+
+def is_truthy(val):
+    """Dipakai untuk kolom opsional 'prioritas' — menerima berbagai cara orang
+    menulis "ya" (termasuk angka 1, True, 'Yes', dst) di Excel/CSV."""
+    if val is None or (isinstance(val, float) and math.isnan(val)):
+        return False
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return val == 1
+    return str(val).strip().lower() in TRUTHY_STRINGS
+
+
+def _submatrix(matrix, indices):
+    return [[matrix[i][j] for j in indices] for i in indices]
+
+
+def solve_tsp_with_priority(distance_matrix, priority_idx, other_idx, has_start, round_trip):
+    """Urutan kunjungan yang mengunjungi SEMUA titik `priority_idx` lebih dulu
+    (diurutkan efisien di antara sesamanya), baru lanjut ke titik lainnya.
+
+    Pendekatan dua-tahap (bukan pemrograman batasan penuh): tahap 1
+    menyelesaikan TSP kecil untuk [titik awal]+prioritas, tahap 2 melanjutkan
+    dari titik prioritas terakhir ke sisa titik. round_trip (kembali ke
+    titik awal) hanya diterapkan di tahap akhir. Mengembalikan daftar indeks
+    asli, format sama seperti hasil solve_tsp() biasa — jadi kompatibel
+    langsung dengan finalize_route().
+    """
+    n = len(distance_matrix)
+    if not priority_idx or n <= 2:
+        return solve_tsp(distance_matrix, round_trip=round_trip, fixed_start=has_start)
+
+    start_part = [0] if has_start else []
+    phase1_idx = start_part + list(priority_idx)
+    if len(phase1_idx) <= 1:
+        phase1_order = phase1_idx
+    else:
+        sub_order = solve_tsp(_submatrix(distance_matrix, phase1_idx), round_trip=False, fixed_start=has_start)
+        phase1_order = [phase1_idx[i] for i in sub_order]
+
+    if not other_idx:
+        return phase1_order
+
+    last_priority = phase1_order[-1] if phase1_order else 0
+    phase2_idx = [last_priority] + list(other_idx)
+    sub_order2 = solve_tsp(_submatrix(distance_matrix, phase2_idx), round_trip=round_trip, fixed_start=True)
+    phase2_order = [phase2_idx[i] for i in sub_order2]
+
+    return (phase1_order[:-1] + phase2_order) if phase1_order else phase2_order
+
+
+# ---------- Multi-depot ----------
+def parse_depot_list(text):
+    """Parse beberapa titik awal, satu per baris: 'Nama|link_atau_koordinat'.
+    Nama boleh dikosongkan (pakai '|link' saja, atau link/koordinat polos).
+    Mengembalikan (list_depot_dict, list_pesan_error)."""
+    depots, errors = [], []
+    for lineno, raw_line in enumerate(str(text or "").splitlines(), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        if "|" in line:
+            name_part, loc_part = line.split("|", 1)
+        else:
+            name_part, loc_part = "", line
+        loc_part, name = loc_part.strip(), name_part.strip()
+        lat = lon = None
+        if "http" not in loc_part.lower():
+            lat, lon, _err = parse_coordinate_text(loc_part)
+        if lat is None:
+            parsed_name, lat, lon = extract_google_maps_data(loc_part)
+            if not name:
+                name = parsed_name or f"Titik Awal {lineno}"
+        if not name:
+            name = f"Titik Awal {lineno}"
+        if lat is None or lon is None:
+            errors.append(f"Baris {lineno}: tidak bisa dibaca sebagai link/koordinat — dilewati.")
+            continue
+        depots.append({"name": name, "lat": lat, "lon": lon})
+    return depots, errors
+
+
+def nearest_depot(depots, lat, lon):
+    best, best_dist = None, float("inf")
+    for d in depots:
+        dist = haversine(lat, lon, d["lat"], d["lon"])
+        if dist < best_dist:
+            best, best_dist = d, dist
+    return best
+
+
+# ---------- Jam operasional (time windows) ----------
+def _parse_hhmm(val):
+    """Baca 'HH:MM' (atau datetime.time/Timestamp) jadi datetime.time; None kalau gagal/kosong."""
+    if val is None or (isinstance(val, float) and math.isnan(val)):
+        return None
+    if isinstance(val, datetime.time):
+        return val
+    if isinstance(val, datetime.datetime):
+        return val.time()
+    s = str(val).strip()
+    if not s or s.lower() == "nan":
+        return None
+    m = re.match(r"^(\d{1,2})[:.](\d{2})", s)
+    if not m:
+        return None
+    h, mi = int(m.group(1)), int(m.group(2))
+    if 0 <= h <= 23 and 0 <= mi <= 59:
+        return datetime.time(h, mi)
+    return None
+
+
+def check_time_window(arrival_dt, jam_buka, jam_tutup):
+    """Bandingkan jam tiba dengan jam operasional. Mengembalikan status pendek
+    ("" kalau tidak ada jam operasional / tepat waktu) untuk ditampilkan di
+    tabel, PDF, dan WhatsApp."""
+    open_t, close_t = _parse_hhmm(jam_buka), _parse_hhmm(jam_tutup)
+    if open_t is None and close_t is None:
+        return ""
+    t = arrival_dt.time()
+    if open_t and t < open_t:
+        return f"⚠️ tiba sebelum buka ({open_t.strftime('%H:%M')})"
+    if close_t and t > close_t:
+        return f"⚠️ tiba setelah tutup ({close_t.strftime('%H:%M')})"
+    return "✅"
+
+
 # Batas titik singgah (waypoints) di link Google Maps menurut dokumentasi resmi:
 # maks. 9 di desktop/aplikasi, tapi hanya 3 di browser HP. Kalau lebih, titik
 # singgah berlebih DIBUANG diam-diam oleh Google Maps — makanya rute dipecah.
@@ -861,6 +991,9 @@ def validate_dataframe(df):
 
 
 REQUIRED_COLS = ("merchant_name", "latitude", "longitude")
+# Kolom opsional: kalau ada, dipakai otomatis untuk fitur prioritas & jam operasional.
+OPTIONAL_COLS = ("prioritas", "jam_buka", "jam_tutup")
+NORMALIZE_COLS = REQUIRED_COLS + OPTIONAL_COLS
 
 
 def read_table_file(name, data):
@@ -886,7 +1019,7 @@ def read_table_file(name, data):
     rename = {
         c: str(c).strip().lower()
         for c in df.columns
-        if str(c).strip().lower() in REQUIRED_COLS and c != str(c).strip().lower()
+        if str(c).strip().lower() in NORMALIZE_COLS and c != str(c).strip().lower()
     }
     if rename:
         df = df.rename(columns=rename)
@@ -932,12 +1065,18 @@ def build_whatsapp_text(r, map_links):
     lines = [
         f"*Rute {r['route_id'] + 1}* — {len(df)} titik · ~{r['distance_km']:.1f} km · ~{format_duration(total_sec)}"
     ]
+    if r.get("driver"):
+        lines.append(f"🧑‍✈️ Kurir: {r['driver']}")
+    if r.get("depot_name"):
+        lines.append(f"🏭 Titik awal: {r['depot_name']}")
     if r.get("finish_label"):
         lines.append(f"🏁 Estimasi selesai ±{r['finish_label']}")
     lines.append("")
     for _, row in df.iterrows():
         eta = f" ({row['jam_tiba']})" if "jam_tiba" in df.columns else ""
-        lines.append(f"{int(row['sequence'])}. {row['merchant_name']}{eta}")
+        star = "⭐ " if row.get("prioritas_flag") else ""
+        warn = f" {row['jadwal_status']}" if row.get("jadwal_status", "").startswith("⚠️") else ""
+        lines.append(f"{int(row['sequence'])}. {star}{row['merchant_name']}{eta}{warn}")
     if r.get("round_trip"):
         lines.append("↩️ Lalu kembali ke titik awal")
     lines.append("")
@@ -969,6 +1108,23 @@ def finalize_route(route_df, order, distance_matrix, duration_matrix, route_id,
     optimized_df["jam_tiba"] = [_clock(t, base_date) for t in arrivals]
     if visit_sec:
         optimized_df["jam_selesai"] = [_clock(t, base_date) for t in departs]
+
+    if "prioritas" in optimized_df.columns:
+        optimized_df["prioritas_flag"] = optimized_df["prioritas"].apply(is_truthy)
+
+    n_late = 0
+    if "jam_buka" in optimized_df.columns or "jam_tutup" in optimized_df.columns:
+        statuses = []
+        for k, dt in enumerate(arrivals):
+            is_start_row = k == 0 and has_start
+            jb = optimized_df["jam_buka"].iloc[k] if "jam_buka" in optimized_df.columns else None
+            jt = optimized_df["jam_tutup"].iloc[k] if "jam_tutup" in optimized_df.columns else None
+            status = "" if is_start_row else check_time_window(dt, jb, jt)
+            if status.startswith("⚠️"):
+                n_late += 1
+            statuses.append(status)
+        optimized_df["jadwal_status"] = statuses
+
     n_visits = len(order) - (1 if has_start else 0)
     return {
         "df": optimized_df,
@@ -977,17 +1133,29 @@ def finalize_route(route_df, order, distance_matrix, duration_matrix, route_id,
         "visit_sec": visit_sec * n_visits,
         "finish_label": _clock(finish_dt, base_date),
         "back_label": _clock(back_dt, base_date) if back_dt else None,
+        "n_outside_hours": n_late,
     }
 
 
 def build_excel_bytes(route_summaries):
-    final_df = pd.concat([r["df"] for r in route_summaries], ignore_index=True)
+    """Driver/depot ditambahkan sebagai kolom di sini (saat export), bukan
+    disimpan permanen di r['df'] — supaya nilainya selalu yang terbaru
+    walau diubah user setelah rute pertama kali dibuat."""
+    parts = []
+    for r in route_summaries:
+        d = r["df"].copy()
+        if r.get("driver"):
+            d["kurir"] = r["driver"]
+        if r.get("depot_name"):
+            d["titik_awal"] = r["depot_name"]
+        parts.append(d)
+    final_df = pd.concat(parts, ignore_index=True)
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         final_df.to_excel(writer, index=False, sheet_name="Semua Rute")
-        for r in route_summaries:
+        for r, d in zip(route_summaries, parts):
             sheet_name = f"Rute {r['route_id'] + 1}"[:31]
-            r["df"].to_excel(writer, index=False, sheet_name=sheet_name)
+            d.to_excel(writer, index=False, sheet_name=sheet_name)
     return buffer.getvalue()
 
 
@@ -1207,6 +1375,8 @@ def _pdf_payload(r, links, seq_nums, result):
             "lat": float(row["latitude"]), "lon": float(row["longitude"]),
             "tiba": str(row["jam_tiba"]) if "jam_tiba" in df.columns else "",
             "selesai": str(row["jam_selesai"]) if "jam_selesai" in df.columns else "",
+            "priority": bool(row.get("prioritas_flag", False)),
+            "note": str(row["jadwal_status"]) if row.get("jadwal_status") else "",
         })
     return {
         "route_no": int(r["route_id"]) + 1, "rows": rows,
@@ -1218,6 +1388,7 @@ def _pdf_payload(r, links, seq_nums, result):
         "links": [(int(a), int(b), u) for a, b, u in links],
         "seq_nums": [int(x) for x in seq_nums],
         "date": result.get("base_date", ""), "start_label": result.get("start_label", ""),
+        "driver": r.get("driver") or "", "depot_name": r.get("depot_name") or "",
     }
 
 
@@ -1326,10 +1497,13 @@ def build_routes_pdf(payloads):
             parts.append(f"Kunjungan {xml_escape(format_duration(p['visit_sec']))}")
         if p["finish_label"]:
             parts.append(f"Selesai +/-{xml_escape(p['finish_label'])}" + (" (sudah pulang)" if p["round_trip"] else ""))
+        if p.get("depot_name"):
+            parts.append(f"Titik awal: {xml_escape(p['depot_name'])}")
         story.append(Paragraph("  |  ".join(parts), st_meta))
         story.append(Spacer(1, 2 * mm))
+        kurir_val = f"<b>{xml_escape(p['driver'])}</b>" if p.get("driver") else "________________________________"
         story.append(Paragraph(
-            "Kurir: ________________________________ &nbsp;&nbsp;&nbsp; Kendaraan / Plat: ____________________", st_meta))
+            f"Kurir: {kurir_val} &nbsp;&nbsp;&nbsp; Kendaraan / Plat: ____________________", st_meta))
         if p["manual"]:
             story.append(Spacer(1, 1.5 * mm))
             story.append(Paragraph("Urutan kunjungan telah disesuaikan secara manual.", st_small))
@@ -1339,20 +1513,24 @@ def build_routes_pdf(payloads):
         head = ["No", "Merchant", "Tiba"] + (["Selesai"] if p["show_selesai"] else []) + ["Cek", "Catatan"]
         data = [[Paragraph(h, st_head) for h in head]]
 
-        def row_cells(no, name_html, tiba, selesai):
+        def row_cells(no, name_html, tiba, selesai, note=""):
             cells = [Paragraph(no, st_cell), Paragraph(name_html, st_cell), Paragraph(xml_escape(tiba), st_cell)]
             if p["show_selesai"]:
                 cells.append(Paragraph(xml_escape(selesai), st_cell))
-            cells += [_CheckBox(), ""]
+            note_color = "#DC2626" if note.startswith("⚠️") else "#111827"
+            cells += [_CheckBox(), Paragraph(f"<font color='{note_color}'>{xml_escape(_pdf_safe(note))}</font>", st_cell)]
             return cells
 
         for i, row in enumerate(p["rows"]):
             is_start = p["has_start"] and i == 0
             name = xml_escape(_pdf_safe(row["name"])) or "-"
-            prefix = "<font color='#2563EB'><b>[TITIK AWAL]</b></font> " if is_start else ""
+            # "⭐" bukan karakter Latin-1 dan akan hilang diam-diam di font PDF
+            # bawaan, jadi dipakai label teks biasa supaya tetap kelihatan di cetakan.
+            star = "<font color='#D97706'><b>[PRIORITAS]</b></font> " if row.get("priority") and not is_start else ""
+            prefix = "<font color='#2563EB'><b>[TITIK AWAL]</b></font> " if is_start else star
             coord = f"<br/><font size='7' color='#6B7280'>{row['lat']:.6f}, {row['lon']:.6f}</font>"
             data.append(row_cells("S" if is_start else str(row["seq"]), f"{prefix}<b>{name}</b>{coord}",
-                                  row["tiba"], row["selesai"]))
+                                  row["tiba"], row["selesai"], row.get("note", "")))
         if p["round_trip"] and p["rows"]:
             data.append(row_cells("-", "<i>Kembali ke titik awal</i>", p["back_label"], ""))
 
@@ -1442,6 +1620,12 @@ if "use_extracted_flag" not in st.session_state:
     st.session_state.use_extracted_flag = False
 if "starting_link_saved" not in st.session_state:
     st.session_state.starting_link_saved = ""
+if "multi_depot_saved" not in st.session_state:
+    st.session_state.multi_depot_saved = ""
+if "use_multi_depot_flag" not in st.session_state:
+    st.session_state.use_multi_depot_flag = False
+if "driver_names" not in st.session_state:
+    st.session_state.driver_names = {}  # {route_id: nama}
 
 
 def _detect_default_mode():
@@ -1591,6 +1775,18 @@ def _sync_starting_link():
     )
 
 
+def _sync_multi_depot():
+    st.session_state.multi_depot_saved = st.session_state.get(
+        "_multi_depot_widget", st.session_state.multi_depot_saved
+    )
+
+
+def _sync_use_multi_depot():
+    st.session_state.use_multi_depot_flag = st.session_state.get(
+        "_use_multi_depot_widget", st.session_state.use_multi_depot_flag
+    )
+
+
 PLAN_MAX = "📏 Maksimal titik per rute"
 PLAN_COUNT = "👥 Jumlah rute (mis. jumlah sales)"
 for _k, _v in {
@@ -1633,6 +1829,7 @@ MAX_SESSION_BYTES = 40 * 1024 * 1024
 SESSION_WIDGET_KEYS = (
     "_use_extracted_widget", "_starting_link_widget", "_round_trip_widget", "_dedupe_widget",
     "_split_widget", "_plan_widget", "_target_widget", "_visit_widget", "_start_time_widget",
+    "_multi_depot_widget", "_use_multi_depot_widget",
     "extract_editor",
 )
 
@@ -1659,6 +1856,9 @@ def build_session_bytes():
             "target_routes_flag": int(ss.target_routes_flag),
             "visit_minutes_flag": int(ss.visit_minutes_flag),
             "start_time_flag": ss.start_time_flag.strftime("%H:%M"),
+            "multi_depot_saved": ss.multi_depot_saved,
+            "use_multi_depot_flag": bool(ss.use_multi_depot_flag),
+            "driver_names": {str(k): str(v) for k, v in ss.driver_names.items()},
         },
     }
     return json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
@@ -1713,10 +1913,23 @@ def load_session_bytes(raw):
             updates["start_time_flag"] = datetime.datetime.strptime(cfg["start_time_flag"], "%H:%M").time()
         except ValueError:
             pass
+    if isinstance(cfg.get("multi_depot_saved"), str):
+        updates["multi_depot_saved"] = cfg["multi_depot_saved"][:4000]
+    if isinstance(cfg.get("use_multi_depot_flag"), bool):
+        updates["use_multi_depot_flag"] = cfg["use_multi_depot_flag"]
+    driver_names_raw = cfg.get("driver_names")
+    driver_names = {}
+    if isinstance(driver_names_raw, dict):
+        for k, v in driver_names_raw.items():
+            try:
+                driver_names[int(k)] = str(v)[:120]
+            except (TypeError, ValueError):
+                continue
 
     ss = st.session_state
     ss.uploaded_store = files
     ss.extracted_data = extracted
+    ss.driver_names = driver_names
     for k, v in updates.items():
         ss[k] = v
     for wk in SESSION_WIDGET_KEYS:  # supaya nilai baru dipakai oleh widget
@@ -1826,8 +2039,15 @@ def render_howto():
             "Google Maps atau koordinat), dan apakah rute kembali ke titik awal. Lalu klik "
             "**Buat Rute Optimal Sekarang**.\n\n"
             "**3. Pakai hasilnya** 📥  \n"
-            "Lihat urutan kunjungan dan perkiraan jam tiba, buka di Google Maps, kirim ke WhatsApp, "
-            "atau unduh semua rute sebagai Excel.\n\n"
+            "Lihat urutan kunjungan dan perkiraan jam tiba, isi nama kurir per rute, buka di Google Maps, "
+            "kirim ke WhatsApp, atau unduh semua rute sebagai Excel/PDF.\n\n"
+            "⭐ **Fitur tambahan (opsional):**\n"
+            "- **Prioritas** — tambah kolom `prioritas` (ya/tidak) di Excel/CSV, merchant itu dikunjungi lebih dulu.\n"
+            "- **Jam operasional** — tambah kolom `jam_buka`/`jam_tutup` (format HH:MM), perkiraan jam tiba "
+            "dicek otomatis dan ditandai ⚠️ kalau di luar jam buka.\n"
+            "- **Multi-depot** — centang \"Pakai banyak titik awal\" dan isi daftar gudang/toko pusat; "
+            "tiap rute otomatis mulai dari yang terdekat.\n"
+            "- **Nama kurir** — isi di tiap rute setelah dibuat, ikut masuk ke Excel, WhatsApp, dan PDF.\n\n"
             "💾 **Tips:** data tetap tersimpan selama halaman tidak di-refresh, walau kamu pindah menu. "
             "Untuk melanjutkan di lain waktu, pakai **Simpan / Buka Sesi**."
         )
@@ -1908,13 +2128,44 @@ if st.session_state.page == "Routing":
             type=["xlsx", "csv"],
             accept_multiple_files=True,
             key=f"uploader_{st.session_state.uploader_nonce}",
-            help="Format .xlsx atau .csv. Kolom wajib: merchant_name, latitude, longitude (koma desimal seperti -7,56 juga dikenali). Bisa pilih beberapa file sekaligus — nanti otomatis digabung. File yang sudah diupload tetap tersimpan walau kamu pindah ke Maps Extractor.",
+            help="Format .xlsx atau .csv. Kolom wajib: merchant_name, latitude, longitude (koma desimal seperti -7,56 juga dikenali). Kolom opsional: prioritas (ya/tidak — dikunjungi lebih dulu), jam_buka & jam_tutup (HH:MM — dicek terhadap perkiraan jam tiba). Bisa pilih beberapa file sekaligus — nanti otomatis digabung. File yang sudah diupload tetap tersimpan walau kamu pindah ke Maps Extractor.",
         )
         if new_files:
             for nf in new_files:
                 st.session_state.uploaded_store[nf.name] = nf.getvalue()
             st.session_state.uploader_nonce += 1
             st.rerun()
+
+    use_multi_depot = st.checkbox(
+        "🏭 Pakai banyak titik awal (multi-depot)",
+        value=st.session_state.use_multi_depot_flag,
+        key="_use_multi_depot_widget",
+        on_change=_sync_use_multi_depot,
+        help=(
+            "Aktifkan kalau kurir berangkat dari beberapa gudang/toko berbeda. Tiap rute otomatis "
+            "memakai titik awal TERDEKAT dari daftar di bawah — menggantikan 'Titik Awal' tunggal di atas."
+        ),
+    )
+    multi_depot_text = ""
+    if use_multi_depot:
+        multi_depot_text = st.text_area(
+            "Daftar titik awal — satu per baris: Nama|link Google Maps atau koordinat",
+            value=st.session_state.multi_depot_saved,
+            key="_multi_depot_widget",
+            on_change=_sync_multi_depot,
+            placeholder="Gudang Utara|https://maps.app.goo.gl/xxxx\nGudang Selatan|-7.60, 110.85",
+            height=100,
+        )
+        _depots_preview, _depot_errors_preview = parse_depot_list(multi_depot_text)
+        for _err in _depot_errors_preview:
+            st.warning(f"⚠️ {_err}")
+        if _depots_preview:
+            st.caption(
+                f"✅ {len(_depots_preview)} titik awal terbaca: "
+                + ", ".join(d["name"] for d in _depots_preview)
+            )
+        else:
+            st.caption("Belum ada titik awal yang terbaca — isi minimal satu baris di atas.")
 
     # Daftar file yang tersimpan (tetap ada setelah pindah halaman)
     if st.session_state.uploaded_store:
@@ -2048,6 +2299,16 @@ if st.session_state.page == "Routing":
                 st.caption("💡 Kolom `source_file` menunjukkan file/sumber asal tiap baris setelah digabung.")
             st.dataframe(df, width='stretch', **TABLE_KW)
 
+        _n_priority = int(df["prioritas"].apply(is_truthy).sum()) if "prioritas" in df.columns else 0
+        _has_hours = "jam_buka" in df.columns or "jam_tutup" in df.columns
+        if _n_priority or _has_hours:
+            _notes = []
+            if _n_priority:
+                _notes.append(f"**{_n_priority} merchant prioritas** (kolom `prioritas`) akan dikunjungi lebih dulu di tiap rute")
+            if _has_hours:
+                _notes.append("**jam operasional** (kolom `jam_buka`/`jam_tutup`) akan dicek terhadap perkiraan jam tiba")
+            st.info("ℹ️ " + " · ".join(_notes) + ".", icon="ℹ️")
+
         section_header(
             "2️⃣", "Atur Pembagian Rute",
             "Tentukan jumlah rute — lewat maksimal merchant per rute, atau langsung jumlah rute (mis. jumlah sales)",
@@ -2165,6 +2426,7 @@ if st.session_state.page == "Routing":
         data_fingerprint = (
             len(df), tuple(df["merchant_name"]), max_points_per_route, target_routes, starting_link,
             round_trip, split_mode, int(visit_minutes), start_time.strftime("%H:%M"),
+            use_multi_depot, multi_depot_text,
         )
 
         if run:
@@ -2183,6 +2445,7 @@ if st.session_state.page == "Routing":
                     df["route"] = kmeans.fit_predict(coords)
                     df = balance_clusters(df, max_points_per_route)
 
+                # Titik awal tunggal (dipakai kalau multi-depot tidak aktif).
                 start_name, start_lat, start_lon = "START POINT", None, None
                 if starting_link:
                     coord_lat = coord_lon = None
@@ -2194,6 +2457,12 @@ if st.session_state.page == "Routing":
                         parsed_name, start_lat, start_lon = extract_google_maps_data(starting_link)
                         start_name = parsed_name or "START POINT"
 
+                # Daftar depot (kalau multi-depot aktif) — tiap rute nanti pakai yang TERDEKAT
+                # dari centroid-nya sendiri, menggantikan titik awal tunggal di atas.
+                depots = []
+                if use_multi_depot and multi_depot_text.strip():
+                    depots, _depot_errs = parse_depot_list(multi_depot_text)
+
                 all_routes = []
                 route_summaries = []
                 any_fallback_used = False
@@ -2204,9 +2473,18 @@ if st.session_state.page == "Routing":
                 for route_id in sorted(df["route"].unique()):
                     route_df = df[df["route"] == route_id].reset_index(drop=True)
 
-                    if start_lat and start_lon:
+                    if depots:
+                        centroid_lat = route_df["latitude"].mean()
+                        centroid_lon = route_df["longitude"].mean()
+                        chosen_depot = nearest_depot(depots, centroid_lat, centroid_lon)
+                        route_start_name = chosen_depot["name"]
+                        route_start_lat, route_start_lon = chosen_depot["lat"], chosen_depot["lon"]
+                    else:
+                        route_start_name, route_start_lat, route_start_lon = start_name, start_lat, start_lon
+
+                    if route_start_lat and route_start_lon:
                         start_df = pd.DataFrame(
-                            [{"merchant_name": start_name, "latitude": start_lat, "longitude": start_lon}]
+                            [{"merchant_name": route_start_name, "latitude": route_start_lat, "longitude": route_start_lon}]
                         )
                         route_df = pd.concat([start_df, route_df], ignore_index=True)
 
@@ -2215,8 +2493,27 @@ if st.session_state.page == "Routing":
                     if osrm_error:
                         osrm_errors.append(osrm_error)
 
-                    has_start = bool(start_lat and start_lon)
-                    best_route = solve_tsp(distance_matrix, round_trip=round_trip, fixed_start=has_start)
+                    has_start = bool(route_start_lat and route_start_lon)
+
+                    # Merchant prioritas (kolom opsional "prioritas"): dikunjungi lebih
+                    # dulu, baru lanjut ke sisanya.
+                    if "prioritas" in route_df.columns:
+                        p_mask = route_df["prioritas"].apply(is_truthy)
+                        priority_idx = [i for i in range(len(route_df)) if p_mask.iloc[i] and not (has_start and i == 0)]
+                    else:
+                        priority_idx = []
+
+                    if priority_idx:
+                        other_idx = [
+                            i for i in range(len(route_df))
+                            if not (has_start and i == 0) and i not in priority_idx
+                        ]
+                        best_route = solve_tsp_with_priority(
+                            distance_matrix, priority_idx, other_idx, has_start, round_trip
+                        )
+                    else:
+                        best_route = solve_tsp(distance_matrix, round_trip=round_trip, fixed_start=has_start)
+
                     fin = finalize_route(
                         route_df, best_route, distance_matrix, duration_matrix, route_id,
                         start_dt, visit_sec, has_start, round_trip, base_date,
@@ -2229,6 +2526,8 @@ if st.session_state.page == "Routing":
                             "real_roads": used_real_roads,
                             "round_trip": round_trip,
                             "has_start": has_start,
+                            "depot_name": route_start_name if has_start else "",
+                            "driver": st.session_state.driver_names.get(route_id, ""),
                             # data mentah untuk ubah-urutan manual (tanpa memanggil OSRM lagi)
                             "route_df": route_df,
                             "distance_matrix": distance_matrix,
@@ -2245,26 +2544,31 @@ if st.session_state.page == "Routing":
                     )
 
             excel_bytes = build_excel_bytes(route_summaries)
+            n_start_points = sum(1 for r in route_summaries if r["has_start"])
 
             # Persist everything needed to render the result, so later reruns
             # (e.g. clicking the map or the download button) don't wipe it out.
             st.session_state.route_result = {
                 "fingerprint": data_fingerprint,
                 "route_summaries": route_summaries,
-                "total_points": len(df) + (1 if start_lat and start_lon else 0) * len(route_summaries),
+                "total_points": len(df) + n_start_points,
                 "excel_bytes": excel_bytes,
                 "base_date": base_date.isoformat(),
                 "start_label": start_time.strftime("%H:%M"),
-                "start_ok": bool(start_lat and start_lon),
-                "start_link_given": bool(starting_link),
+                "start_ok": bool(start_lat and start_lon) or bool(depots),
+                "start_link_given": bool(starting_link) and not bool(depots),
                 "used_real_roads": not any_fallback_used,
                 "osrm_error": osrm_errors[-1] if osrm_errors else None,
+                "multi_depot_used": bool(depots),
+                "multi_depot_overrode_single": bool(depots) and bool(starting_link),
             }
 
         result = st.session_state.get("route_result")
         if result and result["fingerprint"] == data_fingerprint:
             if result["start_link_given"] and not result["start_ok"]:
                 st.warning("⚠️ Titik awal tidak dikenali (bukan link Google Maps atau koordinat yang valid), jadi dilewati — rute tetap dibuat tanpa titik awal khusus.")
+            if result.get("multi_depot_overrode_single"):
+                st.caption("ℹ️ Multi-depot aktif — daftar titik awal menggantikan field 'Titik Awal' tunggal untuk pembuatan rute ini.")
 
             if not result.get("used_real_roads", True):
                 reason = result.get("osrm_error")
@@ -2337,15 +2641,35 @@ if st.session_state.page == "Routing":
                             f"🏁 Selesai ±{r['finish_label']}"
                             + (" (sudah termasuk pulang)" if r.get("round_trip") else "")
                         )
+                    if r.get("depot_name"):
+                        parts.append(f"🏭 Titik awal: {r['depot_name']}")
                     st.caption(" · ".join(parts))
+                    if r.get("n_outside_hours"):
+                        st.warning(
+                            f"⚠️ {r['n_outside_hours']} merchant diperkirakan dikunjungi di luar jam "
+                            "operasional (lihat kolom status di tabel / Catatan di PDF)."
+                        )
+
+                    driver_val = st.text_input(
+                        "🧑‍✈️ Nama kurir/sopir (opsional)",
+                        value=st.session_state.driver_names.get(route_id, ""),
+                        key=f"driver_{route_id}",
+                        placeholder="Mis. Budi",
+                    )
+                    st.session_state.driver_names[route_id] = driver_val
+                    r["driver"] = driver_val
+
                     left, right = st.columns([1, 1.4])
                     with left:
+                        _display_cols = ["sequence", "merchant_name"]
+                        _display_cols += [c for c in ("jam_tiba", "jam_selesai") if c in optimized_df.columns]
+                        _show_df = optimized_df[_display_cols + ["latitude", "longitude"]].copy()
+                        if "prioritas_flag" in optimized_df.columns:
+                            _show_df.insert(2, "⭐ Prioritas", optimized_df["prioritas_flag"].map({True: "⭐", False: ""}))
+                        if "jadwal_status" in optimized_df.columns:
+                            _show_df["Status Jam"] = optimized_df["jadwal_status"]
                         st.dataframe(
-                            optimized_df[
-                                ["sequence", "merchant_name"]
-                                + [c for c in ("jam_tiba", "jam_selesai") if c in optimized_df.columns]
-                                + ["latitude", "longitude"]
-                            ],
+                            _show_df,
                             width='stretch',
                             **TABLE_KW,
                             hide_index=True,
@@ -2432,9 +2756,12 @@ if st.session_state.page == "Routing":
             )
             dl1, dl2 = st.columns(2)
             with dl1:
+                # Dibangun ulang di sini (bukan pakai result["excel_bytes"] yang
+                # dicache saat generate) supaya nama kurir yang baru diisi ikut
+                # terbawa — kolom "kurir" dibaca langsung dari r["driver"].
                 st.download_button(
                     label="📥 Excel (semua rute)",
-                    data=result["excel_bytes"],
+                    data=build_excel_bytes(route_summaries),
                     file_name="hasil_routing.xlsx",
                     mime="application/vnd.ms-excel",
                     type="primary",
