@@ -1642,6 +1642,10 @@ if "view_mode" not in st.session_state:
     st.session_state.view_mode = _detect_default_mode()
 IS_MOBILE = st.session_state.view_mode == "Mobile"
 
+if "app_mode" not in st.session_state:
+    st.session_state.app_mode = "Simple"  # pengguna baru mulai dari tampilan yang paling ringkas
+IS_PRO = st.session_state.app_mode == "Pro"
+
 MOBILE_CSS = """
 <style>
 /* ===== MODE HANDPHONE ===== */
@@ -2008,6 +2012,31 @@ def render_mode_toggle(prefix):
         )
 
 
+def _set_app_mode(mode):
+    st.session_state.app_mode = mode
+
+
+def render_app_mode_toggle(prefix):
+    """Dua tombol: ⚡ Sederhana | 🛠️ Pro — menentukan berapa banyak pengaturan
+    yang ditampilkan di Routing Optimizer (lihat IS_PRO)."""
+    mode = st.session_state.app_mode
+    m1, m2 = st.columns(2)
+    with m1:
+        st.button(
+            "⚡ Sederhana", key=f"{prefix}_appmode_simple", width='stretch',
+            type="primary" if mode == "Simple" else "secondary",
+            on_click=_set_app_mode, args=("Simple",),
+            help="Upload data, klik buat rute — pakai pengaturan default yang masuk akal, tanpa perlu diotak-atik.",
+        )
+    with m2:
+        st.button(
+            "🛠️ Pro", key=f"{prefix}_appmode_pro", width='stretch',
+            type="primary" if mode == "Pro" else "secondary",
+            on_click=_set_app_mode, args=("Pro",),
+            help="Semua pengaturan: multi-depot, prioritas, jam operasional, nama kurir, urutan manual, PDF, simpan sesi, dll.",
+        )
+
+
 def render_nav(prefix, horizontal=False):
     # Plain buttons (not a key-bound widget) so the active page can be set
     # programmatically from anywhere — e.g. the "pakai di Routing Optimizer"
@@ -2046,6 +2075,11 @@ def render_howto():
     # Selalu tertutup saat pertama dibuka — pengguna bisa membukanya sendiri kalau perlu.
     with st.expander("ℹ️ Cara Pakai (3 Langkah)", expanded=False):
         st.markdown(
+            "**⚡ Mode Sederhana vs 🛠️ Mode Pro** (tombol di atas)  \n"
+            "**Sederhana**: upload data → klik buat rute → selesai, semua merchant jadi 1 rute dengan "
+            "pengaturan default. **Pro**: semua fitur — atur jumlah rute, jam mulai, titik-balik, "
+            "prioritas, jam operasional, multi-depot, nama kurir, urutan manual, PDF, dan simpan sesi. "
+            "Ganti kapan saja, data yang sudah diisi tidak hilang.\n\n"
             "**1. Kumpulkan data** 📍  \n"
             "Di **Maps Extractor**: tempel link Google Maps, cari nama merchant, atau isi manual "
             "(koordinat bisa ditempel sekaligus). Sudah punya file Excel/CSV? Upload langsung di "
@@ -2076,8 +2110,11 @@ if IS_MOBILE:
         render_nav("top", horizontal=True)
     with st.container(key="moderow"):
         render_mode_toggle("top")
+    st.caption("Mode fitur")
+    render_app_mode_toggle("top")
     render_howto()
-    render_session_panel("top")
+    if IS_PRO:
+        render_session_panel("top")
 else:
     with st.sidebar:
         st.markdown(
@@ -2095,11 +2132,15 @@ else:
         st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
         render_nav("side")
         st.markdown("---")
+        st.caption("Mode fitur")
+        render_app_mode_toggle("side")
+        st.markdown("---")
         st.caption("Mode tampilan")
         render_mode_toggle("side")
         st.markdown("---")
         render_howto()
-        render_session_panel("side")
+        if IS_PRO:
+            render_session_panel("side")
         st.caption("⚡ Developed by **Abdillah**")
 
 
@@ -2153,19 +2194,21 @@ if st.session_state.page == "Routing":
             st.session_state.uploader_nonce += 1
             st.rerun()
 
-    use_multi_depot = st.checkbox(
-        "🏭 Pakai banyak titik awal (multi-depot)",
-        value=st.session_state.use_multi_depot_flag,
-        key="_use_multi_depot_widget",
-        on_change=_sync_use_multi_depot,
-        help=(
-            "Aktifkan kalau kurir berangkat dari beberapa gudang/toko berbeda. Jumlah rute akan "
-            "OTOMATIS mengikuti jumlah titik awal di bawah — tiap titik awal jadi 1 rute, berisi "
-            "merchant yang paling dekat dengannya. Menggantikan 'Titik Awal' tunggal di atas dan "
-            "pengaturan jumlah rute di Langkah 2."
-        ),
-    )
+    use_multi_depot = False
     depot_rows_raw = []  # [(nama, lokasi), ...] — mentah, belum divalidasi/resolve
+    if IS_PRO:
+        use_multi_depot = st.checkbox(
+            "🏭 Pakai banyak titik awal (multi-depot)",
+            value=st.session_state.use_multi_depot_flag,
+            key="_use_multi_depot_widget",
+            on_change=_sync_use_multi_depot,
+            help=(
+                "Aktifkan kalau kurir berangkat dari beberapa gudang/toko berbeda. Jumlah rute akan "
+                "OTOMATIS mengikuti jumlah titik awal di bawah — tiap titik awal jadi 1 rute, berisi "
+                "merchant yang paling dekat dengannya. Menggantikan 'Titik Awal' tunggal di atas dan "
+                "pengaturan jumlah rute di Langkah 2."
+            ),
+        )
     if use_multi_depot:
         if not st.session_state.multi_depot_rows:
             # Baris pertama langsung disediakan supaya tidak mulai dari kosong total.
@@ -2358,102 +2401,124 @@ if st.session_state.page == "Routing":
             "2️⃣", "Atur Pembagian Rute",
             "Tentukan jumlah rute — lewat maksimal merchant per rute, atau langsung jumlah rute (mis. jumlah sales)",
         )
-        if use_multi_depot:
-            st.info(
-                f"ℹ️ Multi-depot aktif — pengaturan di bawah ini **diabaikan**. Jumlah rute otomatis "
-                f"mengikuti jumlah titik awal yang kamu isi di Langkah 1.",
-                icon="🏭",
+        if not IS_PRO:
+            # Mode Sederhana: tanpa pengaturan — semua merchant jadi 1 rute,
+            # pakai jam mulai/durasi kunjungan/arah rute dari nilai terakhir
+            # yang tersimpan (default: mulai 08:00, tanpa durasi kunjungan,
+            # satu arah). Ganti ke Mode Pro di sidebar untuk mengatur ini.
+            max_points_per_route = len(df)
+            target_routes = None
+            n_cluster_default = 1
+            split_mode = SPLIT_AUTO
+            start_time = st.session_state.start_time_flag
+            visit_minutes = st.session_state.visit_minutes_flag
+            round_trip = st.session_state.round_trip_flag
+            sc1, sc2 = st.columns(2)
+            with sc1:
+                metric_card("🏪", "Total Merchant", len(df))
+            with sc2:
+                metric_card("🧭", "Jumlah Rute", "1 (otomatis)")
+            st.caption(
+                "💡 Mode Sederhana: semua merchant digabung jadi 1 rute. Butuh atur jumlah rute, "
+                "jam mulai, titik-balik, prioritas, atau multi-depot? Pindah ke **🛠️ Pro** di sidebar."
             )
-        plan_mode = st.radio(
-            "Cara menentukan jumlah rute",
-            [PLAN_MAX, PLAN_COUNT],
-            index=0 if st.session_state.plan_mode_flag == PLAN_MAX else 1,
-            key="_plan_widget",
-            on_change=_sync_plan,
-            horizontal=not IS_MOBILE,
-        )
-        if IS_MOBILE:
-            max_points_per_route, target_routes = _plan_control(df, plan_mode)
-            n_cluster_default = target_routes or math.ceil(len(df) / max_points_per_route)
-            with st.container(key="grid2"):
-                c2, c3 = st.columns(2)
+        else:
+            if use_multi_depot:
+                st.info(
+                    f"ℹ️ Multi-depot aktif — pengaturan di bawah ini **diabaikan**. Jumlah rute otomatis "
+                    f"mengikuti jumlah titik awal yang kamu isi di Langkah 1.",
+                    icon="🏭",
+                )
+            plan_mode = st.radio(
+                "Cara menentukan jumlah rute",
+                [PLAN_MAX, PLAN_COUNT],
+                index=0 if st.session_state.plan_mode_flag == PLAN_MAX else 1,
+                key="_plan_widget",
+                on_change=_sync_plan,
+                horizontal=not IS_MOBILE,
+            )
+            if IS_MOBILE:
+                max_points_per_route, target_routes = _plan_control(df, plan_mode)
+                n_cluster_default = target_routes or math.ceil(len(df) / max_points_per_route)
+                with st.container(key="grid2"):
+                    c2, c3 = st.columns(2)
+                    with c2:
+                        metric_card("🏪", "Total Merchant", len(df))
+                    with c3:
+                        metric_card("🧭", "Estimasi Jumlah Rute", n_cluster_default)
+            else:
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    max_points_per_route, target_routes = _plan_control(df, plan_mode)
+                n_cluster_default = target_routes or math.ceil(len(df) / max_points_per_route)
                 with c2:
                     metric_card("🏪", "Total Merchant", len(df))
                 with c3:
                     metric_card("🧭", "Estimasi Jumlah Rute", n_cluster_default)
-        else:
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                max_points_per_route, target_routes = _plan_control(df, plan_mode)
-            n_cluster_default = target_routes or math.ceil(len(df) / max_points_per_route)
-            with c2:
-                metric_card("🏪", "Total Merchant", len(df))
-            with c3:
-                metric_card("🧭", "Estimasi Jumlah Rute", n_cluster_default)
 
-        if target_routes is not None:
-            split_mode = SPLIT_AUTO
-            st.caption(
-                f"Merchant dibagi ke {target_routes} rute mengikuti area lokasi, "
-                f"maksimal {max_points_per_route} merchant per rute supaya beban merata."
-            )
-        elif n_cluster_default > 1:
-            split_mode = st.radio(
-                "Cara membagi rute",
-                [SPLIT_AUTO, SPLIT_FULL],
-                index=0 if st.session_state.split_mode_flag == SPLIT_AUTO else 1,
-                key="_split_widget",
-                on_change=_sync_split,
-                horizontal=not IS_MOBILE,
+            if target_routes is not None:
+                split_mode = SPLIT_AUTO
+                st.caption(
+                    f"Merchant dibagi ke {target_routes} rute mengikuti area lokasi, "
+                    f"maksimal {max_points_per_route} merchant per rute supaya beban merata."
+                )
+            elif n_cluster_default > 1:
+                split_mode = st.radio(
+                    "Cara membagi rute",
+                    [SPLIT_AUTO, SPLIT_FULL],
+                    index=0 if st.session_state.split_mode_flag == SPLIT_AUTO else 1,
+                    key="_split_widget",
+                    on_change=_sync_split,
+                    horizontal=not IS_MOBILE,
+                    help=(
+                        "Otomatis: merchant dikelompokkan menurut area/kedekatan lokasi, jadi jarak tempuh "
+                        "lebih pendek, tapi isi tiap rute bisa berbeda (selalu di bawah atau sama dengan maksimal). "
+                        "Isi penuh: tiap rute diisi sampai batas maksimal dan sisanya masuk rute terakhir, "
+                        "tapi rute bisa lebih melebar karena merchant dari area lain ikut terambil."
+                    ),
+                )
+                _n, _k, _m = len(df), n_cluster_default, max_points_per_route
+                if split_mode == SPLIT_FULL:
+                    full_sizes = [_m] * (_k - 1) + [_n - _m * (_k - 1)]
+                    st.caption(f"Isi tiap rute: {_fmt_sizes(full_sizes)} merchant.")
+                else:
+                    st.caption(
+                        f"Pembagian mengikuti area lokasi — {_k} rute, masing-masing maksimal {_m} merchant. "
+                        "Pilih **Isi penuh** kalau ingin tiap rute berisi tepat sebanyak maksimal."
+                    )
+            else:
+                split_mode = st.session_state.split_mode_flag
+
+            t1, t2 = st.columns(2)
+            with t1:
+                start_time = st.time_input(
+                    "⏰ Jam mulai",
+                    value=st.session_state.start_time_flag,
+                    key="_start_time_widget",
+                    on_change=_sync_start_time,
+                    step=300,
+                    help="Dipakai untuk menghitung perkiraan jam tiba di tiap merchant.",
+                )
+            with t2:
+                visit_minutes = st.number_input(
+                    "🏪 Durasi kunjungan per toko (menit)",
+                    min_value=0, max_value=480, value=int(st.session_state.visit_minutes_flag), step=1,
+                    key="_visit_widget",
+                    on_change=_sync_visit,
+                    help="Waktu yang dihabiskan di tiap merchant. 0 = hanya hitung waktu perjalanan.",
+                )
+
+            round_trip = st.checkbox(
+                "🔁 Kembali ke titik awal setelah rute selesai",
+                value=st.session_state.round_trip_flag,
+                key="_round_trip_widget",
+                on_change=_sync_round_trip,
                 help=(
-                    "Otomatis: merchant dikelompokkan menurut area/kedekatan lokasi, jadi jarak tempuh "
-                    "lebih pendek, tapi isi tiap rute bisa berbeda (selalu di bawah atau sama dengan maksimal). "
-                    "Isi penuh: tiap rute diisi sampai batas maksimal dan sisanya masuk rute terakhir, "
-                    "tapi rute bisa lebih melebar karena merchant dari area lain ikut terambil."
+                    "Aktif: rute melingkar dan jarak/waktu sudah termasuk perjalanan pulang. "
+                    "Nonaktif: rute satu arah, berhenti di merchant terakhir. "
+                    "Kalau Titik Awal kosong, rute dimulai dari titik yang paling efisien."
                 ),
             )
-            _n, _k, _m = len(df), n_cluster_default, max_points_per_route
-            if split_mode == SPLIT_FULL:
-                full_sizes = [_m] * (_k - 1) + [_n - _m * (_k - 1)]
-                st.caption(f"Isi tiap rute: {_fmt_sizes(full_sizes)} merchant.")
-            else:
-                st.caption(
-                    f"Pembagian mengikuti area lokasi — {_k} rute, masing-masing maksimal {_m} merchant. "
-                    "Pilih **Isi penuh** kalau ingin tiap rute berisi tepat sebanyak maksimal."
-                )
-        else:
-            split_mode = st.session_state.split_mode_flag
-
-        t1, t2 = st.columns(2)
-        with t1:
-            start_time = st.time_input(
-                "⏰ Jam mulai",
-                value=st.session_state.start_time_flag,
-                key="_start_time_widget",
-                on_change=_sync_start_time,
-                step=300,
-                help="Dipakai untuk menghitung perkiraan jam tiba di tiap merchant.",
-            )
-        with t2:
-            visit_minutes = st.number_input(
-                "🏪 Durasi kunjungan per toko (menit)",
-                min_value=0, max_value=480, value=int(st.session_state.visit_minutes_flag), step=1,
-                key="_visit_widget",
-                on_change=_sync_visit,
-                help="Waktu yang dihabiskan di tiap merchant. 0 = hanya hitung waktu perjalanan.",
-            )
-
-        round_trip = st.checkbox(
-            "🔁 Kembali ke titik awal setelah rute selesai",
-            value=st.session_state.round_trip_flag,
-            key="_round_trip_widget",
-            on_change=_sync_round_trip,
-            help=(
-                "Aktif: rute melingkar dan jarak/waktu sudah termasuk perjalanan pulang. "
-                "Nonaktif: rute satu arah, berhenti di merchant terakhir. "
-                "Kalau Titik Awal kosong, rute dimulai dari titik yang paling efisien."
-            ),
-        )
 
         _plan_txt = (
             f"{target_routes} rute (maks. {max_points_per_route}/rute)" if target_routes is not None
@@ -2719,14 +2784,15 @@ if st.session_state.page == "Routing":
                             "operasional (lihat kolom status di tabel / Catatan di PDF)."
                         )
 
-                    driver_val = st.text_input(
-                        "🧑‍✈️ Nama kurir/sopir (opsional)",
-                        value=st.session_state.driver_names.get(route_id, ""),
-                        key=f"driver_{route_id}",
-                        placeholder="Mis. Budi",
-                    )
-                    st.session_state.driver_names[route_id] = driver_val
-                    r["driver"] = driver_val
+                    if IS_PRO:
+                        driver_val = st.text_input(
+                            "🧑‍✈️ Nama kurir/sopir (opsional)",
+                            value=st.session_state.driver_names.get(route_id, ""),
+                            key=f"driver_{route_id}",
+                            placeholder="Mis. Budi",
+                        )
+                        st.session_state.driver_names[route_id] = driver_val
+                        r["driver"] = driver_val
 
                     left, right = st.columns([1, 1.4])
                     with left:
@@ -2743,9 +2809,11 @@ if st.session_state.page == "Routing":
                             **TABLE_KW,
                             hide_index=True,
                         )
-                        if st.checkbox("✏️ Ubah urutan manual", key=f"edit_{route_id}",
-                                       help="Geser merchant naik/turun, misalnya karena toko tutup jam tertentu atau ada janji. "
-                                            "Jarak, jam tiba, peta, Excel, WhatsApp, dan PDF ikut diperbarui."):
+                        if IS_PRO and st.checkbox(
+                            "✏️ Ubah urutan manual", key=f"edit_{route_id}",
+                            help="Geser merchant naik/turun, misalnya karena toko tutup jam tertentu atau ada janji. "
+                                 "Jarak, jam tiba, peta, Excel, WhatsApp, dan PDF ikut diperbarui."
+                        ):
                             render_reorder_controls(r)
                         map_links, seq_nums, link_df = route_links_info(r, MAPS_MAX_WAYPOINTS_DESKTOP)
                         # Batas 9 titik singgah berlaku untuk aplikasi Google Maps (Android/iOS)
@@ -2789,7 +2857,7 @@ if st.session_state.page == "Routing":
                             )
                         with st.popover("📋 Salin teks rute"):
                             st.code(wa_text, language=None)
-                        if PDF_OK:
+                        if IS_PRO and PDF_OK:
                             st.download_button(
                                 "🖨️ Unduh PDF (siap cetak)",
                                 data=_routes_pdf_cached([_pdf_payload(r, map_links, seq_nums, result)]),
@@ -2821,9 +2889,13 @@ if st.session_state.page == "Routing":
 
             section_header(
                 "📥", "Unduh Hasil",
-                "Excel berisi semua rute per-sheet, dan PDF siap cetak untuk dibawa kurir",
+                "Excel berisi semua rute per-sheet"
+                + (", dan PDF siap cetak untuk dibawa kurir" if IS_PRO else ""),
             )
-            dl1, dl2 = st.columns(2)
+            if IS_PRO:
+                dl1, dl2 = st.columns(2)
+            else:
+                dl1, dl2 = st.container(), None
             with dl1:
                 # Dibangun ulang di sini (bukan pakai result["excel_bytes"] yang
                 # dicache saat generate) supaya nama kurir yang baru diisi ikut
@@ -2836,21 +2908,22 @@ if st.session_state.page == "Routing":
                     type="primary",
                     width='stretch',
                 )
-            with dl2:
-                if PDF_OK:
-                    all_payloads = []
-                    for _r in route_summaries:
-                        _links, _seq, _ = route_links_info(_r, MAPS_MAX_WAYPOINTS_DESKTOP)
-                        all_payloads.append(_pdf_payload(_r, _links, _seq, result))
-                    st.download_button(
-                        label="🖨️ PDF semua rute (1 rute/halaman)",
-                        data=_routes_pdf_cached(all_payloads),
-                        file_name="lembar_rute_semua.pdf",
-                        mime="application/pdf",
-                        width='stretch',
-                    )
-                else:
-                    st.caption("PDF belum tersedia: pustaka `reportlab` belum terpasang di server.")
+            if IS_PRO:
+                with dl2:
+                    if PDF_OK:
+                        all_payloads = []
+                        for _r in route_summaries:
+                            _links, _seq, _ = route_links_info(_r, MAPS_MAX_WAYPOINTS_DESKTOP)
+                            all_payloads.append(_pdf_payload(_r, _links, _seq, result))
+                        st.download_button(
+                            label="🖨️ PDF semua rute (1 rute/halaman)",
+                            data=_routes_pdf_cached(all_payloads),
+                            file_name="lembar_rute_semua.pdf",
+                            mime="application/pdf",
+                            width='stretch',
+                        )
+                    else:
+                        st.caption("PDF belum tersedia: pustaka `reportlab` belum terpasang di server.")
 
             section_header(
                 "📲", "Kirim via WhatsApp",
