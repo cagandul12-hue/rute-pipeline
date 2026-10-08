@@ -967,10 +967,18 @@ def validate_dataframe(df):
 
     numeric_lat = pd.to_numeric(df["latitude"], errors="coerce")
     numeric_lon = pd.to_numeric(df["longitude"], errors="coerce")
-    bad_rows = df[numeric_lat.isna() | numeric_lon.isna()]
+
+    def _blank(series):
+        return series.isna() | series.astype(str).str.strip().isin(["", "nan", "None", "NaT"])
+
+    # Baris dengan latitude DAN longitude sama-sama kosong bukan error: koordinatnya
+    # nanti dicari otomatis dari nama/alamat (lihat handle_missing_coordinates).
+    both_blank = _blank(df["latitude"]) & _blank(df["longitude"])
+    bad_rows = df[(numeric_lat.isna() | numeric_lon.isna()) & ~both_blank]
     if not bad_rows.empty:
         errors.append(
-            f"{len(bad_rows)} baris memiliki latitude/longitude yang tidak valid (bukan angka)."
+            f"{len(bad_rows)} baris memiliki latitude/longitude yang tidak valid (bukan angka, "
+            "atau hanya salah satunya yang terisi)."
         )
 
     out_of_range = df[
@@ -988,7 +996,7 @@ def validate_dataframe(df):
 
 REQUIRED_COLS = ("merchant_name", "latitude", "longitude")
 # Kolom opsional: kalau ada, dipakai otomatis untuk fitur prioritas & jam operasional.
-OPTIONAL_COLS = ("prioritas", "jam_buka", "jam_tutup")
+OPTIONAL_COLS = ("prioritas", "jam_buka", "jam_tutup", "alamat")
 NORMALIZE_COLS = REQUIRED_COLS + OPTIONAL_COLS
 
 
@@ -1020,10 +1028,215 @@ def read_table_file(name, data):
     if rename:
         df = df.rename(columns=rename)
 
+    # File yang punya kolom `alamat` tapi belum punya kolom koordinat: sediakan kolom
+    # kosong supaya baris-barisnya bisa dicari koordinatnya otomatis. (Tanpa `alamat`,
+    # kolom koordinat yang hilang tetap dianggap error, supaya salah nama kolom —
+    # mis. "lat"/"lng" — tidak diam-diam diperlakukan sebagai data tanpa koordinat.)
+    if "merchant_name" in df.columns and "alamat" in df.columns:
+        for col in ("latitude", "longitude"):
+            if col not in df.columns:
+                df[col] = np.nan
+
     for col in ("latitude", "longitude"):
         if col in df.columns and not pd.api.types.is_numeric_dtype(df[col]):  # pandas 3: teks bertipe "str", bukan object
             mask = df[col].notna()
             df.loc[mask, col] = df.loc[mask, col].astype(str).str.strip().str.replace(",", ".", regex=False)
+    return df
+
+
+# ---------- Geocoding otomatis (baris tanpa koordinat) ----------
+GEO_SEP = "||"
+GEO_MAX_PER_CLICK = 40     # batasi jumlah baris per klik supaya tidak menunggu terlalu lama
+GEO_DELAY_SEC = 1.1        # kebijakan Nominatim: maksimal ~1 permintaan per detik
+
+
+def _geo_key(name, alamat):
+    return GEO_SEP.join(str(x if x is not None else "").strip().lower() for x in (name, alamat))
+
+
+def geocode_candidates(name, alamat, city):
+    """Daftar kueri pencarian untuk satu baris, dari yang paling spesifik."""
+    name, alamat, city = (str(x if x is not None else "").strip() for x in (name, alamat, city))
+    if name.lower() == "nan":
+        name = ""
+    if alamat.lower() == "nan":
+        alamat = ""
+    cands = []
+    if alamat:
+        cands.append(f"{alamat}, {city}" if city and city.lower() not in alamat.lower() else alamat)
+    if name:
+        cands.append(f"{name}, {city}" if city else name)
+    if name and alamat:
+        cands.append(f"{name}, {alamat}")
+    seen, out = set(), []
+    for c in cands:
+        if c and c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
+def geocode_place(name, alamat, city, search_fn=None, sleep_fn=None):
+    """Cari koordinat satu merchant lewat Nominatim.
+
+    Mengembalikan (hasil_atau_None, error_atau_None). `error` hanya diisi untuk
+    kegagalan sementara (dibatasi/timeout/koneksi) — hasil kosong yang sah adalah
+    (None, None), supaya kegagalan sementara tidak ikut tersimpan sebagai 'tidak ditemukan'.
+    """
+    search_fn = search_fn or search_nominatim
+    sleep_fn = sleep_fn or time.sleep
+    for i, query in enumerate(geocode_candidates(name, alamat, city)):
+        if i > 0:
+            sleep_fn(GEO_DELAY_SEC)
+        results, err = search_fn(query, limit=1)
+        if err:
+            return None, err
+        if results:
+            top = results[0]
+            try:
+                return {
+                    "lat": float(top["lat"]),
+                    "lon": float(top["lon"]),
+                    "label": str(top.get("display_name", ""))[:300],
+                }, None
+            except (KeyError, TypeError, ValueError):
+                continue
+    return None, None
+
+
+def handle_missing_coordinates(df):
+    """Isi koordinat baris yang kosong dari hasil pencarian otomatis (OpenStreetMap).
+
+    Baris yang belum/tidak berhasil dicari tidak ikut dibuat rute — ditampilkan jelas
+    supaya bisa dilengkapi manual. Mengembalikan DataFrame yang semua barisnya punya koordinat.
+    """
+    lat = pd.to_numeric(df["latitude"], errors="coerce")
+    lon = pd.to_numeric(df["longitude"], errors="coerce")
+    missing_mask = lat.isna() | lon.isna()
+    if not missing_mask.any():
+        return df
+
+    df = df.copy()
+    df["latitude"], df["longitude"] = lat, lon
+    has_alamat = "alamat" in df.columns
+    city = st.session_state.geocode_city.strip()
+    cache = st.session_state.geocode_cache
+
+    def key_of(i):
+        return _geo_key(df.at[i, "merchant_name"], df.at[i, "alamat"] if has_alamat else "")
+
+    flash = st.session_state.geocode_flash
+    if flash:
+        st.session_state.geocode_flash = None
+        {"error": st.error, "warning": st.warning, "success": st.success}.get(flash[0], st.info)(flash[1])
+
+    resolved, pending, failed = [], [], []
+    for i in df.index[missing_mask]:
+        entry = cache.get(key_of(i))
+        if entry and "lat" in entry:
+            df.at[i, "latitude"], df.at[i, "longitude"] = entry["lat"], entry["lon"]
+            resolved.append(i)
+        elif entry and entry.get("failed") and entry.get("city", "") == city:
+            failed.append(i)
+        else:
+            pending.append(i)
+
+    if pending or failed:
+        st.warning(
+            f"📍 **{len(pending) + len(failed)} dari {len(df)} baris belum punya koordinat.** "
+            "Baris ini belum ikut dibuat rute. Cari otomatis lewat OpenStreetMap (dari nama"
+            + (" dan kolom `alamat`" if has_alamat else "")
+            + "), atau lengkapi sendiri di file."
+        )
+        st.text_input(
+            "Kota/wilayah (opsional — bikin pencarian lebih akurat)",
+            value=st.session_state.geocode_city,
+            key="_geo_city_widget",
+            on_change=_sync_geo_city,
+            placeholder="contoh: Surakarta",
+        )
+    if pending:
+        todo = pending[:GEO_MAX_PER_CLICK]
+        label = f"🔎 Cari {len(todo)} koordinat otomatis"
+        if len(pending) > len(todo):
+            label += f" (dari {len(pending)})"
+        if st.button(label, type="primary", width="stretch", key="_geo_run",
+                     help="Memakai OpenStreetMap (gratis). Dibatasi ±1 pencarian per detik, jadi butuh waktu sekitar "
+                          f"{math.ceil(len(todo) * GEO_DELAY_SEC)} detik. Cakupan merchant kecil/UMKM terbatas."):
+            progress = st.progress(0.0, text="Mencari koordinat...")
+            found_n, abort_msg, done_keys = 0, None, set()
+            for n, i in enumerate(todo, start=1):
+                k = key_of(i)
+                if k in done_keys:
+                    continue
+                done_keys.add(k)
+                res, err = geocode_place(
+                    df.at[i, "merchant_name"], df.at[i, "alamat"] if has_alamat else "", city
+                )
+                if err:
+                    abort_msg = err
+                    break
+                if res:
+                    cache[k] = {**res, "city": city}
+                    found_n += 1
+                else:
+                    cache[k] = {"failed": True, "city": city}
+                progress.progress(n / len(todo), text=f"Mencari koordinat... {n}/{len(todo)}")
+                time.sleep(GEO_DELAY_SEC)
+            progress.empty()
+            if abort_msg:
+                st.session_state.geocode_flash = (
+                    "error", f"⚠️ Pencarian berhenti di tengah jalan: {abort_msg} Hasil yang sudah ketemu tetap tersimpan — klik lagi untuk melanjutkan."
+                )
+            else:
+                st.session_state.geocode_flash = (
+                    "success", f"✅ Selesai: {found_n} koordinat ditemukan dari {len(done_keys)} pencarian."
+                )
+            st.rerun()
+
+    if resolved:
+        df.loc[resolved, "koordinat_dari"] = "OpenStreetMap (otomatis)"
+        df["koordinat_dari"] = df["koordinat_dari"].fillna("")
+        with st.expander(f"📍 {len(resolved)} koordinat hasil pencarian otomatis — periksa dulu", expanded=False):
+            st.caption(
+                "OpenStreetMap kadang menebak tempat yang salah, terutama untuk nama umum. "
+                "Cocokkan kolom **Hasil pencarian** dengan merchant yang kamu maksud."
+            )
+            check_df = pd.DataFrame({
+                "merchant_name": df.loc[resolved, "merchant_name"].values,
+                "Hasil pencarian": [cache.get(key_of(i), {}).get("label", "") for i in resolved],
+                "latitude": df.loc[resolved, "latitude"].values,
+                "longitude": df.loc[resolved, "longitude"].values,
+            })
+            st.dataframe(check_df, width="stretch", hide_index=True)
+            export_cols = [c for c in df.columns if c not in ("source_file", "koordinat_dari", "route")]
+            export_buf = io.BytesIO()
+            with pd.ExcelWriter(export_buf, engine="openpyxl") as writer:
+                df.loc[~df.index.isin(pending + failed), export_cols].to_excel(writer, index=False)
+            st.download_button(
+                "⬇️ Simpan data + koordinat (Excel)", data=export_buf.getvalue(),
+                file_name="data_dengan_koordinat.xlsx", mime="application/vnd.ms-excel",
+                help="Simpan supaya lain kali tidak perlu mencari koordinatnya lagi.",
+                key="_geo_export",
+            )
+
+    if failed:
+        with st.expander(f"❌ {len(failed)} baris tidak ketemu koordinatnya — perlu dilengkapi manual", expanded=True):
+            st.dataframe(
+                df.loc[failed, [c for c in ("merchant_name", "alamat") if c in df.columns]],
+                width="stretch", hide_index=True,
+            )
+            st.caption(
+                "Isi latitude/longitude-nya di file lalu upload ulang, atau tambahkan lewat **Maps Extractor** "
+                "(link Google Maps, cari nama, atau input manual). Mengubah isian *Kota/wilayah* akan mencoba lagi."
+            )
+
+    left_out = pending + failed
+    if left_out:
+        df = df.drop(index=left_out)
+    if df.empty:
+        st.info("Belum ada baris dengan koordinat — cari koordinatnya dulu atau lengkapi di file.")
+        st.stop()
     return df
 
 
@@ -1146,12 +1359,31 @@ def build_excel_bytes(route_summaries):
             d["titik_awal"] = r["depot_name"]
         parts.append(d)
     final_df = pd.concat(parts, ignore_index=True)
+
+    summary_rows = []
+    for r in route_summaries:
+        naive_km = r.get("naive_distance_km", r["distance_km"])
+        saved_km = naive_km - r["distance_km"]
+        summary_rows.append({
+            "rute": f"Rute {r['route_id'] + 1}",
+            "kurir": r.get("driver", ""),
+            "titik_awal": r.get("depot_name", ""),
+            "jumlah_titik": len(r["df"]),
+            "jarak_km": round(r["distance_km"], 2),
+            "waktu_perjalanan_menit": round(r["duration_sec"] / 60),
+            "jarak_urutan_file_km": round(naive_km, 2),
+            "hemat_km": round(saved_km, 2),
+            "hemat_persen": round(saved_km / naive_km * 100, 1) if naive_km > 0 else 0.0,
+        })
+    summary_df = pd.DataFrame(summary_rows)
+
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         final_df.to_excel(writer, index=False, sheet_name="Semua Rute")
         for r, d in zip(route_summaries, parts):
             sheet_name = f"Rute {r['route_id'] + 1}"[:31]
             d.to_excel(writer, index=False, sheet_name=sheet_name)
+        summary_df.to_excel(writer, index=False, sheet_name="Ringkasan")
     return buffer.getvalue()
 
 
@@ -1627,6 +1859,16 @@ if "use_multi_depot_flag" not in st.session_state:
     st.session_state.use_multi_depot_flag = False
 if "driver_names" not in st.session_state:
     st.session_state.driver_names = {}  # {route_id: nama}
+if "geocode_cache" not in st.session_state:
+    st.session_state.geocode_cache = {}  # {"nama||alamat": {lat, lon, label, city} | {failed, city}}
+if "geocode_city" not in st.session_state:
+    st.session_state.geocode_city = ""
+if "geocode_flash" not in st.session_state:
+    st.session_state.geocode_flash = None  # (jenis, pesan) ditampilkan sekali di run berikutnya
+if "presets" not in st.session_state:
+    st.session_state.presets = {}  # {nama_preset: {pengaturan}} — khusus Mode Pro
+if "preset_flash" not in st.session_state:
+    st.session_state.preset_flash = None
 
 
 def _detect_default_mode():
@@ -1780,6 +2022,12 @@ def _sync_starting_link():
     )
 
 
+def _sync_geo_city():
+    st.session_state.geocode_city = st.session_state.get(
+        "_geo_city_widget", st.session_state.geocode_city
+    )
+
+
 def _sync_use_multi_depot():
     st.session_state.use_multi_depot_flag = st.session_state.get(
         "_use_multi_depot_widget", st.session_state.use_multi_depot_flag
@@ -1828,9 +2076,31 @@ MAX_SESSION_BYTES = 40 * 1024 * 1024
 SESSION_WIDGET_KEYS = (
     "_use_extracted_widget", "_starting_link_widget", "_round_trip_widget", "_dedupe_widget",
     "_split_widget", "_plan_widget", "_target_widget", "_visit_widget", "_start_time_widget",
-    "_use_multi_depot_widget",
+    "_use_multi_depot_widget", "_geo_city_widget",
     "extract_editor",
 )
+# Widget yang nilainya ditimpa saat preset diterapkan (khusus pengaturan, bukan data).
+PRESET_WIDGET_KEYS = (
+    "_plan_widget", "_target_widget", "_split_widget", "_start_time_widget", "_visit_widget",
+    "_round_trip_widget", "_starting_link_widget", "_use_multi_depot_widget",
+)
+PRESET_MAX = 20
+
+
+def _set_depot_rows(depot_rows):
+    """Ganti seluruh baris titik-awal dengan daftar (nama, lokasi) baru. Id baris selalu
+    baru supaya tidak bentrok dengan widget key baris lama."""
+    ss = st.session_state
+    for rid in ss.multi_depot_rows:
+        ss.pop(f"depot_name_{rid}", None)
+        ss.pop(f"depot_loc_{rid}", None)
+    ss.multi_depot_rows = []
+    for name, loc in depot_rows:
+        rid = ss.multi_depot_next_id
+        ss.multi_depot_next_id += 1
+        ss[f"depot_name_{rid}"] = name
+        ss[f"depot_loc_{rid}"] = loc
+        ss.multi_depot_rows.append(rid)
 
 
 def build_session_bytes():
@@ -1864,7 +2134,10 @@ def build_session_bytes():
             ],
             "use_multi_depot_flag": bool(ss.use_multi_depot_flag),
             "driver_names": {str(k): str(v) for k, v in ss.driver_names.items()},
+            "geocode_city": ss.geocode_city,
         },
+        "presets": ss.presets,
+        "geocode_cache": ss.geocode_cache,
     }
     return json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
 
@@ -1935,6 +2208,33 @@ def load_session_bytes(raw):
             except (TypeError, ValueError):
                 continue
 
+    presets = {}
+    presets_raw = data.get("presets")
+    if isinstance(presets_raw, dict):
+        for pname, praw in list(presets_raw.items())[:PRESET_MAX]:
+            cleaned = _clean_preset(praw)
+            if cleaned and isinstance(pname, str) and pname.strip():
+                presets[pname.strip()[:40]] = cleaned
+    geocode_cache = {}
+    cache_raw = data.get("geocode_cache")
+    if isinstance(cache_raw, dict):
+        for ck, cv in list(cache_raw.items())[:5000]:
+            if not isinstance(ck, str) or not isinstance(cv, dict):
+                continue
+            city_v = str(cv.get("city", ""))[:120]
+            try:
+                if cv.get("failed") is True:
+                    geocode_cache[ck[:400]] = {"failed": True, "city": city_v}
+                else:
+                    lat_v, lon_v = float(cv["lat"]), float(cv["lon"])
+                    if -90 <= lat_v <= 90 and -180 <= lon_v <= 180:
+                        geocode_cache[ck[:400]] = {
+                            "lat": lat_v, "lon": lon_v,
+                            "label": str(cv.get("label", ""))[:300], "city": city_v,
+                        }
+            except (KeyError, TypeError, ValueError):
+                continue
+
     ss = st.session_state
     ss.uploaded_store = files
     ss.extracted_data = extracted
@@ -1943,21 +2243,159 @@ def load_session_bytes(raw):
         ss[k] = v
     for wk in SESSION_WIDGET_KEYS:  # supaya nilai baru dipakai oleh widget
         ss.pop(wk, None)
-    # Baris titik-awal lama dibuang dulu (termasuk widget key-nya) baru diisi ulang
-    # dengan id baru — supaya tidak bentrok dengan baris yang mungkin masih ada.
-    for rid in ss.multi_depot_rows:
-        ss.pop(f"depot_name_{rid}", None)
-        ss.pop(f"depot_loc_{rid}", None)
-    ss.multi_depot_rows = []
-    for name, loc in depot_rows:
-        rid = ss.multi_depot_next_id
-        ss.multi_depot_next_id += 1
-        ss[f"depot_name_{rid}"] = name
-        ss[f"depot_loc_{rid}"] = loc
-        ss.multi_depot_rows.append(rid)
+    _set_depot_rows(depot_rows)
+    ss.presets = presets
+    ss.geocode_cache = geocode_cache
+    if isinstance(cfg.get("geocode_city"), str):
+        ss.geocode_city = cfg["geocode_city"][:120]
     ss.route_result = None
     ss.uploader_nonce += 1
     return True, f"Sesi dimuat: {len(files)} file dan {len(extracted)} data Maps Extractor."
+
+
+# ---------- Preset pengaturan (Mode Pro) ----------
+def _clean_preset(raw):
+    """Validasi satu preset (dari sesi/file) — hasilnya dict bersih atau None."""
+    if not isinstance(raw, dict):
+        return None
+    try:
+        plan_mode = raw.get("plan_mode")
+        split_mode = raw.get("split_mode")
+        if plan_mode not in (PLAN_MAX, PLAN_COUNT) or split_mode not in (SPLIT_AUTO, SPLIT_FULL):
+            return None
+        target = int(raw.get("target_routes", 2))
+        visit = int(raw.get("visit_minutes", 0))
+        if not (1 <= target <= 10000 and 0 <= visit <= 480):
+            return None
+        start_t = datetime.datetime.strptime(str(raw.get("start_time", "08:00")), "%H:%M").strftime("%H:%M")
+    except (TypeError, ValueError):
+        return None
+    rows_raw = raw.get("depot_rows")
+    rows = [
+        {"name": str(d.get("name", ""))[:120], "input": str(d.get("input", ""))[:500]}
+        for d in (rows_raw[:50] if isinstance(rows_raw, list) else [])
+        if isinstance(d, dict)
+    ]
+    return {
+        "plan_mode": plan_mode, "target_routes": target, "split_mode": split_mode,
+        "start_time": start_t, "visit_minutes": visit,
+        "round_trip": bool(raw.get("round_trip", False)),
+        "starting_link": str(raw.get("starting_link", ""))[:2000],
+        "use_multi_depot": bool(raw.get("use_multi_depot", False)),
+        "depot_rows": rows,
+    }
+
+
+def _current_settings_snapshot():
+    ss = st.session_state
+    return {
+        "plan_mode": ss.plan_mode_flag,
+        "target_routes": int(ss.target_routes_flag),
+        "split_mode": ss.split_mode_flag,
+        "start_time": ss.start_time_flag.strftime("%H:%M"),
+        "visit_minutes": int(ss.visit_minutes_flag),
+        "round_trip": bool(ss.round_trip_flag),
+        "starting_link": ss.starting_link_saved,
+        "use_multi_depot": bool(ss.use_multi_depot_flag),
+        "depot_rows": [
+            {"name": ss.get(f"depot_name_{rid}", ""), "input": ss.get(f"depot_loc_{rid}", "")}
+            for rid in ss.multi_depot_rows
+        ],
+    }
+
+
+def describe_preset(p):
+    parts = [f"{p['target_routes']} rute" if p["plan_mode"] == PLAN_COUNT else "jumlah rute: maks. titik per rute"]
+    parts.append(f"mulai {p['start_time']}")
+    parts.append(f"kunjungan {p['visit_minutes']} mnt")
+    parts.append("pulang ke titik awal" if p["round_trip"] else "satu arah")
+    if p["use_multi_depot"]:
+        n = sum(1 for d in p["depot_rows"] if d["input"].strip())
+        parts.append(f"multi-depot ({n} titik)")
+    elif p["starting_link"].strip():
+        parts.append("titik awal terisi")
+    return " · ".join(parts)
+
+
+def _save_preset():
+    ss = st.session_state
+    name = str(ss.get("_preset_name", "")).strip()[:40]
+    if not name:
+        ss.preset_flash = ("error", "Isi nama preset dulu.")
+        return
+    if name not in ss.presets and len(ss.presets) >= PRESET_MAX:
+        ss.preset_flash = ("error", f"Maksimal {PRESET_MAX} preset — hapus salah satu dulu.")
+        return
+    existed = name in ss.presets
+    ss.presets[name] = _current_settings_snapshot()
+    ss["_preset_name"] = ""
+    ss["_preset_select"] = name
+    ss.preset_flash = ("success", f"Preset “{name}” {'diperbarui' if existed else 'disimpan'}.")
+
+
+def _apply_preset():
+    ss = st.session_state
+    name = ss.get("_preset_select")
+    preset = _clean_preset(ss.presets.get(name))
+    if not preset:
+        ss.preset_flash = ("error", "Preset tidak ditemukan atau rusak.")
+        return
+    ss.plan_mode_flag = preset["plan_mode"]
+    ss.target_routes_flag = preset["target_routes"]
+    ss.split_mode_flag = preset["split_mode"]
+    ss.start_time_flag = datetime.datetime.strptime(preset["start_time"], "%H:%M").time()
+    ss.visit_minutes_flag = preset["visit_minutes"]
+    ss.round_trip_flag = preset["round_trip"]
+    ss.starting_link_saved = preset["starting_link"]
+    ss.use_multi_depot_flag = preset["use_multi_depot"]
+    for wk in PRESET_WIDGET_KEYS:  # supaya widget memakai nilai preset, bukan nilai lamanya
+        ss.pop(wk, None)
+    _set_depot_rows([(d["name"], d["input"]) for d in preset["depot_rows"]])
+    ss.preset_flash = ("success", f"Preset “{name}” diterapkan.")
+
+
+def _delete_preset():
+    ss = st.session_state
+    name = ss.get("_preset_select")
+    if name in ss.presets:
+        del ss.presets[name]
+        ss.pop("_preset_select", None)
+        ss.preset_flash = ("success", f"Preset “{name}” dihapus.")
+
+
+def render_preset_panel():
+    """Simpan / terapkan kombinasi pengaturan bernama. Hanya dipanggil di Mode Pro."""
+    ss = st.session_state
+    flash = ss.preset_flash
+    ss.preset_flash = None
+    with st.expander(f"💾 Preset Pengaturan ({len(ss.presets)})", expanded=flash is not None):
+        if flash:
+            {"error": st.error, "success": st.success}.get(flash[0], st.info)(flash[1])
+        st.caption(
+            "Simpan kombinasi pengaturan yang sering dipakai, mis. “Rute Pagi Sales”. Yang tersimpan: "
+            "cara & jumlah rute, cara membagi, jam mulai, durasi kunjungan, titik-balik, titik awal, dan "
+            "multi-depot. *Maksimal titik per rute* tidak ikut karena batasnya bergantung jumlah merchant. "
+            "Preset ikut tersimpan di file **Simpan / Buka Sesi**."
+        )
+        names = list(ss.presets.keys())
+        if names:
+            if ss.get("_preset_select") not in names:
+                ss.pop("_preset_select", None)
+            st.selectbox("Pilih preset", names, key="_preset_select")
+            chosen = _clean_preset(ss.presets.get(ss.get("_preset_select")))
+            if chosen:
+                st.caption(describe_preset(chosen))
+            b1, b2 = st.columns(2)
+            with b1:
+                st.button("✅ Terapkan", key="_preset_apply", on_click=_apply_preset,
+                          type="primary", width="stretch")
+            with b2:
+                st.button("🗑️ Hapus", key="_preset_delete", on_click=_delete_preset, width="stretch")
+            st.markdown("---")
+        st.text_input("Nama preset baru", key="_preset_name", max_chars=40,
+                      placeholder="mis. Rute Pagi Sales",
+                      help="Memakai nama yang sudah ada akan memperbarui preset itu.")
+        st.button("💾 Simpan pengaturan saat ini", key="_preset_save", on_click=_save_preset, width="stretch")
 
 
 def render_session_panel(prefix):
@@ -2092,13 +2530,18 @@ def render_howto():
             "**3. Pakai hasilnya** 📥  \n"
             "Lihat urutan kunjungan dan perkiraan jam tiba, isi nama kurir per rute, buka di Google Maps, "
             "kirim ke WhatsApp, atau unduh semua rute sebagai Excel/PDF.\n\n"
+            "📍 **Koordinat kosong?** Biarkan kolom `latitude`/`longitude` kosong (atau tambah kolom `alamat`) — "
+            "app menawarkan pencarian otomatis lewat OpenStreetMap, hasilnya bisa dicek dulu sebelum dipakai.\n\n"
+            "📉 **Sebelum vs sesudah:** hasil rute otomatis dibandingkan dengan urutan merchant di file kamu, "
+            "jadi kelihatan berapa km yang dihemat.\n\n"
             "⭐ **Fitur tambahan (opsional):**\n"
             "- **Prioritas** — tambah kolom `prioritas` (ya/tidak) di Excel/CSV, merchant itu dikunjungi lebih dulu.\n"
             "- **Jam operasional** — tambah kolom `jam_buka`/`jam_tutup` (format HH:MM), perkiraan jam tiba "
             "dicek otomatis dan ditandai ⚠️ kalau di luar jam buka.\n"
             "- **Multi-depot** — centang \"Pakai banyak titik awal\" dan isi daftar gudang/toko pusat; "
             "tiap rute otomatis mulai dari yang terdekat.\n"
-            "- **Nama kurir** — isi di tiap rute setelah dibuat, ikut masuk ke Excel, WhatsApp, dan PDF.\n\n"
+            "- **Nama kurir** — isi di tiap rute setelah dibuat, ikut masuk ke Excel, WhatsApp, dan PDF.\n"
+            "- **Preset pengaturan** (Pro) — simpan kombinasi pengaturan bernama, mis. “Rute Pagi Sales”.\n\n"
             "💾 **Tips:** data tetap tersimpan selama halaman tidak di-refresh, walau kamu pindah menu. "
             "Untuk melanjutkan di lain waktu, pakai **Simpan / Buka Sesi**."
         )
@@ -2186,7 +2629,7 @@ if st.session_state.page == "Routing":
             type=["xlsx", "csv"],
             accept_multiple_files=True,
             key=f"uploader_{st.session_state.uploader_nonce}",
-            help="Format .xlsx atau .csv. Kolom wajib: merchant_name, latitude, longitude (koma desimal seperti -7,56 juga dikenali). Kolom opsional: prioritas (ya/tidak — dikunjungi lebih dulu), jam_buka & jam_tutup (HH:MM — dicek terhadap perkiraan jam tiba). Bisa pilih beberapa file sekaligus — nanti otomatis digabung. File yang sudah diupload tetap tersimpan walau kamu pindah ke Maps Extractor.",
+            help="Format .xlsx atau .csv. Kolom wajib: merchant_name, latitude, longitude (koma desimal seperti -7,56 juga dikenali). latitude/longitude boleh dikosongkan — akan dicari otomatis dari nama merchant (tambah kolom alamat supaya lebih akurat). Kolom opsional: prioritas (ya/tidak — dikunjungi lebih dulu), jam_buka & jam_tutup (HH:MM — dicek terhadap perkiraan jam tiba). Bisa pilih beberapa file sekaligus — nanti otomatis digabung. File yang sudah diupload tetap tersimpan walau kamu pindah ke Maps Extractor.",
         )
         if new_files:
             for nf in new_files:
@@ -2358,6 +2801,7 @@ if st.session_state.page == "Routing":
 
     if df is not None:
         render_stepper(stepper_slot, 1)
+        df = handle_missing_coordinates(df)  # isi koordinat kosong lewat pencarian otomatis
         df["latitude"] = pd.to_numeric(df["latitude"])
         df["longitude"] = pd.to_numeric(df["longitude"])
 
@@ -2401,6 +2845,8 @@ if st.session_state.page == "Routing":
             "2️⃣", "Atur Pembagian Rute",
             "Tentukan jumlah rute — lewat maksimal merchant per rute, atau langsung jumlah rute (mis. jumlah sales)",
         )
+        if IS_PRO:
+            render_preset_panel()
         # Pengaturan jumlah rute — ditampilkan di Basic MAUPUN Pro.
         if use_multi_depot:
             st.info(
@@ -2639,10 +3085,19 @@ if st.session_state.page == "Routing":
                         start_dt, visit_sec, has_start, round_trip, base_date,
                     )
                     all_routes.append(fin["df"])
+
+                    # Pembanding "sebelum optimasi": mengunjungi titik sesuai urutan di file
+                    # (titik awal tetap di depan), pakai matriks jarak/waktu yang sama.
+                    naive_order = list(range(len(route_df)))
+                    naive_distance_km = route_leg_sum(distance_matrix, naive_order, round_trip) / 1000
+                    naive_duration_sec = route_leg_sum(duration_matrix, naive_order, round_trip)
+
                     route_summaries.append(
                         {
                             "route_id": route_id,
                             **fin,
+                            "naive_distance_km": naive_distance_km,
+                            "naive_duration_sec": naive_duration_sec,
                             "real_roads": used_real_roads,
                             "round_trip": round_trip,
                             "has_start": has_start,
@@ -2729,6 +3184,41 @@ if st.session_state.page == "Routing":
                         format_duration(total_duration + total_visit),
                     )
 
+            # Perbandingan dengan mengunjungi merchant sesuai urutan di file (tanpa optimasi).
+            total_naive_km = sum(r.get("naive_distance_km", r["distance_km"]) for r in route_summaries)
+            total_naive_sec = sum(r.get("naive_duration_sec", r["duration_sec"]) for r in route_summaries)
+            delta_km = total_naive_km - total_distance
+            delta_sec = total_naive_sec - total_duration
+            if total_naive_km > 0 and len(df) >= 3:
+                section_header(
+                    "📉", "Sebelum vs Sesudah Optimasi",
+                    "Dibanding mengunjungi merchant sesuai urutan di file kamu",
+                )
+                saving_pct = delta_km / total_naive_km * 100
+                with st.container(key="grid3cmp"):
+                    cm1, cm2, cm3 = st.columns(3)
+                    with cm1:
+                        metric_card("📋", "Urutan di file", f"{total_naive_km:.1f} km")
+                    with cm2:
+                        metric_card("✅", "Setelah optimasi", f"{total_distance:.1f} km")
+                    with cm3:
+                        if delta_km > 0.05:
+                            metric_card("📉", "Penghematan", f"{delta_km:.1f} km ({saving_pct:.0f}%)")
+                        else:
+                            metric_card("⚖️", "Selisih", "≈ sama")
+                if delta_km > 0.05:
+                    st.caption(
+                        f"💡 Hemat ±{format_duration(max(delta_sec, 0))} waktu perjalanan dibanding urutan di file "
+                        "(belum termasuk waktu kunjungan)."
+                    )
+                elif delta_km < -0.05:
+                    st.caption(
+                        f"ℹ️ Rute sekarang {abs(delta_km):.1f} km lebih panjang dari urutan di file — biasanya karena "
+                        "merchant prioritas diutamakan atau urutan diubah manual."
+                    )
+                else:
+                    st.caption("ℹ️ Urutan di file kamu ternyata sudah hampir seefisien hasil optimasi.")
+
             if len(route_summaries) >= 2:
                 section_header(
                     "🗺️", "Peta Semua Rute",
@@ -2769,6 +3259,9 @@ if st.session_state.page == "Routing":
                         )
                     if r.get("depot_name"):
                         parts.append(f"🏭 Titik awal: {r['depot_name']}")
+                    _route_saved = r.get("naive_distance_km", r["distance_km"]) - r["distance_km"]
+                    if _route_saved > 0.05:
+                        parts.append(f"📉 Hemat {_route_saved:.1f} km vs urutan file")
                     st.caption(" · ".join(parts))
                     if r.get("n_outside_hours"):
                         st.warning(
