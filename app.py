@@ -1240,6 +1240,257 @@ def handle_missing_coordinates(df):
     return df
 
 
+# ---------- Pemeriksaan data janggal & pratinjau peta ----------
+def _hav_km_matrix(lat, lon):
+    """Matriks jarak garis lurus (km) antar semua titik, vektorisasi numpy."""
+    la, lo = np.radians(np.asarray(lat, float)), np.radians(np.asarray(lon, float))
+    dla, dlo = la[:, None] - la[None, :], lo[:, None] - lo[None, :]
+    a = np.sin(dla / 2) ** 2 + np.cos(la)[:, None] * np.cos(la)[None, :] * np.sin(dlo / 2) ** 2
+    return 6371.0 * 2 * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
+
+
+def _hav_km_to_point(lat, lon, lat0, lon0):
+    la, lo = np.radians(np.asarray(lat, float)), np.radians(np.asarray(lon, float))
+    la0, lo0 = math.radians(lat0), math.radians(lon0)
+    a = np.sin((la - la0) / 2) ** 2 + np.cos(la) * math.cos(la0) * np.sin((lo - lo0) / 2) ** 2
+    return 6371.0 * 2 * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
+
+
+def detect_outlier_points(df, min_points=5, floor_km=25.0, mad_k=6.0):
+    """Titik yang jauh melenceng dari sebaran titik lainnya — biasanya salah koordinat
+    (typo, lat/long tertukar, atau hasil pencarian otomatis yang salah tebak).
+
+    Pendekatan robust: jarak tiap titik ke titik tengah (median) sebaran; dianggap janggal
+    kalau jaraknya melebihi median + k×MAD dan juga di atas batas minimum `floor_km`
+    (supaya sebaran yang rapat di satu kota tidak dikit-dikit ditandai).
+    Mengembalikan {label_index: alasan}."""
+    if len(df) < min_points:
+        return {}
+    lat = df["latitude"].to_numpy(float)
+    lon = df["longitude"].to_numpy(float)
+    med_lat, med_lon = float(np.median(lat)), float(np.median(lon))
+    d = _hav_km_to_point(lat, lon, med_lat, med_lon)
+    med = float(np.median(d))
+    mad = float(np.median(np.abs(d - med))) * 1.4826
+    thr = max(floor_km, med + mad_k * max(mad, 1.0))
+    flagged = {}
+    for pos in np.where(d > thr)[0]:
+        reason = f"±{d[pos]:.0f} km dari pusat sebaran titik (umumnya ≤ {thr:.0f} km)"
+        if -90 <= lon[pos] <= 90 and -180 <= lat[pos] <= 180:
+            swapped = float(_hav_km_to_point([lon[pos]], [lat[pos]], med_lat, med_lon)[0])
+            if swapped <= thr:
+                reason += " — kemungkinan latitude & longitude tertukar"
+        flagged[df.index[pos]] = reason
+    return flagged
+
+
+MAP_PREVIEW_MAX_POINTS = 1500
+
+
+def build_preview_map(df, flagged):
+    """Peta semua titik; titik janggal merah dan lebih besar."""
+    fmap = folium.Map(
+        location=[float(df["latitude"].median()), float(df["longitude"].median())],
+        zoom_start=11, control_scale=True,
+    )
+    normal = [i for i in df.index if i not in flagged][:MAP_PREVIEW_MAX_POINTS]
+    for idx in list(normal) + [i for i in df.index if i in flagged]:
+        row = df.loc[idx]
+        bad = idx in flagged
+        folium.CircleMarker(
+            [float(row["latitude"]), float(row["longitude"])],
+            radius=9 if bad else 5, color="#DC2626" if bad else "#2563EB",
+            fill=True, fill_opacity=0.85, weight=2 if bad else 1,
+            tooltip=f"{row['merchant_name']}" + (" ⚠️ janggal" if bad else ""),
+        ).add_to(fmap)
+    fmap.fit_bounds(
+        [[float(df["latitude"].min()), float(df["longitude"].min())],
+         [float(df["latitude"].max()), float(df["longitude"].max())]],
+        padding=(20, 20),
+    )
+    return fmap
+
+
+# ---------- Edit data langsung di tabel ----------
+EDITABLE_COLS = ("merchant_name", "latitude", "longitude", "alamat", "prioritas", "jam_buka", "jam_tutup")
+
+
+def apply_data_edits(df, edits):
+    """Terapkan hapus-baris & ubah-sel yang tersimpan (berdasarkan `_row_key` yang stabil)."""
+    deleted = set(edits.get("deleted", []))
+    changed = edits.get("changed", {})
+    if not deleted and not changed:
+        return df
+    df = df.copy()
+    if deleted:
+        df = df[~df["_row_key"].isin(deleted)]
+    for key, cols in changed.items():
+        mask = df["_row_key"] == key
+        if not mask.any():
+            continue
+        for col, val in cols.items():
+            if col not in EDITABLE_COLS:
+                continue
+            if col not in df.columns:
+                df[col] = None
+            df[col] = df[col].astype(object)
+            df.loc[mask, col] = val
+    return df.reset_index(drop=True)
+
+
+def _cell_changed(a, b):
+    a_na = a is None or (isinstance(a, float) and math.isnan(a)) or str(a).strip() in ("", "nan", "None")
+    b_na = b is None or (isinstance(b, float) and math.isnan(b)) or str(b).strip() in ("", "nan", "None")
+    if a_na and b_na:
+        return False
+    if a_na != b_na:
+        return True
+    try:
+        return abs(float(a) - float(b)) > 1e-9
+    except (TypeError, ValueError):
+        return str(a).strip() != str(b).strip()
+
+
+def _py_value(v):
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return None
+    if hasattr(v, "item"):
+        v = v.item()
+    return v if isinstance(v, (str, int, float, bool)) else str(v)
+
+
+def diff_data_edits(original, edited, cols):
+    """Bandingkan tabel sebelum/sesudah diedit. Mengembalikan (daftar_key_dihapus, {key: {kolom: nilai}})."""
+    orig = original.set_index("_row_key")
+    ed = edited.set_index("_row_key")
+    deleted, changed = [], {}
+    for key in ed.index:
+        if key not in orig.index:
+            continue
+        if bool(ed.at[key, "hapus"]):
+            deleted.append(key)
+            continue
+        for col in cols:
+            if col in ed.columns and _cell_changed(orig.at[key, col], ed.at[key, col]):
+                changed.setdefault(key, {})[col] = _py_value(ed.at[key, col])
+    return deleted, changed
+
+
+def clean_data_edits(raw):
+    """Validasi edit dari file sesi (diperlakukan sebagai data, bukan kode)."""
+    out = {"deleted": [], "changed": {}}
+    if not isinstance(raw, dict):
+        return out
+    if isinstance(raw.get("deleted"), list):
+        out["deleted"] = [k[:300] for k in raw["deleted"][:20000] if isinstance(k, str)]
+    if isinstance(raw.get("changed"), dict):
+        for key, cols in list(raw["changed"].items())[:20000]:
+            if not isinstance(key, str) or not isinstance(cols, dict):
+                continue
+            clean = {}
+            for col, val in cols.items():
+                if col in EDITABLE_COLS and (val is None or isinstance(val, (str, int, float, bool))):
+                    clean[col] = val[:300] if isinstance(val, str) else val
+            if clean:
+                out["changed"][key[:300]] = clean
+    return out
+
+
+# ---------- Seimbangkan beban waktu antar rute ----------
+def _nn_tour_km(D, members, start=None):
+    """Panjang rute tetangga-terdekat (km) melalui `members`; `start` = indeks titik awal di D."""
+    if not members:
+        return 0.0
+    remaining = np.array(members, dtype=int)
+    if start is None:
+        cur, remaining = int(remaining[0]), remaining[1:]
+    else:
+        cur = int(start)
+    total = 0.0
+    while remaining.size:
+        dists = D[cur, remaining]
+        j = int(np.argmin(dists))
+        total += float(dists[j])
+        cur = int(remaining[j])
+        remaining = np.delete(remaining, j)
+    return total
+
+
+def balance_by_time(df, labels, visit_minutes, start=None, max_points=None,
+                    max_iter=300, speed_kmh=FALLBACK_SPEED_KMH):
+    """Pindahkan titik antar rute supaya beban waktu (perjalanan + kunjungan) lebih merata.
+
+    Beban tiap rute DIPERKIRAKAN dari rute tetangga-terdekat garis lurus ÷ kecepatan rata-rata —
+    murah dihitung, dan cukup untuk membandingkan rute satu sama lain (rute final tetap dihitung
+    dengan jarak jalan asli + TSP). Tiap langkah memindahkan satu titik dari rute terberat ke rute
+    tetangga selama itu menurunkan beban terberat; berhenti kalau tak ada lagi yang membaik.
+    Mengembalikan (label_baru, info_dict)."""
+    lat = df["latitude"].to_numpy(float)
+    lon = df["longitude"].to_numpy(float)
+    n = len(lat)
+    start_idx = None
+    if start is not None:
+        lat = np.append(lat, start[0])
+        lon = np.append(lon, start[1])
+        start_idx = n
+    D = _hav_km_matrix(lat, lon)
+    labs = np.array(labels).copy()
+    groups = {g: [int(i) for i in np.where(labs == g)[0]] for g in np.unique(labs)}
+
+    def load(members):
+        if not members:
+            return 0.0
+        return _nn_tour_km(D, members, start_idx) / speed_kmh * 60 + len(members) * visit_minutes
+
+    def centroid(members):
+        return float(np.mean(lat[members])), float(np.mean(lon[members]))
+
+    loads = {g: load(m) for g, m in groups.items()}
+    before = dict(loads)
+    for _ in range(max_iter):
+        src = max(loads, key=loads.get)
+        if len(groups[src]) <= 1:
+            break
+        cur_max = loads[src]
+        c_src = centroid(groups[src])
+        others = sorted(
+            (g for g in groups if g != src),
+            key=lambda g: float(_hav_km_to_point([centroid(groups[g])[0]], [centroid(groups[g])[1]], *c_src)[0]),
+        )
+        best = None
+        for dst in others[:4]:
+            if max_points is not None and len(groups[dst]) >= max_points:
+                continue
+            c_dst = centroid(groups[dst])
+            cands = sorted(
+                groups[src],
+                key=lambda i: float(_hav_km_to_point([lat[i]], [lon[i]], *c_dst)[0]),
+            )[:6]
+            rest_max = max((loads[g] for g in groups if g not in (src, dst)), default=0.0)
+            for p in cands:
+                new_src = [i for i in groups[src] if i != p]
+                ls, ld = load(new_src), load(groups[dst] + [p])
+                new_max = max(ls, ld, rest_max)
+                if new_max < cur_max - 1e-6:
+                    key = (new_max, abs(ls - ld))
+                    if best is None or key < best[0]:
+                        best = (key, p, dst, ls, ld)
+        if best is None:
+            break
+        _, p, dst, ls, ld = best
+        groups[src].remove(p)
+        groups[dst].append(p)
+        loads[src], loads[dst] = ls, ld
+        labs[p] = dst
+    info = {
+        "before_spread_min": max(before.values()) - min(before.values()),
+        "after_spread_min": max(loads.values()) - min(loads.values()),
+        "before_max_min": max(before.values()),
+        "after_max_min": max(loads.values()),
+    }
+    return labs, info
+
+
 def _clock(dt, base_date):
     """Format jam 'HH:MM'; kalau lewat tengah malam tambahkan '(+N hari)'."""
     days = (dt.date() - base_date).days
@@ -1865,6 +2116,14 @@ if "geocode_city" not in st.session_state:
     st.session_state.geocode_city = ""
 if "geocode_flash" not in st.session_state:
     st.session_state.geocode_flash = None  # (jenis, pesan) ditampilkan sekali di run berikutnya
+if "data_edits" not in st.session_state:
+    st.session_state.data_edits = {"deleted": [], "changed": {}}  # edit tabel Data Awal, per _row_key
+if "data_edit_nonce" not in st.session_state:
+    st.session_state.data_edit_nonce = 0
+if "exclude_outliers_flag" not in st.session_state:
+    st.session_state.exclude_outliers_flag = False
+if "balance_time_flag" not in st.session_state:
+    st.session_state.balance_time_flag = False
 if "presets" not in st.session_state:
     st.session_state.presets = {}  # {nama_preset: {pengaturan}} — khusus Mode Pro
 if "preset_flash" not in st.session_state:
@@ -2022,6 +2281,18 @@ def _sync_starting_link():
     )
 
 
+def _sync_exclude_outliers():
+    st.session_state.exclude_outliers_flag = st.session_state.get(
+        "_exclude_outliers_widget", st.session_state.exclude_outliers_flag
+    )
+
+
+def _sync_balance_time():
+    st.session_state.balance_time_flag = st.session_state.get(
+        "_balance_time_widget", st.session_state.balance_time_flag
+    )
+
+
 def _sync_geo_city():
     st.session_state.geocode_city = st.session_state.get(
         "_geo_city_widget", st.session_state.geocode_city
@@ -2076,13 +2347,13 @@ MAX_SESSION_BYTES = 40 * 1024 * 1024
 SESSION_WIDGET_KEYS = (
     "_use_extracted_widget", "_starting_link_widget", "_round_trip_widget", "_dedupe_widget",
     "_split_widget", "_plan_widget", "_target_widget", "_visit_widget", "_start_time_widget",
-    "_use_multi_depot_widget", "_geo_city_widget",
+    "_use_multi_depot_widget", "_geo_city_widget", "_balance_time_widget", "_exclude_outliers_widget",
     "extract_editor",
 )
 # Widget yang nilainya ditimpa saat preset diterapkan (khusus pengaturan, bukan data).
 PRESET_WIDGET_KEYS = (
     "_plan_widget", "_target_widget", "_split_widget", "_start_time_widget", "_visit_widget",
-    "_round_trip_widget", "_starting_link_widget", "_use_multi_depot_widget",
+    "_round_trip_widget", "_starting_link_widget", "_use_multi_depot_widget", "_balance_time_widget",
 )
 PRESET_MAX = 20
 
@@ -2135,7 +2406,10 @@ def build_session_bytes():
             "use_multi_depot_flag": bool(ss.use_multi_depot_flag),
             "driver_names": {str(k): str(v) for k, v in ss.driver_names.items()},
             "geocode_city": ss.geocode_city,
+            "balance_time_flag": bool(ss.balance_time_flag),
+            "exclude_outliers_flag": bool(ss.exclude_outliers_flag),
         },
+        "data_edits": ss.data_edits,
         "presets": ss.presets,
         "geocode_cache": ss.geocode_cache,
     }
@@ -2193,6 +2467,9 @@ def load_session_bytes(raw):
             pass
     if isinstance(cfg.get("use_multi_depot_flag"), bool):
         updates["use_multi_depot_flag"] = cfg["use_multi_depot_flag"]
+    for _bk in ("balance_time_flag", "exclude_outliers_flag"):
+        if isinstance(cfg.get(_bk), bool):
+            updates[_bk] = cfg[_bk]
     depot_rows_raw = cfg.get("multi_depot_rows")
     depot_rows = [
         (str(d.get("name", ""))[:120], str(d.get("input", ""))[:500])
@@ -2244,6 +2521,8 @@ def load_session_bytes(raw):
     for wk in SESSION_WIDGET_KEYS:  # supaya nilai baru dipakai oleh widget
         ss.pop(wk, None)
     _set_depot_rows(depot_rows)
+    ss.data_edits = clean_data_edits(data.get("data_edits"))
+    ss.data_edit_nonce += 1
     ss.presets = presets
     ss.geocode_cache = geocode_cache
     if isinstance(cfg.get("geocode_city"), str):
@@ -2280,6 +2559,7 @@ def _clean_preset(raw):
         "plan_mode": plan_mode, "target_routes": target, "split_mode": split_mode,
         "start_time": start_t, "visit_minutes": visit,
         "round_trip": bool(raw.get("round_trip", False)),
+        "balance_time": bool(raw.get("balance_time", False)),
         "starting_link": str(raw.get("starting_link", ""))[:2000],
         "use_multi_depot": bool(raw.get("use_multi_depot", False)),
         "depot_rows": rows,
@@ -2295,6 +2575,7 @@ def _current_settings_snapshot():
         "start_time": ss.start_time_flag.strftime("%H:%M"),
         "visit_minutes": int(ss.visit_minutes_flag),
         "round_trip": bool(ss.round_trip_flag),
+        "balance_time": bool(ss.balance_time_flag),
         "starting_link": ss.starting_link_saved,
         "use_multi_depot": bool(ss.use_multi_depot_flag),
         "depot_rows": [
@@ -2309,6 +2590,8 @@ def describe_preset(p):
     parts.append(f"mulai {p['start_time']}")
     parts.append(f"kunjungan {p['visit_minutes']} mnt")
     parts.append("pulang ke titik awal" if p["round_trip"] else "satu arah")
+    if p.get("balance_time"):
+        parts.append("beban waktu diseimbangkan")
     if p["use_multi_depot"]:
         n = sum(1 for d in p["depot_rows"] if d["input"].strip())
         parts.append(f"multi-depot ({n} titik)")
@@ -2346,6 +2629,7 @@ def _apply_preset():
     ss.start_time_flag = datetime.datetime.strptime(preset["start_time"], "%H:%M").time()
     ss.visit_minutes_flag = preset["visit_minutes"]
     ss.round_trip_flag = preset["round_trip"]
+    ss.balance_time_flag = preset["balance_time"]
     ss.starting_link_saved = preset["starting_link"]
     ss.use_multi_depot_flag = preset["use_multi_depot"]
     for wk in PRESET_WIDGET_KEYS:  # supaya widget memakai nilai preset, bukan nilai lamanya
@@ -2532,6 +2816,10 @@ def render_howto():
             "kirim ke WhatsApp, atau unduh semua rute sebagai Excel/PDF.\n\n"
             "📍 **Koordinat kosong?** Biarkan kolom `latitude`/`longitude` kosong (atau tambah kolom `alamat`) — "
             "app menawarkan pencarian otomatis lewat OpenStreetMap, hasilnya bisa dicek dulu sebelum dipakai.\n\n"
+            "✏️ **Data salah?** Buka **Lihat & Edit Data Awal** untuk memperbaiki sel atau menghapus baris. "
+            "Titik yang melenceng jauh otomatis ditandai (merah di pratinjau peta) sebelum rute dibuat.\n\n"
+            "⏱️ **Beban rute timpang?** Centang *Seimbangkan beban waktu antar rute* di Langkah 2 supaya durasi "
+            "tiap rute lebih mirip.\n\n"
             "📉 **Sebelum vs sesudah:** hasil rute otomatis dibandingkan dengan urutan merchant di file kamu, "
             "jadi kelihatan berapa km yang dihemat.\n\n"
             "⭐ **Fitur tambahan (opsional):**\n"
@@ -2768,6 +3056,7 @@ if st.session_state.page == "Routing":
 
         file_df = file_df.copy()
         file_df["source_file"] = fname
+        file_df["_row_key"] = [f"{fname}#{i}" for i in range(len(file_df))]  # kunci stabil untuk edit tabel
         valid_parts.append(file_df)
 
     if use_extracted:
@@ -2779,6 +3068,7 @@ if st.session_state.page == "Routing":
         else:
             extracted_df = extracted_df.copy()
             extracted_df["source_file"] = "Data Ekstraksi (Maps Extractor)"
+            extracted_df["_row_key"] = [f"extract#{i}" for i in range(len(extracted_df))]
             valid_parts.append(extracted_df)
 
     for err in file_errors:
@@ -2801,6 +3091,15 @@ if st.session_state.page == "Routing":
 
     if df is not None:
         render_stepper(stepper_slot, 1)
+        df = apply_data_edits(df, st.session_state.data_edits)  # hapus/ubah baris dari tabel Data Awal
+        if df.empty:
+            st.info("Semua baris sudah dihapus lewat tabel Data Awal. Batalkan edit atau upload data lagi.")
+            if st.session_state.data_edits["deleted"] or st.session_state.data_edits["changed"]:
+                if st.button("↩️ Batalkan semua edit tabel", key="_edits_reset_empty"):
+                    st.session_state.data_edits = {"deleted": [], "changed": {}}
+                    st.session_state.data_edit_nonce += 1
+                    st.rerun()
+            st.stop()
         df = handle_missing_coordinates(df)  # isi koordinat kosong lewat pencarian otomatis
         df["latitude"] = pd.to_numeric(df["latitude"])
         df["longitude"] = pd.to_numeric(df["longitude"])
@@ -2826,10 +3125,92 @@ if st.session_state.page == "Routing":
             if remove_dups:
                 df = df[~_dup_mask].copy().reset_index(drop=True)
 
-        with st.expander(f"📄 Lihat Data Awal ({len(df)} baris)", expanded=False):
-            if "source_file" in df.columns:
-                st.caption("💡 Kolom `source_file` menunjukkan file/sumber asal tiap baris setelah digabung.")
-            st.dataframe(df, width='stretch', **TABLE_KW)
+        _edits = st.session_state.data_edits
+        _n_edits = len(_edits["deleted"]) + sum(len(c) for c in _edits["changed"].values())
+        with st.expander(
+            f"📄 Lihat & Edit Data Awal ({len(df)} baris)" + (f" · {_n_edits} edit" if _n_edits else ""),
+            expanded=False,
+        ):
+            st.caption(
+                "✏️ Klik sel untuk memperbaiki nama atau koordinat, atau centang **Hapus** untuk membuang baris. "
+                "Tekan **Terapkan perubahan** supaya tersimpan — file aslinya tidak diubah."
+            )
+            _edit_cols = [c for c in EDITABLE_COLS if c in df.columns]
+            _info_cols = [c for c in ("source_file", "koordinat_dari") if c in df.columns]
+            _view = df[["_row_key"] + _edit_cols + _info_cols].copy()
+            for _tc in _edit_cols:  # kolom teks dibuat string murni supaya editor tidak error pada tipe campuran
+                if _tc not in ("latitude", "longitude"):
+                    _view[_tc] = _view[_tc].apply(lambda v: "" if pd.isna(v) else str(v))
+            _view.insert(0, "hapus", False)
+            with st.form(f"data_edit_form_{st.session_state.data_edit_nonce}"):
+                _edited = st.data_editor(
+                    _view,
+                    key=f"data_editor_{st.session_state.data_edit_nonce}",
+                    hide_index=True, num_rows="fixed", width="stretch",
+                    disabled=["_row_key"] + _info_cols,
+                    column_config={
+                        "_row_key": None,
+                        "hapus": st.column_config.CheckboxColumn("🗑️ Hapus", default=False),
+                        "latitude": st.column_config.NumberColumn("latitude", format="%.6f"),
+                        "longitude": st.column_config.NumberColumn("longitude", format="%.6f"),
+                    },
+                    **TABLE_KW,
+                )
+                _apply_edits = st.form_submit_button("✅ Terapkan perubahan", type="primary")
+            if _apply_edits:
+                _del, _chg = diff_data_edits(_view, _edited, _edit_cols)
+                if _del or _chg:
+                    _store = st.session_state.data_edits
+                    _store["deleted"] = sorted(set(_store["deleted"]) | set(_del))
+                    for _k, _cols in _chg.items():
+                        _store["changed"].setdefault(_k, {}).update(_cols)
+                    st.session_state.data_edit_nonce += 1
+                    st.rerun()
+                else:
+                    st.info("Belum ada perubahan untuk diterapkan.")
+            if _n_edits and st.button("↩️ Batalkan semua edit tabel", key="_edits_reset"):
+                st.session_state.data_edits = {"deleted": [], "changed": {}}
+                st.session_state.data_edit_nonce += 1
+                st.rerun()
+
+        # Pemeriksaan titik janggal + pratinjau peta semua titik.
+        _outliers = detect_outlier_points(df)
+        if _outliers:
+            st.warning(
+                f"⚠️ **{len(_outliers)} titik tampak janggal** — jauh dari titik-titik lainnya, biasanya "
+                "karena koordinat salah. Satu titik yang melenceng bisa membuat jarak rute melonjak. "
+                "Perbaiki di tabel **Data Awal** di atas, atau keluarkan dari rute."
+            )
+            st.dataframe(
+                pd.DataFrame({
+                    "merchant_name": df.loc[list(_outliers), "merchant_name"].values,
+                    "latitude": df.loc[list(_outliers), "latitude"].values,
+                    "longitude": df.loc[list(_outliers), "longitude"].values,
+                    "Alasan": list(_outliers.values()),
+                }),
+                width="stretch", hide_index=True,
+            )
+            _exclude_outliers = st.checkbox(
+                "🚫 Jangan ikutkan titik janggal ini saat membuat rute",
+                value=st.session_state.exclude_outliers_flag,
+                key="_exclude_outliers_widget",
+                on_change=_sync_exclude_outliers,
+            )
+        else:
+            _exclude_outliers = False
+        with st.expander(f"🗺️ Pratinjau peta semua titik ({len(df)})", expanded=bool(_outliers)):
+            st_folium(
+                build_preview_map(df, set(_outliers)), width=None, height=MAP_H,
+                key="preview_map", returned_objects=[],
+            )
+            if _outliers:
+                st.caption("🔴 Titik merah = tampak janggal. Arahkan kursor untuk melihat namanya.")
+        if _exclude_outliers:
+            df = df.drop(index=list(_outliers)).reset_index(drop=True)
+            if df.empty:
+                st.info("Semua titik terdeteksi janggal — periksa koordinatnya di tabel Data Awal.")
+                st.stop()
+        df = df.drop(columns=["_row_key"], errors="ignore")
 
         _n_priority = int(df["prioritas"].apply(is_truthy).sum()) if "prioritas" in df.columns else 0
         _has_hours = "jam_buka" in df.columns or "jam_tutup" in df.columns
@@ -2914,6 +3295,25 @@ if st.session_state.page == "Routing":
         else:
             split_mode = st.session_state.split_mode_flag
 
+        # Pemerataan beban waktu: hanya relevan kalau ada >1 rute hasil pengelompokan per area.
+        if n_cluster_default > 1 and not use_multi_depot and split_mode == SPLIT_AUTO:
+            balance_time = st.checkbox(
+                "⏱️ Seimbangkan beban waktu antar rute",
+                value=st.session_state.balance_time_flag,
+                key="_balance_time_widget",
+                on_change=_sync_balance_time,
+                help=(
+                    "Tanpa ini, rute dibagi berdasarkan area dan jumlah merchant, jadi satu rute bisa 2 jam "
+                    "sementara yang lain 5 jam. Dengan ini, merchant di perbatasan antar rute dipindahkan supaya "
+                    "durasi (perjalanan + kunjungan) tiap rute lebih mirip. Perkiraan memakai jarak garis lurus; "
+                    "rute akhir tetap dihitung dengan jarak jalan asli."
+                    + (" Batas maksimal merchant per rute tetap dihormati." if target_routes is None
+                       else " Di mode jumlah rute, jumlah merchant per rute boleh berbeda demi menyamakan waktu.")
+                ),
+            )
+        else:
+            balance_time = False
+
         if not IS_PRO:
             # Mode Basic: jumlah rute tetap bisa diatur (di atas), tapi jam
             # mulai/durasi kunjungan/arah rute pakai nilai terakhir yang
@@ -2980,7 +3380,7 @@ if st.session_state.page == "Routing":
         data_fingerprint = (
             len(df), tuple(df["merchant_name"]), max_points_per_route, target_routes, starting_link,
             round_trip, split_mode, int(visit_minutes), start_time.strftime("%H:%M"),
-            use_multi_depot, tuple(depot_rows_raw),
+            use_multi_depot, tuple(depot_rows_raw), balance_time,
         )
 
         if run:
@@ -3001,6 +3401,20 @@ if st.session_state.page == "Routing":
                     st.stop()
 
             with st.spinner("🔄 Mengelompokkan titik dan mencari rute tercepat di jalan asli..."):
+                # Titik awal tunggal (dipakai kalau multi-depot tidak aktif). Di-resolve SEBELUM
+                # pengelompokan karena pemerataan beban waktu ikut memperhitungkan titik awal.
+                start_name, start_lat, start_lon = "START POINT", None, None
+                if not depots and starting_link:
+                    coord_lat = coord_lon = None
+                    if "http" not in starting_link.lower():
+                        coord_lat, coord_lon, _coord_err = parse_coordinate_text(starting_link)
+                    if coord_lat is not None:
+                        start_name, start_lat, start_lon = "Titik Awal", coord_lat, coord_lon
+                    else:
+                        parsed_name, start_lat, start_lon = extract_google_maps_data(starting_link)
+                        start_name = parsed_name or "START POINT"
+
+                balance_info = None
                 if depots:
                     # Tiap merchant otomatis masuk ke titik awal TERDEKAT — jadi jumlah
                     # rute = jumlah titik awal, persis seperti yang diharapkan.
@@ -3017,18 +3431,15 @@ if st.session_state.page == "Routing":
                         kmeans = KMeans(n_clusters=n_cluster, random_state=42, n_init=10)
                         df["route"] = kmeans.fit_predict(coords)
                         df = balance_clusters(df, max_points_per_route)
-
-                # Titik awal tunggal (dipakai kalau multi-depot tidak aktif).
-                start_name, start_lat, start_lon = "START POINT", None, None
-                if not depots and starting_link:
-                    coord_lat = coord_lon = None
-                    if "http" not in starting_link.lower():
-                        coord_lat, coord_lon, _coord_err = parse_coordinate_text(starting_link)
-                    if coord_lat is not None:
-                        start_name, start_lat, start_lon = "Titik Awal", coord_lat, coord_lon
-                    else:
-                        parsed_name, start_lat, start_lon = extract_google_maps_data(starting_link)
-                        start_name = parsed_name or "START POINT"
+                        if balance_time and df["route"].nunique() > 1:
+                            _start_xy = (start_lat, start_lon) if (start_lat and start_lon) else None
+                            # Mode "jumlah rute": batas maksimal per rute hanya turunan (pembulatan),
+                            # jadi tidak dipakai. Mode "maksimal titik per rute": batasnya tetap dihormati.
+                            _cap = max_points_per_route if target_routes is None else None
+                            new_labels, balance_info = balance_by_time(
+                                df, df["route"].to_numpy(), int(visit_minutes), start=_start_xy, max_points=_cap,
+                            )
+                            df["route"] = new_labels
 
                 all_routes = []
                 route_summaries = []
@@ -3137,6 +3548,7 @@ if st.session_state.page == "Routing":
                 "multi_depot_used": bool(depots),
                 "multi_depot_overrode_single": bool(depots) and bool(starting_link),
                 "n_depots": len(depots),
+                "balance_info": balance_info,
             }
 
         result = st.session_state.get("route_result")
@@ -3160,6 +3572,13 @@ if st.session_state.page == "Routing":
             render_stepper(stepper_slot, 3)
             route_summaries = result["route_summaries"]
             st.success(f"🎉 Rute berhasil dibuat! {len(route_summaries)} rute siap dipakai.")
+            _bal = result.get("balance_info")
+            if _bal and _bal["before_spread_min"] - _bal["after_spread_min"] > 1:
+                st.caption(
+                    "⏱️ Beban waktu diseimbangkan: selisih rute terlama–tercepat (perkiraan) turun dari "
+                    f"{format_duration(_bal['before_spread_min'] * 60)} menjadi {format_duration(_bal['after_spread_min'] * 60)}; "
+                    f"rute terlama dari ±{format_duration(_bal['before_max_min'] * 60)} menjadi ±{format_duration(_bal['after_max_min'] * 60)}."
+                )
             if result.get("multi_depot_used") and len(route_summaries) < result.get("n_depots", 0):
                 st.caption(
                     f"ℹ️ {result['n_depots']} titik awal diisi, tapi hanya {len(route_summaries)} yang "
