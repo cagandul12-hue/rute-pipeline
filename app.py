@@ -1304,7 +1304,7 @@ def build_preview_map(df, flagged):
             [float(row["latitude"]), float(row["longitude"])],
             radius=9 if bad else 5, color="#DC2626" if bad else "#2563EB",
             fill=True, fill_opacity=0.85, weight=2 if bad else 1,
-            tooltip=f"{row['merchant_name']}" + (" ⚠️ janggal" if bad else ""),
+            tooltip=f"{row['merchant_name']} · {row.get('status', 'prospek')}" + (" ⚠️ janggal" if bad else ""),
         ).add_to(fmap)
     fmap.fit_bounds(
         [[float(df["latitude"].min()), float(df["longitude"].min())],
@@ -1315,7 +1315,7 @@ def build_preview_map(df, flagged):
 
 
 # ---------- Edit data langsung di tabel ----------
-EDITABLE_COLS = ("merchant_name", "latitude", "longitude", "alamat", "prioritas", "jam_buka", "jam_tutup")
+EDITABLE_COLS = ("merchant_name", "latitude", "longitude", "status", "alamat", "prioritas", "jam_buka", "jam_tutup")
 
 
 def apply_data_edits(df, edits):
@@ -3356,6 +3356,10 @@ if st.session_state.page == "Routing":
 
     if df is not None:
         render_stepper(stepper_slot, 1)
+        if "status" not in df.columns:
+            df["status"] = "prospek"
+        df["status"] = df["status"].fillna("").astype(str).str.strip()
+        df.loc[~df["status"].isin(["sudah akuisisi", "belum tertarik", "sedang pendekatan"]), "status"] = "prospek"
         df = apply_data_edits(df, st.session_state.data_edits)  # hapus/ubah baris dari tabel Data Awal
         if df.empty:
             st.info("Semua baris sudah dihapus lewat tabel Data Awal. Batalkan edit atau upload data lagi.")
@@ -3420,6 +3424,7 @@ if st.session_state.page == "Routing":
                         "hapus": st.column_config.CheckboxColumn("🗑️ Hapus", default=False),
                         "latitude": st.column_config.NumberColumn("latitude", format="%.6f"),
                         "longitude": st.column_config.NumberColumn("longitude", format="%.6f"),
+                        "status": st.column_config.SelectboxColumn("status", options=["prospek", "sudah akuisisi", "belum tertarik", "sedang pendekatan"], required=True),
                     },
                     **TABLE_KW,
                 )
@@ -3485,6 +3490,32 @@ if st.session_state.page == "Routing":
                 build_preview_map(df, set(_outliers)), width=None, height=MAP_H,
                 key="preview_map", returned_objects=[],
             )
+            st.caption("Nama merchant dan status ditampilkan saat titik peta diarahkan/disentuh. Ubah status atau hapus merchant langsung melalui tabel di bawah ini.")
+            _map_edit_cols = [c for c in ["_row_key", "merchant_name", "status", "latitude", "longitude"] if c in df.columns]
+            _map_view = df[_map_edit_cols].copy()
+            _map_view.insert(0, "hapus", False)
+            with st.form("preview_map_edit_form"):
+                _map_edited = st.data_editor(
+                    _map_view, key="preview_map_editor", hide_index=True, num_rows="fixed",
+                    width="stretch", disabled=["_row_key", "merchant_name", "latitude", "longitude"],
+                    column_config={
+                        "_row_key": None,
+                        "hapus": st.column_config.CheckboxColumn("🗑️ Hapus", default=False),
+                        "status": st.column_config.SelectboxColumn("Status", options=["prospek", "sudah akuisisi", "belum tertarik", "sedang pendekatan"], required=True),
+                    },
+                )
+                _map_apply = st.form_submit_button("💾 Simpan status / hapus merchant", type="primary")
+            if _map_apply:
+                _store = st.session_state.data_edits
+                _del_keys = _map_edited.loc[_map_edited["hapus"], "_row_key"].astype(str).tolist()
+                if _del_keys:
+                    _store["deleted"] = sorted(set(_store["deleted"]) | set(_del_keys))
+                for _, _mr in _map_edited.iterrows():
+                    _key = str(_mr["_row_key"])
+                    if _key not in _del_keys:
+                        _store["changed"].setdefault(_key, {})["status"] = _mr["status"]
+                st.session_state.data_edit_nonce += 1
+                st.rerun()
             if _outliers:
                 st.caption("🔴 Titik merah = tampak janggal. Arahkan kursor untuk melihat namanya.")
         if _exclude_outliers:
@@ -3492,6 +3523,11 @@ if st.session_state.page == "Routing":
             if df.empty:
                 st.info("Semua titik terdeteksi janggal — periksa koordinatnya di tabel Data Awal.")
                 st.stop()
+        _excluded_status = df["status"].isin(["sudah akuisisi", "belum tertarik"])
+        _n_excluded_status = int(_excluded_status.sum())
+        if _n_excluded_status:
+            st.info(f"ℹ️ {_n_excluded_status} merchant berstatus **sudah akuisisi** atau **belum tertarik** tidak akan dimasukkan ke rute.")
+            df = df.loc[~_excluded_status].copy().reset_index(drop=True)
         df = df.drop(columns=["_row_key"], errors="ignore")
 
         _n_priority = int(df["prioritas"].apply(is_truthy).sum()) if "prioritas" in df.columns else 0
