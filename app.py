@@ -1338,6 +1338,33 @@ def apply_data_edits(df, edits):
     return df.reset_index(drop=True)
 
 
+EXPORT_HELPER_COLS = ("_row_key", "source_file", "koordinat_dari", "route")
+
+
+def build_edited_data_excel(edited_full, geo_filled=None):
+    """Excel berisi data setelah edit tabel diterapkan (baris yang dihapus sudah hilang, sel
+    yang diubah sudah berisi nilai baru). Koordinat hasil pencarian otomatis ikut diisikan
+    (lewat `geo_filled`: _row_key, latitude, longitude); baris yang koordinatnya belum ketemu
+    tetap ada dengan koordinat kosong. Kolom bantu internal tidak ikut diekspor, jadi file
+    ini bisa langsung diupload lagi sebagai data baru."""
+    out = edited_full.copy()
+    out["latitude"] = pd.to_numeric(out["latitude"], errors="coerce")
+    out["longitude"] = pd.to_numeric(out["longitude"], errors="coerce")
+    if geo_filled is not None and "_row_key" in out.columns:
+        filled = geo_filled.drop_duplicates("_row_key").set_index("_row_key")
+        miss = out["latitude"].isna() | out["longitude"].isna()
+        if miss.any():
+            out.loc[miss, "latitude"] = out.loc[miss, "_row_key"].map(filled["latitude"])
+            out.loc[miss, "longitude"] = out.loc[miss, "_row_key"].map(filled["longitude"])
+    out = out.drop(columns=[c for c in EXPORT_HELPER_COLS if c in out.columns])
+    first = [c for c in ("merchant_name", "latitude", "longitude") if c in out.columns]
+    out = out[first + [c for c in out.columns if c not in first]]
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        out.to_excel(writer, index=False, sheet_name="Data")
+    return buf.getvalue()
+
+
 def _cell_changed(a, b):
     a_na = a is None or (isinstance(a, float) and math.isnan(a)) or str(a).strip() in ("", "nan", "None")
     b_na = b is None or (isinstance(b, float) and math.isnan(b)) or str(b).strip() in ("", "nan", "None")
@@ -1645,6 +1672,37 @@ def route_links_info(r, max_waypoints):
     link_df = pd.concat([df, df.iloc[[0]]], ignore_index=True) if is_round else df
     seq_nums = list(df["sequence"]) + ([df["sequence"].iloc[0]] if is_round else [])
     return generate_google_maps_links(link_df, max_waypoints), seq_nums, link_df
+
+
+MAPS_PART_EMOJIS = ["🟦", "🟩", "🟧", "🟪", "🟨", "🟥", "🟫", "⬛"]
+MAPS_PART_TINTS = [
+    "rgba(37,99,235,0.18)", "rgba(22,163,74,0.18)", "rgba(234,88,12,0.18)", "rgba(147,51,234,0.18)",
+    "rgba(202,138,4,0.20)", "rgba(220,38,38,0.18)", "rgba(120,53,15,0.20)", "rgba(71,85,105,0.22)",
+]
+MAPS_SEAM_TINT = "rgba(128,128,128,0.30)"
+
+
+def maps_part_labels(map_links, n_rows):
+    """Penanda bagian link Google Maps untuk tiap baris tabel rute.
+
+    Mengembalikan (label_per_baris, warna_per_baris). Baris yang menjadi titik sambungan antar
+    bagian (tujuan bagian sebelumnya sekaligus titik awal bagian berikutnya) memuat DUA bagian,
+    mis. "🟦 1/3 → 🟩 2/3", dan diberi warna abu-abu supaya sambungannya kelihatan."""
+    total = len(map_links)
+    parts_of_row = [[] for _ in range(n_rows)]
+    for k, (ia, ib, _url) in enumerate(map_links, start=1):
+        for i in range(ia, min(ib, n_rows - 1) + 1):
+            parts_of_row[i].append(k)
+    labels, tints = [], []
+    for ps in parts_of_row:
+        labels.append(" → ".join(
+            f"{MAPS_PART_EMOJIS[(k - 1) % len(MAPS_PART_EMOJIS)]} {k}/{total}" for k in ps
+        ))
+        if len(ps) == 1:
+            tints.append(MAPS_PART_TINTS[(ps[0] - 1) % len(MAPS_PART_TINTS)])
+        else:
+            tints.append(MAPS_SEAM_TINT if ps else "")
+    return labels, tints
 
 
 def _move_stop(route_id, action):
@@ -2816,7 +2874,8 @@ def render_howto():
             "kirim ke WhatsApp, atau unduh semua rute sebagai Excel/PDF.\n\n"
             "📍 **Koordinat kosong?** Biarkan kolom `latitude`/`longitude` kosong (atau tambah kolom `alamat`) — "
             "app menawarkan pencarian otomatis lewat OpenStreetMap, hasilnya bisa dicek dulu sebelum dipakai.\n\n"
-            "✏️ **Data salah?** Buka **Lihat & Edit Data Awal** untuk memperbaiki sel atau menghapus baris. "
+            "✏️ **Data salah?** Buka **Lihat & Edit Data Awal** untuk memperbaiki sel atau menghapus baris, lalu "
+            "download hasil editnya sebagai Excel. "
             "Titik yang melenceng jauh otomatis ditandai (merah di pratinjau peta) sebelum rute dibuat.\n\n"
             "⏱️ **Beban rute timpang?** Centang *Seimbangkan beban waktu antar rute* di Langkah 2 supaya durasi "
             "tiap rute lebih mirip.\n\n"
@@ -3100,9 +3159,11 @@ if st.session_state.page == "Routing":
                     st.session_state.data_edit_nonce += 1
                     st.rerun()
             st.stop()
+        _edited_full = df.copy()  # data setelah edit tabel, sebelum pencarian koordinat/dedupe (untuk download)
         df = handle_missing_coordinates(df)  # isi koordinat kosong lewat pencarian otomatis
         df["latitude"] = pd.to_numeric(df["latitude"])
         df["longitude"] = pd.to_numeric(df["longitude"])
+        _geo_filled = df[["_row_key", "latitude", "longitude"]].copy()
 
         # Deteksi duplikat (nama sama + koordinat sama ~1 meter), mis. setelah
         # menggabungkan Excel dengan data Maps Extractor.
@@ -3168,10 +3229,25 @@ if st.session_state.page == "Routing":
                     st.rerun()
                 else:
                     st.info("Belum ada perubahan untuk diterapkan.")
-            if _n_edits and st.button("↩️ Batalkan semua edit tabel", key="_edits_reset"):
-                st.session_state.data_edits = {"deleted": [], "changed": {}}
-                st.session_state.data_edit_nonce += 1
-                st.rerun()
+            if _n_edits:
+                _dl1, _dl2 = st.columns(2)
+                with _dl1:
+                    st.download_button(
+                        f"⬇️ Download data hasil edit ({len(_edited_full)} baris, Excel)",
+                        data=build_edited_data_excel(_edited_full, _geo_filled),
+                        file_name="data_hasil_edit.xlsx", mime="application/vnd.ms-excel",
+                        key="_edited_data_dl", type="primary", width="stretch",
+                        help="Berisi semua baris setelah edit diterapkan (gabungan semua sumber data). Bisa langsung "
+                             "diupload lagi, jadi tidak perlu mengedit ulang di lain waktu.",
+                    )
+                with _dl2:
+                    if st.button("↩️ Batalkan semua edit tabel", key="_edits_reset", width="stretch"):
+                        st.session_state.data_edits = {"deleted": [], "changed": {}}
+                        st.session_state.data_edit_nonce += 1
+                        st.rerun()
+                st.caption(
+                    "File download hanya memuat perubahan yang sudah **diterapkan** (bukan yang masih diketik di tabel)."
+                )
 
         # Pemeriksaan titik janggal + pratinjau peta semua titik.
         _outliers = detect_outlier_points(df)
@@ -3700,6 +3776,7 @@ if st.session_state.page == "Routing":
 
                     left, right = st.columns([1, 1.4])
                     with left:
+                        map_links, seq_nums, link_df = route_links_info(r, MAPS_MAX_WAYPOINTS_DESKTOP)
                         _display_cols = ["sequence", "merchant_name"]
                         _display_cols += [c for c in ("jam_tiba", "jam_selesai") if c in optimized_df.columns]
                         _show_df = optimized_df[_display_cols + ["latitude", "longitude"]].copy()
@@ -3707,19 +3784,37 @@ if st.session_state.page == "Routing":
                             _show_df.insert(2, "⭐ Prioritas", optimized_df["prioritas_flag"].map({True: "⭐", False: ""}))
                         if "jadwal_status" in optimized_df.columns:
                             _show_df["Status Jam"] = optimized_df["jadwal_status"]
+
+                        _table_obj = _show_df
+                        if len(map_links) > 1:
+                            # Rute dibagi jadi beberapa link Google Maps: tandai tiap baris masuk bagian mana.
+                            _part_labels, _part_tints = maps_part_labels(map_links, len(_show_df))
+                            _show_df.insert(1, "Bagian Maps", _part_labels)
+                            _tint_by_idx = dict(zip(_show_df.index, _part_tints))
+                            try:
+                                _table_obj = _show_df.style.apply(
+                                    lambda row: [f"background-color: {_tint_by_idx[row.name]}"] * len(row), axis=1
+                                )
+                            except Exception:
+                                _table_obj = _show_df  # tanpa pewarnaan kalau Styler tak tersedia
                         st.dataframe(
-                            _show_df,
+                            _table_obj,
                             width='stretch',
                             **TABLE_KW,
                             hide_index=True,
                         )
+                        if len(map_links) > 1:
+                            st.caption(
+                                "🧭 Kolom **Bagian Maps** menunjukkan merchant ini masuk link Google Maps yang mana "
+                                "(mis. 1/3 = link pertama dari 3). Baris **abu-abu** dengan dua bagian adalah titik "
+                                "sambungan: tujuan bagian sebelumnya sekaligus titik awal bagian berikutnya."
+                            )
                         if IS_PRO and st.checkbox(
                             "✏️ Ubah urutan manual", key=f"edit_{route_id}",
                             help="Geser merchant naik/turun, misalnya karena toko tutup jam tertentu atau ada janji. "
                                  "Jarak, jam tiba, peta, Excel, WhatsApp, dan PDF ikut diperbarui."
                         ):
                             render_reorder_controls(r)
-                        map_links, seq_nums, link_df = route_links_info(r, MAPS_MAX_WAYPOINTS_DESKTOP)
                         # Batas 9 titik singgah berlaku untuk aplikasi Google Maps (Android/iOS)
                         # MAUPUN desktop — dan tap link di HP hampir selalu membuka aplikasi
                         # tersebut (deep-link), bukan browser HP. Batas 3 titik singgah menurut
@@ -3745,7 +3840,7 @@ if st.session_state.page == "Routing":
                             )
                             for i, (ia, ib, url) in enumerate(map_links, start=1):
                                 st.link_button(
-                                    f"🚗 Bagian {i}/{len(map_links)} · titik {seq_nums[ia]} → {seq_nums[ib]}",
+                                    f"{MAPS_PART_EMOJIS[(i - 1) % len(MAPS_PART_EMOJIS)]} 🚗 Bagian {i}/{len(map_links)} · titik {seq_nums[ia]} → {seq_nums[ib]}",
                                     url,
                                     width='stretch',
                                 )
