@@ -15,6 +15,9 @@ import json
 import time
 import base64
 import unicodedata
+import hashlib
+import hmac
+import threading
 from urllib.parse import unquote, quote
 from xml.sax.saxutils import escape as xml_escape
 from sklearn.cluster import KMeans
@@ -2239,19 +2242,27 @@ input, textarea, [data-baseweb="select"] {font-size: 16px !important;}
 /* pengecualian: baris yang tetap berdampingan */
 .st-key-navrow [data-testid="stHorizontalBlock"],
 .st-key-moderow [data-testid="stHorizontalBlock"],
+.st-key-userrow [data-testid="stHorizontalBlock"],
 [class*="st-key-mvrow"] [data-testid="stHorizontalBlock"],
 [class*="st-key-filerow"] [data-testid="stHorizontalBlock"] {
     flex-direction: row !important; flex-wrap: nowrap !important; gap: 0.5rem !important;
 }
 .st-key-navrow [data-testid="stHorizontalBlock"] > [data-testid="stColumn"],
 .st-key-moderow [data-testid="stHorizontalBlock"] > [data-testid="stColumn"],
+.st-key-userrow [data-testid="stHorizontalBlock"] > [data-testid="stColumn"],
 [class*="st-key-mvrow"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"],
 .st-key-navrow [data-testid="stHorizontalBlock"] > [data-testid="column"],
 .st-key-moderow [data-testid="stHorizontalBlock"] > [data-testid="column"],
+.st-key-userrow [data-testid="stHorizontalBlock"] > [data-testid="column"],
 [class*="st-key-mvrow"] [data-testid="stHorizontalBlock"] > [data-testid="column"] {
     width: auto !important; flex: 1 1 0 !important; min-width: 0 !important;
 }
 .st-key-moderow .stButton > button {min-height: 2.4rem; font-size: 0.85rem !important;}
+.st-key-userrow [data-testid="stColumn"]:last-child,
+.st-key-userrow [data-testid="column"]:last-child {
+    flex: 0 0 8rem !important; width: 8rem !important; min-width: 8rem !important;
+}
+.st-key-userrow .stButton > button {min-height: 2.4rem; font-size: 0.85rem !important;}
 [class*="st-key-filerow"] [data-testid="stColumn"]:first-child,
 [class*="st-key-filerow"] [data-testid="column"]:first-child {
     width: auto !important; flex: 1 1 0 !important; min-width: 0 !important; overflow-wrap: anywhere;
@@ -2286,6 +2297,198 @@ MAP_H = 260 if IS_MOBILE else 350
 COMBINED_MAP_H = 380 if IS_MOBILE else 520
 # Hanya kirim `height` di mode Mobile; height=None ditolak Streamlit versi baru.
 TABLE_KW = {"height": 260} if IS_MOBILE else {}
+
+
+# ================================================================
+# LOGIN — halaman masuk sebelum menu app bisa dipakai
+# ================================================================
+# Default admin / 123. Ganti lewat Secrets / env: APP_USERNAME & APP_PASSWORD.
+APP_DEFAULT_USERNAME = "admin"
+APP_DEFAULT_PASSWORD = "123"
+LOGIN_MAX_FAILS = 5        # gagal berturut-turut sebelum dikunci
+LOGIN_LOCK_SECONDS = 60    # lama kunci
+LOGIN_FAIL_WINDOW = 300    # kegagalan lama (detik) dianggap kedaluwarsa
+
+
+def _auth_credentials():
+    return (
+        str(_setting("APP_USERNAME", APP_DEFAULT_USERNAME)),
+        str(_setting("APP_PASSWORD", APP_DEFAULT_PASSWORD)),
+    )
+
+
+def _same(a, b):
+    """Bandingkan string tanpa bocor waktu (constant-time via hash)."""
+    return hmac.compare_digest(
+        hashlib.sha256(a.encode("utf-8")).digest(),
+        hashlib.sha256(b.encode("utf-8")).digest(),
+    )
+
+
+def check_credentials(user, password, expected_user, expected_pass):
+    """Username: tanpa spasi tepi & tak peka huruf besar (keyboard HP sering kapital).
+    Password: persis (peka huruf besar, spasi dihitung)."""
+    user_ok = _same((user or "").strip().casefold(), expected_user.strip().casefold())
+    pass_ok = _same(password or "", expected_pass)
+    return user_ok and pass_ok
+
+
+@st.cache_resource
+def _login_throttle():
+    return {"lock": threading.Lock(), "fails": 0, "last_fail": 0.0, "locked_until": 0.0}
+
+
+def throttle_wait(state, now):
+    """Sisa detik terkunci (0 kalau tidak terkunci)."""
+    with state["lock"]:
+        return max(0, int(state["locked_until"] - now + 0.999))
+
+
+def throttle_record(state, success, now):
+    with state["lock"]:
+        if success:
+            state["fails"] = 0
+            state["locked_until"] = 0.0
+            return
+        if now - state["last_fail"] > LOGIN_FAIL_WINDOW:
+            state["fails"] = 0
+        state["fails"] += 1
+        state["last_fail"] = now
+        if state["fails"] >= LOGIN_MAX_FAILS:
+            state["locked_until"] = now + LOGIN_LOCK_SECONDS
+            state["fails"] = 0
+
+
+def attempt_login(user, password, state, now, expected):
+    """Return (ok, pesan). Saat terkunci, password benar pun ditolak."""
+    wait = throttle_wait(state, now)
+    if wait > 0:
+        return False, f"Terlalu banyak percobaan gagal. Coba lagi dalam {wait} detik."
+    if not (user or "").strip() or not password:
+        return False, "Isi username dan password terlebih dahulu."
+    ok = check_credentials(user, password, expected[0], expected[1])
+    throttle_record(state, ok, now)
+    if ok:
+        return True, ""
+    wait = throttle_wait(state, now)
+    if wait > 0:
+        return False, f"Terlalu banyak percobaan gagal. Coba lagi dalam {wait} detik."
+    with state["lock"]:
+        left = max(0, LOGIN_MAX_FAILS - state["fails"])
+    return False, f"Username atau password salah. Sisa percobaan: {left}."
+
+
+LOGIN_CSS = """
+<style>
+[data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"],
+[data-testid="collapsedControl"] {display: none !important;}
+.stApp {
+    background:
+        radial-gradient(900px 480px at 12% -8%, rgba(37,99,235,.18), transparent 60%),
+        radial-gradient(800px 460px at 100% 0%, rgba(13,148,136,.16), transparent 60%);
+}
+.block-container {
+    max-width: 460px !important; margin: 0 auto;
+    padding-top: clamp(2rem, 9vh, 5.5rem) !important;
+}
+.login-brand {text-align: center; margin-bottom: 1.1rem;}
+.login-logo {
+    width: 68px; height: 68px; margin: 0 auto 0.8rem; border-radius: 20px;
+    display: flex; align-items: center; justify-content: center; font-size: 2rem;
+    background: linear-gradient(135deg, #2563EB, #0D9488);
+    box-shadow: 0 10px 28px rgba(37,99,235,.35);
+}
+.login-title {font-size: 1.6rem; font-weight: 800; letter-spacing: -0.01em;}
+.login-sub {opacity: .82; font-size: .95rem; margin-top: .25rem;}
+.st-key-login_card {
+    border: 1px solid rgba(128,128,128,.28); border-radius: 18px;
+    padding: 1.2rem 1.2rem .6rem; background: rgba(128,128,128,.07);
+    box-shadow: 0 12px 36px rgba(0,0,0,.10);
+}
+.st-key-login_card [data-testid="stForm"] {border: none !important; padding: 0 !important;}
+.st-key-login_card [data-testid="stCaptionContainer"] {text-align: center;}
+.st-key-login_card button[kind="primaryFormSubmit"],
+.st-key-login_card [data-testid="stBaseButton-primaryFormSubmit"],
+.st-key-login_card [data-testid="stFormSubmitButton"] button {
+    background: linear-gradient(135deg, #2563EB, #0D9488) !important;
+    color: #fff !important; border: none !important; font-weight: 700;
+    min-height: 2.9rem; border-radius: 12px;
+}
+</style>
+"""
+
+LOGIN_BRAND_HTML = """
+<div class="login-brand">
+    <div class="login-logo">⚡</div>
+    <div class="login-title">Routing &amp; Extractor</div>
+    <div class="login-sub">Masuk untuk melanjutkan ke Routing Optimizer dan Maps Extractor</div>
+</div>
+"""
+
+
+def render_login_page():
+    ss = st.session_state
+    st.markdown(LOGIN_CSS, unsafe_allow_html=True)
+    st.markdown(LOGIN_BRAND_HTML, unsafe_allow_html=True)
+    nonce = ss.get("login_nonce", 0)
+    with st.container(key="login_card"):
+        with st.form("login_form", clear_on_submit=False):
+            user = st.text_input(
+                "Username", key="login_user", placeholder="Username",
+                autocomplete="username",
+            )
+            password = st.text_input(
+                "Password", type="password", key=f"login_pass_{nonce}",
+                placeholder="Password", autocomplete="current-password",
+            )
+            submitted = st.form_submit_button("🔐 Masuk", type="primary", width="stretch")
+        if submitted:
+            expected = _auth_credentials()
+            ok, msg = attempt_login(user, password, _login_throttle(), time.time(), expected)
+            if ok:
+                ss["auth_ok"] = True
+                ss["auth_user"] = expected[0]
+                ss.pop("login_flash", None)
+                st.rerun()
+            else:
+                ss["login_flash"] = msg
+                ss["login_nonce"] = nonce + 1  # kosongkan kolom password
+                st.rerun()
+        flash = ss.pop("login_flash", None)
+        if flash:
+            if flash.startswith("Terlalu banyak"):
+                st.warning(flash)
+            else:
+                st.error(flash)
+        st.caption("🔒 Sesi login berakhir kalau halaman di-refresh atau ditutup.")
+
+
+if not st.session_state.get("auth_ok"):
+    render_login_page()
+    render_footer()
+    st.stop()
+
+
+def _logout():
+    ss = st.session_state
+    keep = {k: ss[k] for k in ("view_mode", "app_mode") if k in ss}
+    ss.clear()
+    ss.update(keep)
+
+
+def render_user_bar(prefix, compact=False):
+    user = st.session_state.get("auth_user", "")
+    help_txt = "Keluar dan hapus semua data di sesi ini. Simpan sesi dulu kalau masih dipakai."
+    if compact:
+        with st.container(key="userrow"):
+            c1, c2 = st.columns([2, 1])
+            c1.markdown(f"👤 **{user}**")
+            c2.button("🚪 Keluar", key=f"logout_{prefix}", on_click=_logout,
+                      help=help_txt, width="stretch")
+    else:
+        st.caption(f"👤 Masuk sebagai **{user}**")
+        st.button("🚪 Keluar", key=f"logout_{prefix}", on_click=_logout,
+                  help=help_txt, width="stretch")
 
 
 SPLIT_FULL = "📦 Isi penuh"
@@ -2896,6 +3099,7 @@ def render_howto():
 
 if IS_MOBILE:
     # Di HP sidebar disembunyikan (susah dibuka) — navigasi & mode pindah ke atas halaman.
+    render_user_bar("top", compact=True)
     with st.container(key="navrow"):
         render_nav("top", horizontal=True)
     with st.container(key="moderow"):
@@ -2931,6 +3135,8 @@ else:
         render_howto()
         if IS_PRO:
             render_session_panel("side")
+        st.markdown("---")
+        render_user_bar("side")
         st.caption("⚡ Developed by **Abdillah**")
 
 
