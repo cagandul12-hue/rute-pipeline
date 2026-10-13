@@ -19,6 +19,8 @@ import html as html_lib
 import hashlib
 import hmac
 import threading
+import difflib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import unquote, quote
 from xml.sax.saxutils import escape as xml_escape
 from sklearn.cluster import KMeans
@@ -677,6 +679,11 @@ def check_time_window(arrival_dt, jam_buka, jam_tutup):
     if open_t is None and close_t is None:
         return ""
     t = arrival_dt.time()
+    if open_t and close_t and close_t <= open_t:
+        # buka lewat tengah malam (mis. 18:00–02:00): di luar jam hanya kalau jatuh di celah siang
+        if close_t < t < open_t:
+            return f"⚠️ tiba sebelum buka ({open_t.strftime('%H:%M')})"
+        return "✅"
     if open_t and t < open_t:
         return f"⚠️ tiba sebelum buka ({open_t.strftime('%H:%M')})"
     if close_t and t > close_t:
@@ -1408,6 +1415,283 @@ def pick_clicked_index(df, clicked, tooltip=None, tol_deg=2e-4):
         if match:
             cand = match
     return df.index[cand[0]]
+
+
+# ---------- Jam buka/tutup dari Google Maps (Places API) ----------
+GM_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
+GM_FIELD_MASK = ("places.id,places.displayName,places.formattedAddress,places.location,"
+                 "places.regularOpeningHours,places.businessStatus")
+GM_RADIUS_M = 300          # radius pencarian di sekitar koordinat merchant
+GM_MAX_PER_RUN = 200       # batas permintaan baru per klik (jaga biaya)
+GM_DAYS = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
+_GM_GENERIC = {"toko", "warung", "kios", "cv", "pt", "ud", "tb", "depot", "dan", "the", "kedai"}
+
+
+def gm_api_key():
+    return _setting("GOOGLE_MAPS_API_KEY") or st.session_state.get("gm_key_input") or None
+
+
+def _gm_norm(text):
+    t = unicodedata.normalize("NFKD", str(text or "")).encode("ascii", "ignore").decode().lower()
+    return [w for w in re.findall(r"[a-z0-9]+", t) if w not in _GM_GENERIC]
+
+
+def gm_name_similarity(a, b):
+    ta, tb = _gm_norm(a), _gm_norm(b)
+    if not ta or not tb:
+        return 0.0
+    sa, sb = set(ta), set(tb)
+    jacc = len(sa & sb) / len(sa | sb)
+    seq = difflib.SequenceMatcher(None, " ".join(ta), " ".join(tb)).ratio()
+    contain = 1.0 if (" ".join(ta) in " ".join(tb) or " ".join(tb) in " ".join(ta)) else 0.0
+    return max(jacc, seq, 0.9 * contain)
+
+
+def gm_pick_place(places, name, lat, lon):
+    """Pilih tempat paling cocok. Return (place, jarak_m, kemiripan, yakin)."""
+    best = None
+    for pl in places or []:
+        loc = pl.get("location") or {}
+        if "latitude" not in loc or "longitude" not in loc:
+            continue
+        dist = haversine(lat, lon, loc["latitude"], loc["longitude"]) * 1000
+        if dist > GM_RADIUS_M:
+            continue
+        gname = (pl.get("displayName") or {}).get("text", "")
+        sim = gm_name_similarity(name, gname)
+        score = sim - dist / 1000.0
+        if best is None or score > best[0]:
+            best = (score, pl, dist, sim)
+    if best is None:
+        return None
+    _, pl, dist, sim = best
+    sure = (dist <= 200 and sim >= 0.5) or (dist <= 30 and sim >= 0.3)
+    return pl, dist, sim, sure
+
+
+def _hhmm(t):
+    return f"{int(t.get('hour', 0)):02d}:{int(t.get('minute', 0)):02d}"
+
+
+def gm_hours_for_day(opening, weekday):
+    """Jam buka/tutup untuk satu hari. `weekday`: 0=Senin … 6=Minggu (Python).
+    Return (buka, tutup, catatan). buka/tutup None kalau tutup/tidak ada data."""
+    if not opening:
+        return None, None, "Google tidak punya data jam"
+    periods = opening.get("periods") or []
+    gday = (weekday + 1) % 7  # Google: 0 = Minggu
+    day_p = [pd_ for pd_ in periods if (pd_.get("open") or {}).get("day") == gday]
+    if not periods:
+        return None, None, "Google tidak punya data jam"
+    if len(periods) == 1 and not periods[0].get("close"):
+        return "00:00", "23:59", "Buka 24 jam"   # Google: satu periode tanpa 'close' = 24 jam setiap hari
+    if not day_p:
+        return None, None, "Tutup di hari itu"
+    day_p.sort(key=lambda x: (x["open"].get("hour", 0), x["open"].get("minute", 0)))
+    first, last = day_p[0], day_p[-1]
+    buka = _hhmm(first["open"])
+    tutup = _hhmm(last["close"]) if last.get("close") else "23:59"
+    note = ""
+    if len(day_p) > 1:
+        note = "Ada jam istirahat: " + ", ".join(
+            f"{_hhmm(x['open'])}–{_hhmm(x['close'])}" for x in day_p if x.get("close"))
+    elif last.get("close") and last["close"].get("day") != last["open"].get("day"):
+        note = "Tutup lewat tengah malam"
+    return buka, tutup, note
+
+
+def gm_lookup(name, lat, lon, key, alamat=None, post=None):
+    """Satu permintaan Places API (Text Search). Return dict hasil mentah (siap di-cache).
+    status: ok | uncertain | none | error ; fatal=True untuk masalah key/akun (hentikan semua)."""
+    post = post or requests.post
+    q = str(name).strip()
+    if alamat and str(alamat).strip().lower() not in ("", "nan", "none"):
+        q = f"{q}, {str(alamat).strip()}"
+    body = {
+        "textQuery": q, "languageCode": "id", "regionCode": "ID", "maxResultCount": 5,
+        "locationBias": {"circle": {"center": {"latitude": float(lat), "longitude": float(lon)},
+                                    "radius": float(GM_RADIUS_M)}},
+    }
+    headers = {"Content-Type": "application/json", "X-Goog-Api-Key": key, "X-Goog-FieldMask": GM_FIELD_MASK}
+    resp = None
+    for attempt in range(3):
+        try:
+            resp = post(GM_SEARCH_URL, json=body, headers=headers, timeout=15)
+        except Exception:
+            resp = None
+        if resp is not None and resp.status_code not in (429, 500, 502, 503, 504):
+            break
+        time.sleep(1.5 * (attempt + 1))
+    if resp is None:
+        return {"status": "error", "msg": "Tidak bisa terhubung ke Google (jaringan)", "fatal": False}
+    if resp.status_code != 200:
+        try:
+            msg = resp.json().get("error", {}).get("message", "")
+        except Exception:
+            msg = ""
+        fatal = resp.status_code in (400, 401, 403)
+        hint = {400: "permintaan/API key tidak valid", 401: "API key ditolak",
+                403: "API key tidak punya akses — aktifkan 'Places API (New)' dan penagihan di Google Cloud"}.get(
+            resp.status_code, f"HTTP {resp.status_code}")
+        return {"status": "error", "msg": f"{hint}. {msg}"[:200], "fatal": fatal}
+    try:
+        places = resp.json().get("places", [])
+    except Exception:
+        places = []
+    picked = gm_pick_place(places, name, float(lat), float(lon))
+    if not places or picked is None:
+        return {"status": "none"}
+    pl, dist, sim, sure = picked
+    return {
+        "status": "ok" if sure else "uncertain",
+        "gname": (pl.get("displayName") or {}).get("text", ""),
+        "dist": round(dist), "sim": round(sim, 2),
+        "business_status": pl.get("businessStatus", ""),
+        "opening": pl.get("regularOpeningHours"),
+    }
+
+
+def gm_result_for_day(entry, weekday):
+    """Ubah entri cache jadi (ikon+hasil, buka, tutup, catatan) untuk hari tertentu."""
+    st_ = entry.get("status")
+    if st_ == "error":
+        return "❌ Error", None, None, entry.get("msg", "")
+    if st_ == "none":
+        return "❓ Tidak ditemukan", None, None, f"Tidak ada tempat di radius {GM_RADIUS_M} m"
+    if st_ == "uncertain":
+        return "⚠️ Tidak yakin", None, None, "Nama/jarak kurang cocok — cek manual, jam tidak diisi"
+    if entry.get("business_status") == "CLOSED_PERMANENTLY":
+        return "🚫 Tutup permanen", None, None, "Google menandai tempat ini tutup permanen"
+    buka, tutup, note = gm_hours_for_day(entry.get("opening"), weekday)
+    if buka is None:
+        return ("🚫 Tutup hari itu" if note.startswith("Tutup") else "ℹ️ Tanpa data jam"), None, None, note
+    return "✅ Terisi", buka, tutup, note
+
+
+def gm_weekday_text(entry, weekday):
+    descs = ((entry.get("opening") or {}).get("weekdayDescriptions")) or []
+    return descs[weekday] if 0 <= weekday < len(descs) else ""
+
+
+def _today_weekday_wib():
+    return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=7))).weekday()
+
+
+def render_hours_fetcher(df):
+    """Panel di 'Lihat & Edit Data Awal': isi jam_buka/jam_tutup dari Google Maps."""
+    ss = st.session_state
+    ss.setdefault("gm_cache", {})
+    st.markdown("**🕒 Ambil jam buka & tutup dari Google Maps**")
+    st.caption(
+        f"Dicari lewat Google Places API berdasarkan **nama merchant + latitude/longitude** (radius ±{GM_RADIUS_M} m). "
+        "Hasilnya masuk ke kolom jam_buka & jam_tutup (masih bisa diedit di tabel), lalu dipakai untuk menandai "
+        "⚠️ kalau perkiraan jam tiba di luar jam buka."
+    )
+    key = gm_api_key()
+    if key and _setting("GOOGLE_MAPS_API_KEY"):
+        st.caption("🔑 API key terpasang (dari Secrets).")
+    elif not key or ss.get("gm_key_input"):
+        st.text_input(
+            "Google Maps API key", type="password", key="gm_key_input",
+            help="Perlu API key Google Cloud dengan 'Places API (New)' aktif. Hanya disimpan di sesi ini (tidak ikut "
+                 "tersimpan ke file sesi). Supaya permanen, isi GOOGLE_MAPS_API_KEY di Secrets.",
+        )
+        key = gm_api_key()
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        day_label = st.selectbox("Ambil jam untuk hari", GM_DAYS, index=_today_weekday_wib(), key="gm_day")
+    with c2:
+        overwrite = st.checkbox("Timpa jam yang sudah terisi", value=False, key="gm_overwrite")
+    weekday = GM_DAYS.index(day_label)
+
+    base = df[~df["status"].isin(STATUS_EXCLUDED)]
+    def _filled(r):
+        return (_parse_hhmm(r.get("jam_buka")) is not None) or (_parse_hhmm(r.get("jam_tutup")) is not None)
+    todo = base if overwrite else base[~base.apply(_filled, axis=1)] if len(base) else base
+    todo = todo[todo["latitude"].notna() & todo["longitude"].notna()]
+
+    def _ck(r):
+        return (str(r["merchant_name"]).strip().lower(), round(float(r["latitude"]), 5), round(float(r["longitude"]), 5))
+    cache = ss["gm_cache"]
+    new_rows = [r for _, r in todo.iterrows() if _ck(r) not in cache]
+    batch = new_rows[:GM_MAX_PER_RUN]
+    st.caption(
+        f"{len(todo)} merchant akan diproses · **{len(new_rows)} permintaan baru** ke Google "
+        f"(sisanya sudah pernah dicari di sesi ini, tidak ditagih lagi). Merchant berstatus sudah akuisisi / belum "
+        "tertarik dilewati. Penggunaan Places API **berbayar di atas kuota gratis bulanan** — cek harga & kuota di Google Cloud."
+    )
+    if len(new_rows) > GM_MAX_PER_RUN:
+        st.caption(f"Dibatasi {GM_MAX_PER_RUN} permintaan per klik — klik lagi untuk sisanya.")
+    if st.button(f"🔎 Ambil jam dari Google Maps ({len(todo)} merchant)", key="gm_run", type="primary",
+                 disabled=(not key) or len(todo) == 0, width="stretch"):
+        stop = threading.Event()
+        def _job(r):
+            if stop.is_set():
+                return _ck(r), None
+            res = gm_lookup(r["merchant_name"], r["latitude"], r["longitude"], key,
+                            alamat=r.get("alamat") if "alamat" in r.index else None)
+            if res.get("fatal"):
+                stop.set()
+            return _ck(r), res
+        fatal_msg = None
+        errors = {}   # error tidak di-cache supaya bisa dicoba lagi
+        if batch:
+            bar = st.progress(0.0, text="Mencari di Google Maps…")
+            done = 0
+            with ThreadPoolExecutor(max_workers=4) as ex:
+                futs = [ex.submit(_job, r) for r in batch]
+                for f in as_completed(futs):
+                    k, res = f.result()
+                    done += 1
+                    bar.progress(done / len(batch), text=f"Mencari di Google Maps… {done}/{len(batch)}")
+                    if res is None:
+                        continue
+                    if res.get("status") == "error":
+                        errors[k] = res
+                        if res.get("fatal"):
+                            fatal_msg = res.get("msg")
+                    else:
+                        cache[k] = res
+            bar.empty()
+        if fatal_msg:
+            st.error(f"❌ Google menolak permintaan: {fatal_msg}")
+        report, n_ok = [], 0
+        store = ss.data_edits
+        for _, r in todo.iterrows():
+            entry = cache.get(_ck(r)) or errors.get(_ck(r))
+            if entry is None:
+                report.append({"Merchant": r["merchant_name"], "Hasil": "⏳ Belum diproses", "Nama di Google": "",
+                               "Jarak (m)": None, "Jam Google": "", "Catatan": "Batas per klik / dihentikan"})
+                continue
+            hasil, buka, tutup, note = gm_result_for_day(entry, weekday)
+            if buka:
+                ch = store["changed"].setdefault(r["_row_key"], {})
+                ch["jam_buka"], ch["jam_tutup"] = buka, tutup
+                n_ok += 1
+            report.append({"Merchant": r["merchant_name"], "Hasil": hasil, "Nama di Google": entry.get("gname", ""),
+                           "Jarak (m)": entry.get("dist"), "Jam Google": gm_weekday_text(entry, weekday),
+                           "Catatan": note})
+        ss["gm_report"] = {"day": day_label, "rows": report, "n_ok": n_ok}
+        if n_ok:
+            ss.data_edit_nonce += 1
+        ss.table_panel_open = True
+        st.rerun()
+    rep_ = ss.get("gm_report")
+    if rep_:
+        rows = rep_["rows"]
+        n_total = len(rows)
+        st.success(f"✅ {rep_['n_ok']} dari {n_total} merchant terisi jamnya (hari {rep_['day']}).") if rep_["n_ok"] \
+            else st.info(f"Tidak ada jam yang terisi (hari {rep_['day']}). Lihat catatan di bawah.")
+        order = {"✅ Terisi": 9}
+        rows = sorted(rows, key=lambda x: order.get(x["Hasil"], 0))
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", **TABLE_KW)
+        st.caption(
+            "Kolom **Nama di Google** & **Jarak** membantu memastikan tempatnya benar. Yang berstatus ⚠️ / ❓ tidak diisi "
+            "otomatis — isi manual di tabel. Merchant dengan jam istirahat diisi dari buka paling awal sampai tutup paling akhir."
+        )
+        if st.button("Tutup laporan", key="gm_report_close"):
+            ss.pop("gm_report", None)
+            st.rerun()
 
 
 # ---------- Edit data langsung di tabel ----------
@@ -3215,7 +3499,8 @@ def render_howto():
             "⭐ **Fitur tambahan (opsional):**\n"
             "- **Prioritas** — tambah kolom `prioritas` (ya/tidak) di Excel/CSV, merchant itu dikunjungi lebih dulu.\n"
             "- **Jam operasional** — tambah kolom `jam_buka`/`jam_tutup` (format HH:MM), perkiraan jam tiba "
-            "dicek otomatis dan ditandai ⚠️ kalau di luar jam buka.\n"
+            "dicek otomatis dan ditandai ⚠️ kalau di luar jam buka. Tidak punya datanya? Ambil otomatis dari "
+            "Google Maps lewat **Lihat & Edit Data Awal** (perlu Google Maps API key).\n"
             "- **Multi-depot** — centang \"Pakai banyak titik awal\" dan isi daftar gudang/toko pusat; "
             "tiap rute otomatis mulai dari yang terdekat.\n"
             "- **Nama kurir** — isi di tiap rute setelah dibuat, ikut masuk ke Excel, WhatsApp, dan PDF.\n"
@@ -3572,6 +3857,9 @@ if st.session_state.page == "Routing":
                     st.rerun()
                 else:
                     st.info("Belum ada perubahan untuk diterapkan.")
+            st.markdown("---")
+            render_hours_fetcher(df)
+            st.markdown("---")
             if _n_edits:
                 _dl1, _dl2 = st.columns(2)
                 with _dl1:
