@@ -20,8 +20,6 @@ import hashlib
 import hmac
 import threading
 import urllib.parse
-import difflib
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import unquote, quote
 from xml.sax.saxutils import escape as xml_escape
 from sklearn.cluster import KMeans
@@ -1506,284 +1504,38 @@ def pick_clicked_index(df, clicked, tooltip=None, tol_deg=2e-4):
     return df.index[cand[0]]
 
 
-# ---------- Jam buka/tutup dari OpenStreetMap (Overpass API — gratis, tanpa API key) ----------
-OSM_OVERPASS_URLS = ("https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter")
-OSM_RADIUS_M = 120         # radius pencarian di sekitar koordinat merchant
-OSM_CHUNK = 30             # jumlah merchant per permintaan (satu query untuk banyak titik)
-OSM_DAYS = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
-_OSM_DAY_IDX = {"mo": 0, "tu": 1, "we": 2, "th": 3, "fr": 4, "sa": 5, "su": 6}
-_OSM_GENERIC = {"toko", "warung", "kios", "cv", "pt", "ud", "tb", "depot", "dan", "the", "kedai"}
+# ---------- Jam buka/tutup: isi manual di tabel Data Awal ----------
+HOURS_COLS = ("jam_buka", "jam_tutup")
 
 
-def _osm_norm(text):
-    t = unicodedata.normalize("NFKD", str(text or "")).encode("ascii", "ignore").decode().lower()
-    return [w for w in re.findall(r"[a-z0-9]+", t) if w not in _OSM_GENERIC]
-
-
-def osm_name_similarity(a, b):
-    ta, tb = _osm_norm(a), _osm_norm(b)
-    if not ta or not tb:
-        return 0.0
-    sa, sb = set(ta), set(tb)
-    jacc = len(sa & sb) / len(sa | sb)
-    ja, jb = " ".join(ta), " ".join(tb)
-    seq = difflib.SequenceMatcher(None, ja, jb).ratio()
-    contain = 1.0 if (ja in jb or jb in ja) else 0.0
-    return max(jacc, seq, 0.9 * contain)
-
-
-def _mm(m):
-    return f"{m // 60:02d}:{m % 60:02d}"
-
-
-def _close_txt(c):
-    """Menit tutup (bisa >1440 = lewat tengah malam) → 'HH:MM'; 24:00 ditulis 23:59."""
-    return "23:59" if c == 1440 else _mm(c - 1440 if c > 1440 else c)
-
-
-def osm_parse_opening_hours(text):
-    """Baca sebagian sintaks `opening_hours` OSM (mis. 'Mo-Sa 08:00-21:00; Su off', '24/7',
-    'Mo-Fr 09:00-12:00,13:00-17:00'). Return {hari 0=Senin..6=Minggu: [(buka_menit, tutup_menit), ...]}
-    ([] = tutup). None kalau sintaksnya belum didukung (bulan, hari libur khusus, matahari terbit, dst)."""
-    raw = str(text or "").strip()
-    if not raw:
+def normalize_hhmm_text(val):
+    """'8:00' / '08.00' / '8:00:00' -> '08:00'; kosong -> ''; format tidak valid -> None."""
+    s_ = "" if val is None else str(val).strip()
+    if s_.lower() in ("", "nan", "none"):
+        return ""
+    m = re.fullmatch(r"(\d{1,2})[:.](\d{2})(?::\d{2})?", s_)
+    if not m:
         return None
-    if raw.lower() == "24/7":
-        return {d: [(0, 1440)] for d in range(7)}
-    sched = {d: [] for d in range(7)}
-    for rule in [r.strip() for r in raw.split(";") if r.strip()]:
-        m = re.match(r"^([A-Za-z ,\-]*?)\s*(\d.*|off|closed|24/7|open)?$", rule, re.I)
-        if not m:
-            return None
-        days_txt, rest = m.group(1).strip(), (m.group(2) or "").strip().lower()
-        rest = re.sub(r"\s+open$", "", rest)
-        days, only_holiday = [], False
-        if not days_txt:
-            days = list(range(7))
-        else:
-            for tok in [t.strip().lower() for t in days_txt.split(",") if t.strip()]:
-                if tok in ("ph", "sh"):
-                    only_holiday = True
+    h, mi = int(m.group(1)), int(m.group(2))
+    if not (0 <= h <= 23 and 0 <= mi <= 59):
+        return None
+    return f"{h:02d}:{mi:02d}"
+
+
+def normalize_hours_changes(changed):
+    """Rapikan perubahan kolom jam_buka/jam_tutup dari tabel. Return (perubahan_valid, daftar_salah);
+    daftar_salah berisi (row_key, kolom, nilai) untuk isian yang bukan format jam — tidak disimpan."""
+    ok, bad = {}, []
+    for key, cols in changed.items():
+        for col, val in cols.items():
+            if col in HOURS_COLS:
+                norm = normalize_hhmm_text(val)
+                if norm is None:
+                    bad.append((key, col, val))
                     continue
-                mm = re.fullmatch(r"(mo|tu|we|th|fr|sa|su)(?:\s*-\s*(mo|tu|we|th|fr|sa|su))?", tok)
-                if not mm:
-                    return None
-                a = _OSM_DAY_IDX[mm.group(1)]
-                b = _OSM_DAY_IDX[mm.group(2)] if mm.group(2) else a
-                days += list(range(a, b + 1)) if a <= b else list(range(a, 7)) + list(range(0, b + 1))
-        if not days:      # aturan khusus hari libur (PH) saja — diabaikan
-            continue
-        if rest in ("off", "closed"):
-            intervals = []
-        elif rest in ("24/7", "open"):
-            intervals = [(0, 1440)]
-        else:
-            intervals = []
-            for part in [p.strip() for p in rest.split(",") if p.strip()]:
-                t = re.fullmatch(r"(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})", part)
-                if not t:
-                    return None
-                o, c = int(t.group(1)) * 60 + int(t.group(2)), int(t.group(3)) * 60 + int(t.group(4))
-                if not (0 <= o <= 1440 and 0 <= c <= 1440):
-                    return None
-                if c <= o:
-                    c += 1440      # lewat tengah malam
-                intervals.append((o, c))
-        for d in days:
-            sched[d] = intervals
-    return sched
-
-
-def osm_hours_for_day(oh_text, weekday):
-    """Return (jenis, buka, tutup, catatan); jenis: ok | closed | unsupported."""
-    sched = osm_parse_opening_hours(oh_text)
-    if sched is None:
-        return "unsupported", None, None, "Format jam di OSM belum didukung — isi manual"
-    iv = sorted(sched.get(weekday, []))
-    if not iv:
-        return "closed", None, None, "Tutup di hari itu"
-    if iv == [(0, 1440)]:
-        return "ok", "00:00", "23:59", "Buka 24 jam"
-    buka = _mm(iv[0][0])
-    last_close = iv[-1][1]
-    tutup = _close_txt(last_close)
-    note = "Tutup lewat tengah malam" if last_close > 1440 else ""
-    if len(iv) > 1:
-        note = "Ada jam istirahat: " + ", ".join(f"{_mm(o)}–{_close_txt(c)}" for o, c in iv)
-    return "ok", buka, tutup, note
-
-
-def osm_build_query(points, radius=OSM_RADIUS_M):
-    parts = "".join(f'nwr(around:{radius},{la:.6f},{lo:.6f})["opening_hours"];' for la, lo in points)
-    return f"[out:json][timeout:60];({parts});out center tags;"
-
-
-def osm_fetch_chunk(points, post=None):
-    """Satu permintaan Overpass untuk banyak titik. Return (elemen, pesan_error)."""
-    post = post or requests.post
-    q = osm_build_query(points)
-    headers = {"User-Agent": "RutePipelineOptimizerApp/1.0 (streamlit-community-app)"}
-    last = "tidak bisa terhubung ke server OpenStreetMap"
-    for url in OSM_OVERPASS_URLS:
-        for attempt in range(2):
-            try:
-                resp = post(url, data={"data": q}, headers=headers, timeout=90)
-            except Exception:
-                last = "tidak bisa terhubung ke server OpenStreetMap"
-                time.sleep(2)
-                continue
-            if resp.status_code == 200:
-                try:
-                    return resp.json().get("elements", []), None
-                except Exception:
-                    last = "respons server tidak valid"
-                    break
-            last = f"server OpenStreetMap membalas HTTP {resp.status_code}"
-            if resp.status_code in (429, 503, 504):
-                time.sleep(3 * (attempt + 1))
-                continue
-            break
-    return None, last
-
-
-def osm_pick(elements, name, lat, lon):
-    """Pilih elemen OSM paling cocok. Return (tags, jarak_m, kemiripan, yakin) atau None."""
-    best = None
-    for el in elements or []:
-        la = el.get("lat", (el.get("center") or {}).get("lat"))
-        lo = el.get("lon", (el.get("center") or {}).get("lon"))
-        if la is None or lo is None:
-            continue
-        dist = haversine(lat, lon, la, lo) * 1000
-        if dist > OSM_RADIUS_M:
-            continue
-        tags = el.get("tags") or {}
-        sim = max([osm_name_similarity(name, tags.get(k, "")) for k in
-                   ("name", "name:id", "official_name", "brand", "operator")] or [0.0])
-        score = sim - dist / 1000.0
-        if best is None or score > best[0]:
-            best = (score, tags, dist, sim)
-    if best is None:
-        return None
-    _, tags, dist, sim = best
-    sure = (dist <= 100 and sim >= 0.5) or (dist <= 30 and sim >= 0.3)
-    return tags, dist, sim, sure
-
-
-def osm_entry(elements, name, lat, lon):
-    picked = osm_pick(elements, name, lat, lon)
-    if picked is None:
-        return {"status": "none"}
-    tags, dist, sim, sure = picked
-    return {"status": "ok" if sure else "uncertain", "gname": tags.get("name", ""),
-            "dist": round(dist), "sim": round(sim, 2), "oh": tags.get("opening_hours", "")}
-
-
-def osm_result_for_day(entry, weekday):
-    """(hasil, buka, tutup, catatan) untuk satu hari dari entri cache."""
-    s = entry.get("status")
-    if s == "error":
-        return "❌ Error", None, None, entry.get("msg", "")
-    if s == "none":
-        return "❓ Tidak ada di OSM", None, None, (
-            f"Tidak ada tempat ber-jam operasional di radius {OSM_RADIUS_M} m (OSM sering belum lengkap "
-            "untuk warung/toko kecil) — isi manual")
-    if s == "uncertain":
-        return "⚠️ Tidak yakin", None, None, "Nama/jarak kurang cocok — cek manual, jam tidak diisi"
-    kind, buka, tutup, note = osm_hours_for_day(entry.get("oh"), weekday)
-    if kind == "unsupported":
-        return "⚙️ Format belum didukung", None, None, note
-    if kind == "closed":
-        return "🚫 Tutup hari itu", None, None, note
-    return "✅ Terisi", buka, tutup, note
-
-
-def _today_weekday_wib():
-    return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=7))).weekday()
-
-
-def render_hours_fetcher(df):
-    """Panel di 'Lihat & Edit Data Awal': isi jam_buka/jam_tutup dari OpenStreetMap (gratis)."""
-    ss = st.session_state
-    ss.setdefault("osm_cache", {})
-    st.markdown("**🕒 Jam buka & tutup merchant**")
-    st.caption(
-        f"**Otomatis (gratis):** diambil dari OpenStreetMap berdasarkan **nama merchant + latitude/longitude** "
-        f"(radius ±{OSM_RADIUS_M} m), tanpa API key. Data OpenStreetMap diisi relawan, jadi minimarket/restoran "
-        "biasanya ada, tapi **warung & toko kecil sering kosong** — untuk yang kosong, **isi manual** di kolom "
-        "`jam_buka` / `jam_tutup` pada tabel di atas (format HH:MM, lalu **Terapkan perubahan**)."
-    )
-    c1, c2 = st.columns([1, 1])
-    with c1:
-        day_label = st.selectbox("Ambil jam untuk hari", OSM_DAYS, index=_today_weekday_wib(), key="osm_day")
-    with c2:
-        overwrite = st.checkbox("Timpa jam yang sudah terisi", value=False, key="osm_overwrite")
-    weekday = OSM_DAYS.index(day_label)
-
-    base = df[~df["status"].isin(STATUS_EXCLUDED)]
-
-    def _filled(r):
-        return (_parse_hhmm(r.get("jam_buka")) is not None) or (_parse_hhmm(r.get("jam_tutup")) is not None)
-    todo = base if overwrite else (base[~base.apply(_filled, axis=1)] if len(base) else base)
-    todo = todo[todo["latitude"].notna() & todo["longitude"].notna()]
-
-    def _ck(r):
-        return (str(r["merchant_name"]).strip().lower(), round(float(r["latitude"]), 5), round(float(r["longitude"]), 5))
-    cache = ss["osm_cache"]
-    new_rows = [r for _, r in todo.iterrows() if _ck(r) not in cache]
-    st.caption(
-        f"{len(todo)} merchant akan diproses ({len(new_rows)} perlu dicari baru; sisanya sudah pernah dicari di sesi ini). "
-        "Merchant berstatus sudah akuisisi / belum tertarik dilewati."
-    )
-    if st.button(f"🔎 Cari jam di OpenStreetMap ({len(todo)} merchant)", key="osm_run", type="primary",
-                 disabled=len(todo) == 0, width="stretch"):
-        errors = {}
-        if new_rows:
-            bar = st.progress(0.0, text="Mencari di OpenStreetMap…")
-            for i in range(0, len(new_rows), OSM_CHUNK):
-                chunk = new_rows[i:i + OSM_CHUNK]
-                elements, err = osm_fetch_chunk([(float(r["latitude"]), float(r["longitude"])) for r in chunk])
-                for r in chunk:
-                    if elements is None:
-                        errors[_ck(r)] = {"status": "error", "msg": f"Gagal: {err}"}
-                    else:
-                        cache[_ck(r)] = osm_entry(elements, r["merchant_name"], float(r["latitude"]), float(r["longitude"]))
-                bar.progress(min(1.0, (i + len(chunk)) / len(new_rows)), text="Mencari di OpenStreetMap…")
-            bar.empty()
-        report, n_ok = [], 0
-        store = ss.data_edits
-        for _, r in todo.iterrows():
-            entry = cache.get(_ck(r)) or errors.get(_ck(r))
-            hasil, buka, tutup, note = osm_result_for_day(entry, weekday)
-            if buka:
-                ch = store["changed"].setdefault(r["_row_key"], {})
-                ch["jam_buka"], ch["jam_tutup"] = buka, tutup
-                n_ok += 1
-            report.append({"Merchant": r["merchant_name"], "Hasil": hasil, "Nama di OSM": entry.get("gname", ""),
-                           "Jarak (m)": entry.get("dist"), "Jam di OSM": entry.get("oh", ""), "Catatan": note})
-        ss["osm_report"] = {"day": day_label, "rows": report, "n_ok": n_ok}
-        if n_ok:
-            ss.data_edit_nonce += 1
-        ss.table_panel_open = True
-        st.rerun()
-    rep_ = ss.get("osm_report")
-    if rep_:
-        rows = rep_["rows"]
-        if rep_["n_ok"]:
-            st.success(f"✅ {rep_['n_ok']} dari {len(rows)} merchant terisi jamnya (hari {rep_['day']}). "
-                       "Sisanya bisa diisi manual di tabel.")
-        else:
-            st.info(f"Tidak ada jam yang terisi (hari {rep_['day']}). Isi manual di tabel di atas.")
-        order = {"✅ Terisi": 9}
-        rows = sorted(rows, key=lambda x: order.get(x["Hasil"], 0))
-        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", **TABLE_KW)
-        st.caption(
-            "Kolom **Nama di OSM** & **Jarak** membantu memastikan tempatnya benar. Yang berstatus ⚠️ / ❓ / ⚙️ tidak "
-            "diisi otomatis. Merchant dengan jam istirahat diisi dari buka paling awal sampai tutup paling akhir."
-        )
-        if st.button("Tutup laporan", key="osm_report_close"):
-            ss.pop("osm_report", None)
-            st.rerun()
+                val = norm
+            ok.setdefault(key, {})[col] = val
+    return ok, bad
 
 
 # ---------- Edit data langsung di tabel ----------
@@ -2999,8 +2751,11 @@ def _cookie_js(token):
                 "+(location.protocol==='https:'?'; Secure':'');")
     else:
         body = f"d.cookie='{AUTH_COOKIE}=; path=/; max-age=0; SameSite=Lax';"
-    import streamlit.components.v1 as components
-    components.html(f"<script>try{{var d=window.parent.document;{body}}}catch(e){{}}</script>", height=0)
+    try:
+        import streamlit.components.v1 as components
+        components.html(f"<script>try{{var d=window.parent.document;{body}}}catch(e){{}}</script>", height=0)
+    except Exception:
+        pass   # tanpa cookie, login tetap jalan (hanya tidak bertahan saat refresh)
 
 
 if not st.session_state.get("auth_ok"):
@@ -3669,9 +3424,8 @@ def render_howto():
             "⭐ **Fitur tambahan (opsional):**\n"
             "- **Prioritas** — tambah kolom `prioritas` (ya/tidak) di Excel/CSV, merchant itu dikunjungi lebih dulu.\n"
             "- **Jam operasional** — tambah kolom `jam_buka`/`jam_tutup` (format HH:MM), perkiraan jam tiba "
-            "dicek otomatis dan ditandai ⚠️ kalau di luar jam buka. Tidak punya datanya? Ambil otomatis dari "
-            "OpenStreetMap (gratis) atau isi manual lewat **Lihat & Edit Data Awal**, lalu ceklis "
-            "**Optimalkan rute berdasarkan jam operasional** di Langkah 2.\n"
+            "dicek otomatis dan ditandai ⚠️ kalau di luar jam buka. Tidak ada di file? Isi manual di "
+            "**Lihat & Edit Data Awal**, lalu ceklis **Optimalkan rute berdasarkan jam operasional** di Langkah 2.\n"
             "- **Multi-depot** — centang \"Pakai banyak titik awal\" dan isi daftar gudang/toko pusat; "
             "tiap rute otomatis mulai dari yang terdekat.\n"
             "- **Nama kurir** — isi di tiap rute setelah dibuat, ikut masuk ke Excel, WhatsApp, dan PDF.\n"
@@ -3989,11 +3743,17 @@ if st.session_state.page == "Routing":
                 "✏️ Klik sel untuk memperbaiki nama, koordinat, atau **status**, atau centang **Hapus** untuk "
                 "membuang baris. Tekan **Terapkan perubahan** supaya tersimpan — file aslinya tidak diubah. "
                 "Status **sudah akuisisi** dan **belum tertarik** tidak diikutkan ke rute; **prospek** dan "
-                "**sedang pendekatan** tetap diikutkan."
+                "**sedang pendekatan** tetap diikutkan.\n\n"
+                "🕒 Isi **jam_buka** & **jam_tutup** (format HH:MM, mis. 08:00 dan 21:00) untuk merchant yang punya "
+                "jam operasional. Dipakai untuk menandai ⚠️ kalau perkiraan jam tiba di luar jam buka, dan untuk "
+                "ceklis **Optimalkan rute berdasarkan jam operasional** di Langkah 2. Kosongkan kalau tidak diketahui."
             )
-            _edit_cols = [c for c in EDITABLE_COLS if c in df.columns]
+            _flash_h = st.session_state.pop("hours_flash", None)
+            if _flash_h:
+                st.warning(_flash_h)
+            _edit_cols = [c for c in EDITABLE_COLS if c in df.columns or c in HOURS_COLS]
             _info_cols = [c for c in ("source_file", "koordinat_dari") if c in df.columns]
-            _view = df[["_row_key"] + _edit_cols + _info_cols].copy()
+            _view = df.reindex(columns=["_row_key"] + _edit_cols + _info_cols).copy()
             for _tc in _edit_cols:  # kolom teks dibuat string murni supaya editor tidak error pada tipe campuran
                 if _tc not in ("latitude", "longitude"):
                     _view[_tc] = _view[_tc].apply(lambda v: "" if pd.isna(v) else str(v))
@@ -4012,12 +3772,27 @@ if st.session_state.page == "Routing":
                         "status": st.column_config.SelectboxColumn(
                             "status", options=STATUS_OPTIONS, required=True, width="medium",
                         ),
+                        "jam_buka": st.column_config.TextColumn(
+                            "🕒 jam_buka", max_chars=8,
+                            help="Jam buka, format HH:MM (mis. 08:00). Kosong = tidak dicek."),
+                        "jam_tutup": st.column_config.TextColumn(
+                            "🕒 jam_tutup", max_chars=8,
+                            help="Jam tutup, format HH:MM (mis. 21:00). Buka lewat tengah malam: 18:00 → 02:00."),
                     },
                     **TABLE_KW,
                 )
                 _apply_edits = st.form_submit_button("✅ Terapkan perubahan", type="primary")
             if _apply_edits:
                 _del, _chg = diff_data_edits(_view, _edited, _edit_cols)
+                _chg, _bad = normalize_hours_changes(_chg)
+                _bad_msg = ""
+                if _bad:
+                    _names = _view.set_index("_row_key")["merchant_name"]
+                    _bad_msg = (
+                        "⚠️ Jam berikut bukan format HH:MM (mis. 08:00) dan tidak disimpan: "
+                        + "; ".join(f"{_names.get(k, k)} → {c} = “{v}”" for k, c, v in _bad[:8])
+                        + (f" (+{len(_bad) - 8} lagi)" if len(_bad) > 8 else "")
+                    )
                 if _del or _chg:
                     _store = st.session_state.data_edits
                     _store["deleted"] = sorted(set(_store["deleted"]) | set(_del))
@@ -4025,12 +3800,13 @@ if st.session_state.page == "Routing":
                         _store["changed"].setdefault(_k, {}).update(_cols)
                     st.session_state.data_edit_nonce += 1
                     st.session_state.table_panel_open = True  # tetap terbuka setelah diterapkan
+                    if _bad_msg:
+                        st.session_state.hours_flash = _bad_msg
                     st.rerun()
+                elif _bad_msg:
+                    st.warning(_bad_msg)
                 else:
                     st.info("Belum ada perubahan untuk diterapkan.")
-            st.markdown("---")
-            render_hours_fetcher(df)
-            st.markdown("---")
             if _n_edits:
                 _dl1, _dl2 = st.columns(2)
                 with _dl1:
@@ -4281,8 +4057,8 @@ if st.session_state.page == "Routing":
         )
         if _n_hours == 0:
             st.caption(
-                "🕒 Belum ada jam operasional. Isi di **Lihat & Edit Data Awal** (otomatis dari OpenStreetMap "
-                "atau manual), lalu ceklis ini bisa dipakai."
+                "🕒 Belum ada jam operasional. Isi kolom **jam_buka** & **jam_tutup** di **Lihat & Edit Data Awal** "
+                "(atau lewat Excel/CSV), lalu ceklis ini bisa dipakai."
             )
         else:
             st.caption(f"🕒 {_n_hours} dari {len(df)} merchant punya jam operasional.")
