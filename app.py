@@ -15,6 +15,7 @@ import json
 import time
 import base64
 import unicodedata
+import html as html_lib
 import hashlib
 import hmac
 import threading
@@ -999,7 +1000,7 @@ def validate_dataframe(df):
 
 REQUIRED_COLS = ("merchant_name", "latitude", "longitude")
 # Kolom opsional: kalau ada, dipakai otomatis untuk fitur prioritas & jam operasional.
-OPTIONAL_COLS = ("prioritas", "jam_buka", "jam_tutup", "alamat")
+OPTIONAL_COLS = ("prioritas", "jam_buka", "jam_tutup", "alamat", "status")
 NORMALIZE_COLS = REQUIRED_COLS + OPTIONAL_COLS
 
 
@@ -1289,29 +1290,124 @@ def detect_outlier_points(df, min_points=5, floor_km=25.0, mad_k=6.0):
 
 MAP_PREVIEW_MAX_POINTS = 1500
 
+# ---------- Status merchant (pipeline akuisisi) ----------
+STATUS_PROSPEK = "prospek"
+STATUS_PENDEKATAN = "sedang pendekatan"
+STATUS_AKUISISI = "sudah akuisisi"
+STATUS_TIDAK = "belum tertarik"
+STATUS_OPTIONS = [STATUS_PROSPEK, STATUS_PENDEKATAN, STATUS_AKUISISI, STATUS_TIDAK]
+# Merchant dengan status ini TIDAK dimasukkan ke rute (sudah dikuasai / tidak berminat).
+STATUS_EXCLUDED = (STATUS_AKUISISI, STATUS_TIDAK)
+STATUS_COLORS = {
+    STATUS_PROSPEK: "#2563EB", STATUS_PENDEKATAN: "#F59E0B",
+    STATUS_AKUISISI: "#16A34A", STATUS_TIDAK: "#6B7280",
+}
+STATUS_EMOJI = {STATUS_PROSPEK: "🔵", STATUS_PENDEKATAN: "🟠", STATUS_AKUISISI: "🟢", STATUS_TIDAK: "⚪"}
 
-def build_preview_map(df, flagged):
-    """Peta semua titik; titik janggal merah dan lebih besar."""
+
+def normalize_status(v):
+    """Samakan isian status dari Excel/CSV ke 4 nilai baku. Selain tiga status yang dikenali
+    (dan kosong), hasilnya "prospek". Penolakan seperti "belum akuisisi" atau "sudah tertarik"
+    tidak salah dibaca sebagai kebalikannya."""
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return STATUS_PROSPEK
+    t = re.sub(r"\s+", " ", str(v).strip().lower())
+    if not t or t in ("nan", "none"):
+        return STATUS_PROSPEK
+    if re.search(r"\b(belum|tidak|tdk|kurang)\b.*(tertarik|minat)", t) or "menolak" in t:
+        return STATUS_TIDAK
+    if re.search(r"\b(belum|bukan|tidak|tdk)\b.*(akuisisi|akusisi)", t):
+        return STATUS_PROSPEK
+    if "akuisisi" in t or "akusisi" in t:
+        return STATUS_AKUISISI
+    if re.search(r"\b(belum|tidak|tdk)\b.*pendekatan", t):
+        return STATUS_PROSPEK
+    if "pendekatan" in t:
+        return STATUS_PENDEKATAN
+    return STATUS_PROSPEK
+
+
+def ensure_status_column(df):
+    """Pastikan ada kolom `status` berisi nilai baku (default "prospek")."""
+    df = df.copy()
+    if "status" not in df.columns:
+        df["status"] = STATUS_PROSPEK
+    df["status"] = df["status"].apply(normalize_status)
+    return df
+
+
+def status_counts(df):
+    counts = df["status"].value_counts() if "status" in df.columns else {}
+    return {k: int(counts.get(k, 0)) for k in STATUS_OPTIONS}
+
+
+def _pin_html(name, color, ring, show_label):
+    dot = (
+        f"<span style=\"width:14px;height:14px;border-radius:50%;background:{color};border:2px solid #fff;"
+        f"box-shadow:0 0 0 1px rgba(0,0,0,.45){',' + ring if ring else ''};flex:none;\"></span>"
+    )
+    label = (
+        "<span style=\"font:600 11px/1.2 sans-serif;color:#111827;background:rgba(255,255,255,.88);"
+        f"padding:1px 4px;border-radius:4px;box-shadow:0 0 2px rgba(0,0,0,.35);\">{html_lib.escape(str(name))}</span>"
+        if show_label else ""
+    )
+    return (
+        "<div style=\"display:flex;align-items:center;gap:4px;white-space:nowrap;"
+        f"transform:translate(-8px,-8px);\">{dot}{label}</div>"
+    )
+
+
+def build_preview_map(df, flagged, selected_idx=None, show_labels=True):
+    """Peta semua titik. Warna titik = status merchant; titik janggal diberi cincin merah dan
+    titik yang sedang dipilih cincin hitam. Nama merchant tampil di samping titik (opsional).
+    Pakai Marker (bukan CircleMarker) supaya klik mengembalikan koordinat titik yang persis."""
     fmap = folium.Map(
         location=[float(df["latitude"].median()), float(df["longitude"].median())],
         zoom_start=11, control_scale=True,
     )
-    normal = [i for i in df.index if i not in flagged][:MAP_PREVIEW_MAX_POINTS]
-    for idx in list(normal) + [i for i in df.index if i in flagged]:
+    special = [i for i in df.index if i in flagged or i == selected_idx]
+    normal = [i for i in df.index if i not in flagged and i != selected_idx][:MAP_PREVIEW_MAX_POINTS]
+    for idx in normal + special:
         row = df.loc[idx]
+        status = row["status"] if "status" in df.columns else STATUS_PROSPEK
         bad = idx in flagged
-        folium.CircleMarker(
+        ring = "0 0 0 4px #DC2626" if bad else ("0 0 0 4px #111827" if idx == selected_idx else "")
+        tip = f"{row['merchant_name']} · {status}" + (" ⚠️ janggal" if bad else "")
+        folium.Marker(
             [float(row["latitude"]), float(row["longitude"])],
-            radius=9 if bad else 5, color="#DC2626" if bad else "#2563EB",
-            fill=True, fill_opacity=0.85, weight=2 if bad else 1,
-            tooltip=f"{row['merchant_name']} · {row.get('status', 'prospek')}" + (" ⚠️ janggal" if bad else ""),
+            icon=folium.DivIcon(
+                html=_pin_html(row["merchant_name"], STATUS_COLORS.get(status, "#2563EB"), ring, show_labels),
+                icon_size=(0, 0), icon_anchor=(0, 0), class_name="pin-icon",
+            ),
+            tooltip=html_lib.escape(tip),  # tooltip dirender sebagai HTML — nama dari file harus di-escape
         ).add_to(fmap)
     fmap.fit_bounds(
         [[float(df["latitude"].min()), float(df["longitude"].min())],
          [float(df["latitude"].max()), float(df["longitude"].max())]],
-        padding=(20, 20),
+        padding=(30, 30),
     )
     return fmap
+
+
+def pick_clicked_index(df, clicked, tooltip=None, tol_deg=2e-4):
+    """Cari baris yang diklik di peta dari koordinat klik (st_folium: last_object_clicked).
+    Titik kembar di lokasi yang sama dibedakan lewat teks tooltip. Mengembalikan label index atau None."""
+    try:
+        lat0, lon0 = float(clicked["lat"]), float(clicked["lng"])
+    except (TypeError, KeyError, ValueError):
+        return None
+    if df.empty:
+        return None
+    d = np.hypot(df["latitude"].to_numpy(float) - lat0, df["longitude"].to_numpy(float) - lon0)
+    dmin = float(d.min())
+    if dmin > tol_deg:
+        return None
+    cand = list(np.where(d <= dmin + 1e-7)[0])
+    if len(cand) > 1 and tooltip:
+        match = [p for p in cand if str(df.iloc[p]["merchant_name"]) in str(tooltip)]
+        if match:
+            cand = match
+    return df.index[cand[0]]
 
 
 # ---------- Edit data langsung di tabel ----------
@@ -1360,7 +1456,7 @@ def build_edited_data_excel(edited_full, geo_filled=None):
             out.loc[miss, "latitude"] = out.loc[miss, "_row_key"].map(filled["latitude"])
             out.loc[miss, "longitude"] = out.loc[miss, "_row_key"].map(filled["longitude"])
     out = out.drop(columns=[c for c in EXPORT_HELPER_COLS if c in out.columns])
-    first = [c for c in ("merchant_name", "latitude", "longitude") if c in out.columns]
+    first = [c for c in ("merchant_name", "latitude", "longitude", "status") if c in out.columns]
     out = out[first + [c for c in out.columns if c not in first]]
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -2181,6 +2277,14 @@ if "data_edits" not in st.session_state:
     st.session_state.data_edits = {"deleted": [], "changed": {}}  # edit tabel Data Awal, per _row_key
 if "data_edit_nonce" not in st.session_state:
     st.session_state.data_edit_nonce = 0
+if "map_selected_key" not in st.session_state:
+    st.session_state.map_selected_key = None   # _row_key merchant yang dipilih di pratinjau peta
+if "map_last_click_sig" not in st.session_state:
+    st.session_state.map_last_click_sig = None
+if "map_panel_open" not in st.session_state:
+    st.session_state.map_panel_open = False
+if "table_panel_open" not in st.session_state:
+    st.session_state.table_panel_open = False
 if "exclude_outliers_flag" not in st.session_state:
     st.session_state.exclude_outliers_flag = False
 if "balance_time_flag" not in st.session_state:
@@ -2540,6 +2644,27 @@ def _sync_starting_link():
     st.session_state.starting_link_saved = st.session_state.get(
         "_starting_link_widget", st.session_state.starting_link_saved
     )
+
+
+def _map_set_status(row_key):
+    """Callback tombol di pratinjau peta: simpan status baru sebagai edit data (sama seperti edit tabel)."""
+    ss = st.session_state
+    new_status = ss.get(f"_map_status_{row_key}")
+    if new_status not in STATUS_OPTIONS:
+        return
+    ss.data_edits["changed"].setdefault(row_key, {})["status"] = new_status
+    ss.data_edit_nonce += 1
+    ss.map_panel_open = True
+
+
+def _map_delete_row(row_key):
+    """Callback tombol di pratinjau peta: hapus merchant dari data (sama seperti centang Hapus di tabel)."""
+    ss = st.session_state
+    ss.data_edits["deleted"] = sorted(set(ss.data_edits["deleted"]) | {row_key})
+    ss.data_edits["changed"].pop(row_key, None)
+    ss.data_edit_nonce += 1
+    ss.map_selected_key = None
+    ss.map_panel_open = True
 
 
 def _sync_exclude_outliers():
@@ -3084,6 +3209,9 @@ def render_howto():
             "tiap rute lebih mirip.\n\n"
             "📉 **Sebelum vs sesudah:** hasil rute otomatis dibandingkan dengan urutan merchant di file kamu, "
             "jadi kelihatan berapa km yang dihemat.\n\n"
+            "🏷️ **Status merchant:** tiap merchant punya status — *prospek* (default), *sedang pendekatan*, "
+            "*sudah akuisisi*, atau *belum tertarik*. Dua status terakhir **tidak dimasukkan ke rute**. Ubah di tabel "
+            "**Lihat & Edit Data Awal**, atau klik titik di **Pratinjau peta** untuk mengubah status / menghapusnya.\n\n"
             "⭐ **Fitur tambahan (opsional):**\n"
             "- **Prioritas** — tambah kolom `prioritas` (ya/tidak) di Excel/CSV, merchant itu dikunjungi lebih dulu.\n"
             "- **Jam operasional** — tambah kolom `jam_buka`/`jam_tutup` (format HH:MM), perkiraan jam tiba "
@@ -3182,7 +3310,7 @@ if st.session_state.page == "Routing":
             type=["xlsx", "csv"],
             accept_multiple_files=True,
             key=f"uploader_{st.session_state.uploader_nonce}",
-            help="Format .xlsx atau .csv. Kolom wajib: merchant_name, latitude, longitude (koma desimal seperti -7,56 juga dikenali). latitude/longitude boleh dikosongkan — akan dicari otomatis dari nama merchant (tambah kolom alamat supaya lebih akurat). Kolom opsional: prioritas (ya/tidak — dikunjungi lebih dulu), jam_buka & jam_tutup (HH:MM — dicek terhadap perkiraan jam tiba). Bisa pilih beberapa file sekaligus — nanti otomatis digabung. File yang sudah diupload tetap tersimpan walau kamu pindah ke Maps Extractor.",
+            help="Format .xlsx atau .csv. Kolom wajib: merchant_name, latitude, longitude (koma desimal seperti -7,56 juga dikenali). latitude/longitude boleh dikosongkan — akan dicari otomatis dari nama merchant (tambah kolom alamat supaya lebih akurat). Kolom opsional: status (prospek / sedang pendekatan / sudah akuisisi / belum tertarik — dua yang terakhir tidak diikutkan ke rute; kosong = prospek), prioritas (ya/tidak — dikunjungi lebih dulu), jam_buka & jam_tutup (HH:MM — dicek terhadap perkiraan jam tiba). Bisa pilih beberapa file sekaligus — nanti otomatis digabung. File yang sudah diupload tetap tersimpan walau kamu pindah ke Maps Extractor.",
         )
         if new_files:
             for nf in new_files:
@@ -3356,11 +3484,10 @@ if st.session_state.page == "Routing":
 
     if df is not None:
         render_stepper(stepper_slot, 1)
-        if "status" not in df.columns:
-            df["status"] = "prospek"
-        df["status"] = df["status"].fillna("").astype(str).str.strip()
-        df.loc[~df["status"].isin(["sudah akuisisi", "belum tertarik", "sedang pendekatan"]), "status"] = "prospek"
+        df = ensure_status_column(df)  # kolom status (default "prospek")
         df = apply_data_edits(df, st.session_state.data_edits)  # hapus/ubah baris dari tabel Data Awal
+        if not df.empty:
+            df = ensure_status_column(df)  # edit bisa mengisi status apa saja — samakan lagi ke nilai baku
         if df.empty:
             st.info("Semua baris sudah dihapus lewat tabel Data Awal. Batalkan edit atau upload data lagi.")
             if st.session_state.data_edits["deleted"] or st.session_state.data_edits["changed"]:
@@ -3400,11 +3527,13 @@ if st.session_state.page == "Routing":
         _n_edits = len(_edits["deleted"]) + sum(len(c) for c in _edits["changed"].values())
         with st.expander(
             f"📄 Lihat & Edit Data Awal ({len(df)} baris)" + (f" · {_n_edits} edit" if _n_edits else ""),
-            expanded=False,
+            expanded=st.session_state.table_panel_open,
         ):
             st.caption(
-                "✏️ Klik sel untuk memperbaiki nama atau koordinat, atau centang **Hapus** untuk membuang baris. "
-                "Tekan **Terapkan perubahan** supaya tersimpan — file aslinya tidak diubah."
+                "✏️ Klik sel untuk memperbaiki nama, koordinat, atau **status**, atau centang **Hapus** untuk "
+                "membuang baris. Tekan **Terapkan perubahan** supaya tersimpan — file aslinya tidak diubah. "
+                "Status **sudah akuisisi** dan **belum tertarik** tidak diikutkan ke rute; **prospek** dan "
+                "**sedang pendekatan** tetap diikutkan."
             )
             _edit_cols = [c for c in EDITABLE_COLS if c in df.columns]
             _info_cols = [c for c in ("source_file", "koordinat_dari") if c in df.columns]
@@ -3424,7 +3553,9 @@ if st.session_state.page == "Routing":
                         "hapus": st.column_config.CheckboxColumn("🗑️ Hapus", default=False),
                         "latitude": st.column_config.NumberColumn("latitude", format="%.6f"),
                         "longitude": st.column_config.NumberColumn("longitude", format="%.6f"),
-                        "status": st.column_config.SelectboxColumn("status", options=["prospek", "sudah akuisisi", "belum tertarik", "sedang pendekatan"], required=True),
+                        "status": st.column_config.SelectboxColumn(
+                            "status", options=STATUS_OPTIONS, required=True, width="medium",
+                        ),
                     },
                     **TABLE_KW,
                 )
@@ -3437,6 +3568,7 @@ if st.session_state.page == "Routing":
                     for _k, _cols in _chg.items():
                         _store["changed"].setdefault(_k, {}).update(_cols)
                     st.session_state.data_edit_nonce += 1
+                    st.session_state.table_panel_open = True  # tetap terbuka setelah diterapkan
                     st.rerun()
                 else:
                     st.info("Belum ada perubahan untuk diterapkan.")
@@ -3461,7 +3593,8 @@ if st.session_state.page == "Routing":
                 )
 
         # Pemeriksaan titik janggal + pratinjau peta semua titik.
-        _outliers = detect_outlier_points(df)
+        # Titik berstatus akuisisi/belum tertarik tidak akan dirutekan, jadi tidak ikut diperiksa.
+        _outliers = detect_outlier_points(df[~df["status"].isin(STATUS_EXCLUDED)])
         if _outliers:
             st.warning(
                 f"⚠️ **{len(_outliers)} titik tampak janggal** — jauh dari titik-titik lainnya, biasanya "
@@ -3485,49 +3618,84 @@ if st.session_state.page == "Routing":
             )
         else:
             _exclude_outliers = False
-        with st.expander(f"🗺️ Pratinjau peta semua titik ({len(df)})", expanded=bool(_outliers)):
-            st_folium(
-                build_preview_map(df, set(_outliers)), width=None, height=MAP_H,
-                key="preview_map", returned_objects=[],
-            )
-            st.caption("Nama merchant dan status ditampilkan saat titik peta diarahkan/disentuh. Ubah status atau hapus merchant langsung melalui tabel di bawah ini.")
-            _map_edit_cols = [c for c in ["_row_key", "merchant_name", "status", "latitude", "longitude"] if c in df.columns]
-            _map_view = df[_map_edit_cols].copy()
-            _map_view.insert(0, "hapus", False)
-            with st.form("preview_map_edit_form"):
-                _map_edited = st.data_editor(
-                    _map_view, key="preview_map_editor", hide_index=True, num_rows="fixed",
-                    width="stretch", disabled=["_row_key", "merchant_name", "latitude", "longitude"],
-                    column_config={
-                        "_row_key": None,
-                        "hapus": st.column_config.CheckboxColumn("🗑️ Hapus", default=False),
-                        "status": st.column_config.SelectboxColumn("Status", options=["prospek", "sudah akuisisi", "belum tertarik", "sedang pendekatan"], required=True),
-                    },
+        _sel_key = st.session_state.map_selected_key
+        _sel_rows = df.index[df["_row_key"] == _sel_key] if _sel_key is not None else []
+        _sel_idx = _sel_rows[0] if len(_sel_rows) else None
+        with st.expander(
+            f"🗺️ Pratinjau peta semua titik ({len(df)})",
+            expanded=bool(_outliers) or st.session_state.map_panel_open,
+        ):
+            _cnt = status_counts(df)
+            st.caption(
+                " · ".join(
+                    f"{STATUS_EMOJI[k]} {k.capitalize()} {_cnt[k]}" + (" (tidak diikutkan)" if k in STATUS_EXCLUDED and _cnt[k] else "")
+                    for k in STATUS_OPTIONS
                 )
-                _map_apply = st.form_submit_button("💾 Simpan status / hapus merchant", type="primary")
-            if _map_apply:
-                _store = st.session_state.data_edits
-                _del_keys = _map_edited.loc[_map_edited["hapus"], "_row_key"].astype(str).tolist()
-                if _del_keys:
-                    _store["deleted"] = sorted(set(_store["deleted"]) | set(_del_keys))
-                for _, _mr in _map_edited.iterrows():
-                    _key = str(_mr["_row_key"])
-                    if _key not in _del_keys:
-                        _store["changed"].setdefault(_key, {})["status"] = _mr["status"]
-                st.session_state.data_edit_nonce += 1
-                st.rerun()
+            )
+            _show_labels = st.checkbox("🏷️ Tampilkan nama merchant di peta", value=True, key="_map_labels")
+            _map_out = st_folium(
+                build_preview_map(df, set(_outliers), show_labels=_show_labels),  # tanpa cincin pilihan: peta tidak digambar ulang tiap klik
+                width=None, height=MAP_H, key="preview_map",
+                returned_objects=["last_object_clicked", "last_object_clicked_tooltip"],
+            )
+            _click = _map_out.get("last_object_clicked") if isinstance(_map_out, dict) else None
+            if _click:
+                _sig = (
+                    round(float(_click.get("lat", 0)), 7), round(float(_click.get("lng", 0)), 7),
+                    str(_map_out.get("last_object_clicked_tooltip") or ""),
+                )
+                if _sig != st.session_state.map_last_click_sig:  # klik baru (bukan sisa klik lama)
+                    st.session_state.map_last_click_sig = _sig
+                    _hit = pick_clicked_index(df, _click, _map_out.get("last_object_clicked_tooltip"))
+                    st.session_state.map_selected_key = df.at[_hit, "_row_key"] if _hit is not None else None
+                    st.session_state.map_panel_open = True
+                    _sel_key = st.session_state.map_selected_key
+                    _sel_rows = df.index[df["_row_key"] == _sel_key] if _sel_key is not None else []
+                    _sel_idx = _sel_rows[0] if len(_sel_rows) else None
+            if _sel_idx is not None:
+                _row = df.loc[_sel_idx]
+                _cur = _row["status"]
+                st.markdown(f"**📍 {_row['merchant_name']}** — status sekarang: {STATUS_EMOJI[_cur]} **{_cur}**")
+                _mc1, _mc2, _mc3 = st.columns([2, 1, 1])
+                with _mc1:
+                    st.selectbox(
+                        "Ubah status", STATUS_OPTIONS, index=STATUS_OPTIONS.index(_cur),
+                        key=f"_map_status_{_sel_key}",
+                    )
+                with _mc2:
+                    st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+                    st.button("💾 Simpan status", key="_map_save_status", on_click=_map_set_status,
+                              args=(_sel_key,), type="primary", width="stretch")
+                with _mc3:
+                    st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+                    st.button("🗑️ Hapus", key="_map_delete", on_click=_map_delete_row,
+                              args=(_sel_key,), width="stretch",
+                              help="Membuang merchant ini dari data (bisa dibatalkan lewat \"Batalkan semua edit tabel\").")
+            else:
+                st.caption("👆 Klik sebuah titik di peta untuk mengubah status atau menghapusnya.")
             if _outliers:
-                st.caption("🔴 Titik merah = tampak janggal. Arahkan kursor untuk melihat namanya.")
+                st.caption("🔴 Cincin merah = tampak janggal (koordinat mungkin salah).")
         if _exclude_outliers:
             df = df.drop(index=list(_outliers)).reset_index(drop=True)
             if df.empty:
                 st.info("Semua titik terdeteksi janggal — periksa koordinatnya di tabel Data Awal.")
                 st.stop()
-        _excluded_status = df["status"].isin(["sudah akuisisi", "belum tertarik"])
-        _n_excluded_status = int(_excluded_status.sum())
-        if _n_excluded_status:
-            st.info(f"ℹ️ {_n_excluded_status} merchant berstatus **sudah akuisisi** atau **belum tertarik** tidak akan dimasukkan ke rute.")
-            df = df.loc[~_excluded_status].copy().reset_index(drop=True)
+
+        # Merchant berstatus "sudah akuisisi" / "belum tertarik" tidak dimasukkan ke rute.
+        _skip_status = df["status"].isin(STATUS_EXCLUDED)
+        if _skip_status.any():
+            _n_acq = int((df["status"] == STATUS_AKUISISI).sum())
+            _n_not = int((df["status"] == STATUS_TIDAK).sum())
+            st.info(
+                f"🚫 **{int(_skip_status.sum())} merchant tidak diikutkan ke rute** karena statusnya "
+                f"sudah akuisisi ({_n_acq}) atau belum tertarik ({_n_not}). Ubah statusnya di tabel Data Awal "
+                "atau pratinjau peta kalau ingin diikutkan.",
+                icon="🚫",
+            )
+            df = df[~_skip_status].reset_index(drop=True)
+            if df.empty:
+                st.info("Semua merchant berstatus sudah akuisisi / belum tertarik — tidak ada yang bisa dirutekan.")
+                st.stop()
         df = df.drop(columns=["_row_key"], errors="ignore")
 
         _n_priority = int(df["prioritas"].apply(is_truthy).sum()) if "prioritas" in df.columns else 0
