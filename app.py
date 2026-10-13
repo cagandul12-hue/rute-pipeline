@@ -19,6 +19,7 @@ import html as html_lib
 import hashlib
 import hmac
 import threading
+import urllib.parse
 import difflib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import unquote, quote
@@ -612,6 +613,94 @@ def solve_tsp_with_priority(distance_matrix, priority_idx, other_idx, has_start,
     phase2_order = [phase2_idx[i] for i in sub_order2]
 
     return (phase1_order[:-1] + phase2_order) if phase1_order else phase2_order
+
+
+# ---------- Optimasi urutan berdasarkan jam operasional (time window) ----------
+TW_LATE_PENALTY = 100   # biaya per detik di luar jam (satuan = meter jarak) → 1 menit telat ≈ 6 km "hukuman"
+
+
+def build_time_windows(route_df, start_dt, base_date, has_start):
+    """{indeks_baris: (buka_detik|None, tutup_detik|None)} relatif terhadap jam mulai rute.
+    Baris tanpa jam operasional tidak dimasukkan; titik awal (kalau ada) dilewati."""
+    windows = {}
+    for i in range(len(route_df)):
+        if has_start and i == 0:
+            continue
+        row = route_df.iloc[i]
+        jb, jt = _parse_hhmm(row.get("jam_buka")), _parse_hhmm(row.get("jam_tutup"))
+        if jb is None and jt is None:
+            continue
+        lo = (datetime.datetime.combine(base_date, jb) - start_dt).total_seconds() if jb else None
+        hi = (datetime.datetime.combine(base_date, jt) - start_dt).total_seconds() if jt else None
+        if lo is not None and hi is not None and hi <= lo:
+            hi += 86400   # buka lewat tengah malam
+        windows[i] = (lo, hi)
+    return windows
+
+
+def solve_tsp_time_windows(distance_matrix, duration_matrix, windows, visit_sec,
+                           round_trip=False, first_is_start=False):
+    """Urutan kunjungan yang meminimalkan jarak SAMBIL berusaha tiba saat merchant buka.
+
+    Jam tiba dihitung persis seperti jadwal akhir (tanpa menunggu), jadi hasilnya konsisten dengan
+    penanda ⚠️ di tabel. Jam operasional bersifat "lunak": kalau mustahil dipenuhi semua, solver
+    memilih urutan dengan pelanggaran terkecil — bukan gagal. Return daftar indeks (format sama
+    seperti solve_tsp) atau None kalau solver tidak menghasilkan solusi."""
+    try:
+        return _solve_tsp_time_windows(distance_matrix, duration_matrix, windows, visit_sec,
+                                       round_trip, first_is_start)
+    except Exception:
+        return None   # jangan sampai membuat app error — pemanggil jatuh ke urutan jarak biasa
+
+
+def _solve_tsp_time_windows(distance_matrix, duration_matrix, windows, visit_sec, round_trip, first_is_start):
+    n = len(distance_matrix)
+    if n <= 2 or not windows:
+        return None
+    if round_trip:
+        dm, tm = distance_matrix, duration_matrix
+        manager = pywrapcp.RoutingIndexManager(n, 1, 0)
+    else:
+        dm = [list(r) + [0] for r in distance_matrix] + [[0] * (n + 1)]
+        tm = [list(r) + [0] for r in duration_matrix] + [[0] * (n + 1)]
+        if first_is_start:
+            manager = pywrapcp.RoutingIndexManager(n + 1, 1, [0], [n])
+        else:
+            manager = pywrapcp.RoutingIndexManager(n + 1, 1, n)
+    routing = pywrapcp.RoutingModel(manager)
+
+    def dist_cb(fi, ti):
+        return int(dm[manager.IndexToNode(fi)][manager.IndexToNode(ti)])
+
+    def time_cb(fi, ti):
+        a, b = manager.IndexToNode(fi), manager.IndexToNode(ti)
+        service = 0 if (a >= n or (a == 0 and first_is_start)) else int(visit_sec)
+        return int(tm[a][b]) + service
+
+    routing.SetArcCostEvaluatorOfAllVehicles(routing.RegisterTransitCallback(dist_cb))
+    routing.AddDimension(routing.RegisterTransitCallback(time_cb), 0, 10 * 86400, True, "Time")
+    time_dim = routing.GetDimensionOrDie("Time")
+    for node, (lo, hi) in windows.items():
+        idx = manager.NodeToIndex(node)
+        if lo is not None and lo > 0:
+            time_dim.SetCumulVarSoftLowerBound(idx, int(lo), TW_LATE_PENALTY)
+        if hi is not None:
+            time_dim.SetCumulVarSoftUpperBound(idx, max(0, int(hi)), TW_LATE_PENALTY)
+
+    params = pywrapcp.DefaultRoutingSearchParameters()
+    params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
+    params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+    params.time_limit.seconds = 1 if n <= 6 else (3 if n <= 15 else 5)
+    solution = routing.SolveWithParameters(params)
+    if solution is None:
+        return None
+    route, index = [], routing.Start(0)
+    while not routing.IsEnd(index):
+        node = manager.IndexToNode(index)
+        if node < n:
+            route.append(node)
+        index = solution.Value(routing.NextVar(index))
+    return route
 
 
 # ---------- Multi-depot ----------
@@ -1417,160 +1506,196 @@ def pick_clicked_index(df, clicked, tooltip=None, tol_deg=2e-4):
     return df.index[cand[0]]
 
 
-# ---------- Jam buka/tutup dari Google Maps (Places API) ----------
-GM_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
-GM_FIELD_MASK = ("places.id,places.displayName,places.formattedAddress,places.location,"
-                 "places.regularOpeningHours,places.businessStatus")
-GM_RADIUS_M = 300          # radius pencarian di sekitar koordinat merchant
-GM_MAX_PER_RUN = 200       # batas permintaan baru per klik (jaga biaya)
-GM_DAYS = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
-_GM_GENERIC = {"toko", "warung", "kios", "cv", "pt", "ud", "tb", "depot", "dan", "the", "kedai"}
+# ---------- Jam buka/tutup dari OpenStreetMap (Overpass API — gratis, tanpa API key) ----------
+OSM_OVERPASS_URLS = ("https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter")
+OSM_RADIUS_M = 120         # radius pencarian di sekitar koordinat merchant
+OSM_CHUNK = 30             # jumlah merchant per permintaan (satu query untuk banyak titik)
+OSM_DAYS = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
+_OSM_DAY_IDX = {"mo": 0, "tu": 1, "we": 2, "th": 3, "fr": 4, "sa": 5, "su": 6}
+_OSM_GENERIC = {"toko", "warung", "kios", "cv", "pt", "ud", "tb", "depot", "dan", "the", "kedai"}
 
 
-def gm_api_key():
-    return _setting("GOOGLE_MAPS_API_KEY") or st.session_state.get("gm_key_input") or None
-
-
-def _gm_norm(text):
+def _osm_norm(text):
     t = unicodedata.normalize("NFKD", str(text or "")).encode("ascii", "ignore").decode().lower()
-    return [w for w in re.findall(r"[a-z0-9]+", t) if w not in _GM_GENERIC]
+    return [w for w in re.findall(r"[a-z0-9]+", t) if w not in _OSM_GENERIC]
 
 
-def gm_name_similarity(a, b):
-    ta, tb = _gm_norm(a), _gm_norm(b)
+def osm_name_similarity(a, b):
+    ta, tb = _osm_norm(a), _osm_norm(b)
     if not ta or not tb:
         return 0.0
     sa, sb = set(ta), set(tb)
     jacc = len(sa & sb) / len(sa | sb)
-    seq = difflib.SequenceMatcher(None, " ".join(ta), " ".join(tb)).ratio()
-    contain = 1.0 if (" ".join(ta) in " ".join(tb) or " ".join(tb) in " ".join(ta)) else 0.0
+    ja, jb = " ".join(ta), " ".join(tb)
+    seq = difflib.SequenceMatcher(None, ja, jb).ratio()
+    contain = 1.0 if (ja in jb or jb in ja) else 0.0
     return max(jacc, seq, 0.9 * contain)
 
 
-def gm_pick_place(places, name, lat, lon):
-    """Pilih tempat paling cocok. Return (place, jarak_m, kemiripan, yakin)."""
+def _mm(m):
+    return f"{m // 60:02d}:{m % 60:02d}"
+
+
+def _close_txt(c):
+    """Menit tutup (bisa >1440 = lewat tengah malam) → 'HH:MM'; 24:00 ditulis 23:59."""
+    return "23:59" if c == 1440 else _mm(c - 1440 if c > 1440 else c)
+
+
+def osm_parse_opening_hours(text):
+    """Baca sebagian sintaks `opening_hours` OSM (mis. 'Mo-Sa 08:00-21:00; Su off', '24/7',
+    'Mo-Fr 09:00-12:00,13:00-17:00'). Return {hari 0=Senin..6=Minggu: [(buka_menit, tutup_menit), ...]}
+    ([] = tutup). None kalau sintaksnya belum didukung (bulan, hari libur khusus, matahari terbit, dst)."""
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    if raw.lower() == "24/7":
+        return {d: [(0, 1440)] for d in range(7)}
+    sched = {d: [] for d in range(7)}
+    for rule in [r.strip() for r in raw.split(";") if r.strip()]:
+        m = re.match(r"^([A-Za-z ,\-]*?)\s*(\d.*|off|closed|24/7|open)?$", rule, re.I)
+        if not m:
+            return None
+        days_txt, rest = m.group(1).strip(), (m.group(2) or "").strip().lower()
+        rest = re.sub(r"\s+open$", "", rest)
+        days, only_holiday = [], False
+        if not days_txt:
+            days = list(range(7))
+        else:
+            for tok in [t.strip().lower() for t in days_txt.split(",") if t.strip()]:
+                if tok in ("ph", "sh"):
+                    only_holiday = True
+                    continue
+                mm = re.fullmatch(r"(mo|tu|we|th|fr|sa|su)(?:\s*-\s*(mo|tu|we|th|fr|sa|su))?", tok)
+                if not mm:
+                    return None
+                a = _OSM_DAY_IDX[mm.group(1)]
+                b = _OSM_DAY_IDX[mm.group(2)] if mm.group(2) else a
+                days += list(range(a, b + 1)) if a <= b else list(range(a, 7)) + list(range(0, b + 1))
+        if not days:      # aturan khusus hari libur (PH) saja — diabaikan
+            continue
+        if rest in ("off", "closed"):
+            intervals = []
+        elif rest in ("24/7", "open"):
+            intervals = [(0, 1440)]
+        else:
+            intervals = []
+            for part in [p.strip() for p in rest.split(",") if p.strip()]:
+                t = re.fullmatch(r"(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})", part)
+                if not t:
+                    return None
+                o, c = int(t.group(1)) * 60 + int(t.group(2)), int(t.group(3)) * 60 + int(t.group(4))
+                if not (0 <= o <= 1440 and 0 <= c <= 1440):
+                    return None
+                if c <= o:
+                    c += 1440      # lewat tengah malam
+                intervals.append((o, c))
+        for d in days:
+            sched[d] = intervals
+    return sched
+
+
+def osm_hours_for_day(oh_text, weekday):
+    """Return (jenis, buka, tutup, catatan); jenis: ok | closed | unsupported."""
+    sched = osm_parse_opening_hours(oh_text)
+    if sched is None:
+        return "unsupported", None, None, "Format jam di OSM belum didukung — isi manual"
+    iv = sorted(sched.get(weekday, []))
+    if not iv:
+        return "closed", None, None, "Tutup di hari itu"
+    if iv == [(0, 1440)]:
+        return "ok", "00:00", "23:59", "Buka 24 jam"
+    buka = _mm(iv[0][0])
+    last_close = iv[-1][1]
+    tutup = _close_txt(last_close)
+    note = "Tutup lewat tengah malam" if last_close > 1440 else ""
+    if len(iv) > 1:
+        note = "Ada jam istirahat: " + ", ".join(f"{_mm(o)}–{_close_txt(c)}" for o, c in iv)
+    return "ok", buka, tutup, note
+
+
+def osm_build_query(points, radius=OSM_RADIUS_M):
+    parts = "".join(f'nwr(around:{radius},{la:.6f},{lo:.6f})["opening_hours"];' for la, lo in points)
+    return f"[out:json][timeout:60];({parts});out center tags;"
+
+
+def osm_fetch_chunk(points, post=None):
+    """Satu permintaan Overpass untuk banyak titik. Return (elemen, pesan_error)."""
+    post = post or requests.post
+    q = osm_build_query(points)
+    headers = {"User-Agent": "RutePipelineOptimizerApp/1.0 (streamlit-community-app)"}
+    last = "tidak bisa terhubung ke server OpenStreetMap"
+    for url in OSM_OVERPASS_URLS:
+        for attempt in range(2):
+            try:
+                resp = post(url, data={"data": q}, headers=headers, timeout=90)
+            except Exception:
+                last = "tidak bisa terhubung ke server OpenStreetMap"
+                time.sleep(2)
+                continue
+            if resp.status_code == 200:
+                try:
+                    return resp.json().get("elements", []), None
+                except Exception:
+                    last = "respons server tidak valid"
+                    break
+            last = f"server OpenStreetMap membalas HTTP {resp.status_code}"
+            if resp.status_code in (429, 503, 504):
+                time.sleep(3 * (attempt + 1))
+                continue
+            break
+    return None, last
+
+
+def osm_pick(elements, name, lat, lon):
+    """Pilih elemen OSM paling cocok. Return (tags, jarak_m, kemiripan, yakin) atau None."""
     best = None
-    for pl in places or []:
-        loc = pl.get("location") or {}
-        if "latitude" not in loc or "longitude" not in loc:
+    for el in elements or []:
+        la = el.get("lat", (el.get("center") or {}).get("lat"))
+        lo = el.get("lon", (el.get("center") or {}).get("lon"))
+        if la is None or lo is None:
             continue
-        dist = haversine(lat, lon, loc["latitude"], loc["longitude"]) * 1000
-        if dist > GM_RADIUS_M:
+        dist = haversine(lat, lon, la, lo) * 1000
+        if dist > OSM_RADIUS_M:
             continue
-        gname = (pl.get("displayName") or {}).get("text", "")
-        sim = gm_name_similarity(name, gname)
+        tags = el.get("tags") or {}
+        sim = max([osm_name_similarity(name, tags.get(k, "")) for k in
+                   ("name", "name:id", "official_name", "brand", "operator")] or [0.0])
         score = sim - dist / 1000.0
         if best is None or score > best[0]:
-            best = (score, pl, dist, sim)
+            best = (score, tags, dist, sim)
     if best is None:
         return None
-    _, pl, dist, sim = best
-    sure = (dist <= 200 and sim >= 0.5) or (dist <= 30 and sim >= 0.3)
-    return pl, dist, sim, sure
+    _, tags, dist, sim = best
+    sure = (dist <= 100 and sim >= 0.5) or (dist <= 30 and sim >= 0.3)
+    return tags, dist, sim, sure
 
 
-def _hhmm(t):
-    return f"{int(t.get('hour', 0)):02d}:{int(t.get('minute', 0)):02d}"
-
-
-def gm_hours_for_day(opening, weekday):
-    """Jam buka/tutup untuk satu hari. `weekday`: 0=Senin … 6=Minggu (Python).
-    Return (buka, tutup, catatan). buka/tutup None kalau tutup/tidak ada data."""
-    if not opening:
-        return None, None, "Google tidak punya data jam"
-    periods = opening.get("periods") or []
-    gday = (weekday + 1) % 7  # Google: 0 = Minggu
-    day_p = [pd_ for pd_ in periods if (pd_.get("open") or {}).get("day") == gday]
-    if not periods:
-        return None, None, "Google tidak punya data jam"
-    if len(periods) == 1 and not periods[0].get("close"):
-        return "00:00", "23:59", "Buka 24 jam"   # Google: satu periode tanpa 'close' = 24 jam setiap hari
-    if not day_p:
-        return None, None, "Tutup di hari itu"
-    day_p.sort(key=lambda x: (x["open"].get("hour", 0), x["open"].get("minute", 0)))
-    first, last = day_p[0], day_p[-1]
-    buka = _hhmm(first["open"])
-    tutup = _hhmm(last["close"]) if last.get("close") else "23:59"
-    note = ""
-    if len(day_p) > 1:
-        note = "Ada jam istirahat: " + ", ".join(
-            f"{_hhmm(x['open'])}–{_hhmm(x['close'])}" for x in day_p if x.get("close"))
-    elif last.get("close") and last["close"].get("day") != last["open"].get("day"):
-        note = "Tutup lewat tengah malam"
-    return buka, tutup, note
-
-
-def gm_lookup(name, lat, lon, key, alamat=None, post=None):
-    """Satu permintaan Places API (Text Search). Return dict hasil mentah (siap di-cache).
-    status: ok | uncertain | none | error ; fatal=True untuk masalah key/akun (hentikan semua)."""
-    post = post or requests.post
-    q = str(name).strip()
-    if alamat and str(alamat).strip().lower() not in ("", "nan", "none"):
-        q = f"{q}, {str(alamat).strip()}"
-    body = {
-        "textQuery": q, "languageCode": "id", "regionCode": "ID", "maxResultCount": 5,
-        "locationBias": {"circle": {"center": {"latitude": float(lat), "longitude": float(lon)},
-                                    "radius": float(GM_RADIUS_M)}},
-    }
-    headers = {"Content-Type": "application/json", "X-Goog-Api-Key": key, "X-Goog-FieldMask": GM_FIELD_MASK}
-    resp = None
-    for attempt in range(3):
-        try:
-            resp = post(GM_SEARCH_URL, json=body, headers=headers, timeout=15)
-        except Exception:
-            resp = None
-        if resp is not None and resp.status_code not in (429, 500, 502, 503, 504):
-            break
-        time.sleep(1.5 * (attempt + 1))
-    if resp is None:
-        return {"status": "error", "msg": "Tidak bisa terhubung ke Google (jaringan)", "fatal": False}
-    if resp.status_code != 200:
-        try:
-            msg = resp.json().get("error", {}).get("message", "")
-        except Exception:
-            msg = ""
-        fatal = resp.status_code in (400, 401, 403)
-        hint = {400: "permintaan/API key tidak valid", 401: "API key ditolak",
-                403: "API key tidak punya akses — aktifkan 'Places API (New)' dan penagihan di Google Cloud"}.get(
-            resp.status_code, f"HTTP {resp.status_code}")
-        return {"status": "error", "msg": f"{hint}. {msg}"[:200], "fatal": fatal}
-    try:
-        places = resp.json().get("places", [])
-    except Exception:
-        places = []
-    picked = gm_pick_place(places, name, float(lat), float(lon))
-    if not places or picked is None:
+def osm_entry(elements, name, lat, lon):
+    picked = osm_pick(elements, name, lat, lon)
+    if picked is None:
         return {"status": "none"}
-    pl, dist, sim, sure = picked
-    return {
-        "status": "ok" if sure else "uncertain",
-        "gname": (pl.get("displayName") or {}).get("text", ""),
-        "dist": round(dist), "sim": round(sim, 2),
-        "business_status": pl.get("businessStatus", ""),
-        "opening": pl.get("regularOpeningHours"),
-    }
+    tags, dist, sim, sure = picked
+    return {"status": "ok" if sure else "uncertain", "gname": tags.get("name", ""),
+            "dist": round(dist), "sim": round(sim, 2), "oh": tags.get("opening_hours", "")}
 
 
-def gm_result_for_day(entry, weekday):
-    """Ubah entri cache jadi (ikon+hasil, buka, tutup, catatan) untuk hari tertentu."""
-    st_ = entry.get("status")
-    if st_ == "error":
+def osm_result_for_day(entry, weekday):
+    """(hasil, buka, tutup, catatan) untuk satu hari dari entri cache."""
+    s = entry.get("status")
+    if s == "error":
         return "❌ Error", None, None, entry.get("msg", "")
-    if st_ == "none":
-        return "❓ Tidak ditemukan", None, None, f"Tidak ada tempat di radius {GM_RADIUS_M} m"
-    if st_ == "uncertain":
+    if s == "none":
+        return "❓ Tidak ada di OSM", None, None, (
+            f"Tidak ada tempat ber-jam operasional di radius {OSM_RADIUS_M} m (OSM sering belum lengkap "
+            "untuk warung/toko kecil) — isi manual")
+    if s == "uncertain":
         return "⚠️ Tidak yakin", None, None, "Nama/jarak kurang cocok — cek manual, jam tidak diisi"
-    if entry.get("business_status") == "CLOSED_PERMANENTLY":
-        return "🚫 Tutup permanen", None, None, "Google menandai tempat ini tutup permanen"
-    buka, tutup, note = gm_hours_for_day(entry.get("opening"), weekday)
-    if buka is None:
-        return ("🚫 Tutup hari itu" if note.startswith("Tutup") else "ℹ️ Tanpa data jam"), None, None, note
+    kind, buka, tutup, note = osm_hours_for_day(entry.get("oh"), weekday)
+    if kind == "unsupported":
+        return "⚙️ Format belum didukung", None, None, note
+    if kind == "closed":
+        return "🚫 Tutup hari itu", None, None, note
     return "✅ Terisi", buka, tutup, note
-
-
-def gm_weekday_text(entry, weekday):
-    descs = ((entry.get("opening") or {}).get("weekdayDescriptions")) or []
-    return descs[weekday] if 0 <= weekday < len(descs) else ""
 
 
 def _today_weekday_wib():
@@ -1578,119 +1703,86 @@ def _today_weekday_wib():
 
 
 def render_hours_fetcher(df):
-    """Panel di 'Lihat & Edit Data Awal': isi jam_buka/jam_tutup dari Google Maps."""
+    """Panel di 'Lihat & Edit Data Awal': isi jam_buka/jam_tutup dari OpenStreetMap (gratis)."""
     ss = st.session_state
-    ss.setdefault("gm_cache", {})
-    st.markdown("**🕒 Ambil jam buka & tutup dari Google Maps**")
+    ss.setdefault("osm_cache", {})
+    st.markdown("**🕒 Jam buka & tutup merchant**")
     st.caption(
-        f"Dicari lewat Google Places API berdasarkan **nama merchant + latitude/longitude** (radius ±{GM_RADIUS_M} m). "
-        "Hasilnya masuk ke kolom jam_buka & jam_tutup (masih bisa diedit di tabel), lalu dipakai untuk menandai "
-        "⚠️ kalau perkiraan jam tiba di luar jam buka."
+        f"**Otomatis (gratis):** diambil dari OpenStreetMap berdasarkan **nama merchant + latitude/longitude** "
+        f"(radius ±{OSM_RADIUS_M} m), tanpa API key. Data OpenStreetMap diisi relawan, jadi minimarket/restoran "
+        "biasanya ada, tapi **warung & toko kecil sering kosong** — untuk yang kosong, **isi manual** di kolom "
+        "`jam_buka` / `jam_tutup` pada tabel di atas (format HH:MM, lalu **Terapkan perubahan**)."
     )
-    key = gm_api_key()
-    if key and _setting("GOOGLE_MAPS_API_KEY"):
-        st.caption("🔑 API key terpasang (dari Secrets).")
-    elif not key or ss.get("gm_key_input"):
-        st.text_input(
-            "Google Maps API key", type="password", key="gm_key_input",
-            help="Perlu API key Google Cloud dengan 'Places API (New)' aktif. Hanya disimpan di sesi ini (tidak ikut "
-                 "tersimpan ke file sesi). Supaya permanen, isi GOOGLE_MAPS_API_KEY di Secrets.",
-        )
-        key = gm_api_key()
     c1, c2 = st.columns([1, 1])
     with c1:
-        day_label = st.selectbox("Ambil jam untuk hari", GM_DAYS, index=_today_weekday_wib(), key="gm_day")
+        day_label = st.selectbox("Ambil jam untuk hari", OSM_DAYS, index=_today_weekday_wib(), key="osm_day")
     with c2:
-        overwrite = st.checkbox("Timpa jam yang sudah terisi", value=False, key="gm_overwrite")
-    weekday = GM_DAYS.index(day_label)
+        overwrite = st.checkbox("Timpa jam yang sudah terisi", value=False, key="osm_overwrite")
+    weekday = OSM_DAYS.index(day_label)
 
     base = df[~df["status"].isin(STATUS_EXCLUDED)]
+
     def _filled(r):
         return (_parse_hhmm(r.get("jam_buka")) is not None) or (_parse_hhmm(r.get("jam_tutup")) is not None)
-    todo = base if overwrite else base[~base.apply(_filled, axis=1)] if len(base) else base
+    todo = base if overwrite else (base[~base.apply(_filled, axis=1)] if len(base) else base)
     todo = todo[todo["latitude"].notna() & todo["longitude"].notna()]
 
     def _ck(r):
         return (str(r["merchant_name"]).strip().lower(), round(float(r["latitude"]), 5), round(float(r["longitude"]), 5))
-    cache = ss["gm_cache"]
+    cache = ss["osm_cache"]
     new_rows = [r for _, r in todo.iterrows() if _ck(r) not in cache]
-    batch = new_rows[:GM_MAX_PER_RUN]
     st.caption(
-        f"{len(todo)} merchant akan diproses · **{len(new_rows)} permintaan baru** ke Google "
-        f"(sisanya sudah pernah dicari di sesi ini, tidak ditagih lagi). Merchant berstatus sudah akuisisi / belum "
-        "tertarik dilewati. Penggunaan Places API **berbayar di atas kuota gratis bulanan** — cek harga & kuota di Google Cloud."
+        f"{len(todo)} merchant akan diproses ({len(new_rows)} perlu dicari baru; sisanya sudah pernah dicari di sesi ini). "
+        "Merchant berstatus sudah akuisisi / belum tertarik dilewati."
     )
-    if len(new_rows) > GM_MAX_PER_RUN:
-        st.caption(f"Dibatasi {GM_MAX_PER_RUN} permintaan per klik — klik lagi untuk sisanya.")
-    if st.button(f"🔎 Ambil jam dari Google Maps ({len(todo)} merchant)", key="gm_run", type="primary",
-                 disabled=(not key) or len(todo) == 0, width="stretch"):
-        stop = threading.Event()
-        def _job(r):
-            if stop.is_set():
-                return _ck(r), None
-            res = gm_lookup(r["merchant_name"], r["latitude"], r["longitude"], key,
-                            alamat=r.get("alamat") if "alamat" in r.index else None)
-            if res.get("fatal"):
-                stop.set()
-            return _ck(r), res
-        fatal_msg = None
-        errors = {}   # error tidak di-cache supaya bisa dicoba lagi
-        if batch:
-            bar = st.progress(0.0, text="Mencari di Google Maps…")
-            done = 0
-            with ThreadPoolExecutor(max_workers=4) as ex:
-                futs = [ex.submit(_job, r) for r in batch]
-                for f in as_completed(futs):
-                    k, res = f.result()
-                    done += 1
-                    bar.progress(done / len(batch), text=f"Mencari di Google Maps… {done}/{len(batch)}")
-                    if res is None:
-                        continue
-                    if res.get("status") == "error":
-                        errors[k] = res
-                        if res.get("fatal"):
-                            fatal_msg = res.get("msg")
+    if st.button(f"🔎 Cari jam di OpenStreetMap ({len(todo)} merchant)", key="osm_run", type="primary",
+                 disabled=len(todo) == 0, width="stretch"):
+        errors = {}
+        if new_rows:
+            bar = st.progress(0.0, text="Mencari di OpenStreetMap…")
+            for i in range(0, len(new_rows), OSM_CHUNK):
+                chunk = new_rows[i:i + OSM_CHUNK]
+                elements, err = osm_fetch_chunk([(float(r["latitude"]), float(r["longitude"])) for r in chunk])
+                for r in chunk:
+                    if elements is None:
+                        errors[_ck(r)] = {"status": "error", "msg": f"Gagal: {err}"}
                     else:
-                        cache[k] = res
+                        cache[_ck(r)] = osm_entry(elements, r["merchant_name"], float(r["latitude"]), float(r["longitude"]))
+                bar.progress(min(1.0, (i + len(chunk)) / len(new_rows)), text="Mencari di OpenStreetMap…")
             bar.empty()
-        if fatal_msg:
-            st.error(f"❌ Google menolak permintaan: {fatal_msg}")
         report, n_ok = [], 0
         store = ss.data_edits
         for _, r in todo.iterrows():
             entry = cache.get(_ck(r)) or errors.get(_ck(r))
-            if entry is None:
-                report.append({"Merchant": r["merchant_name"], "Hasil": "⏳ Belum diproses", "Nama di Google": "",
-                               "Jarak (m)": None, "Jam Google": "", "Catatan": "Batas per klik / dihentikan"})
-                continue
-            hasil, buka, tutup, note = gm_result_for_day(entry, weekday)
+            hasil, buka, tutup, note = osm_result_for_day(entry, weekday)
             if buka:
                 ch = store["changed"].setdefault(r["_row_key"], {})
                 ch["jam_buka"], ch["jam_tutup"] = buka, tutup
                 n_ok += 1
-            report.append({"Merchant": r["merchant_name"], "Hasil": hasil, "Nama di Google": entry.get("gname", ""),
-                           "Jarak (m)": entry.get("dist"), "Jam Google": gm_weekday_text(entry, weekday),
-                           "Catatan": note})
-        ss["gm_report"] = {"day": day_label, "rows": report, "n_ok": n_ok}
+            report.append({"Merchant": r["merchant_name"], "Hasil": hasil, "Nama di OSM": entry.get("gname", ""),
+                           "Jarak (m)": entry.get("dist"), "Jam di OSM": entry.get("oh", ""), "Catatan": note})
+        ss["osm_report"] = {"day": day_label, "rows": report, "n_ok": n_ok}
         if n_ok:
             ss.data_edit_nonce += 1
         ss.table_panel_open = True
         st.rerun()
-    rep_ = ss.get("gm_report")
+    rep_ = ss.get("osm_report")
     if rep_:
         rows = rep_["rows"]
-        n_total = len(rows)
-        st.success(f"✅ {rep_['n_ok']} dari {n_total} merchant terisi jamnya (hari {rep_['day']}).") if rep_["n_ok"] \
-            else st.info(f"Tidak ada jam yang terisi (hari {rep_['day']}). Lihat catatan di bawah.")
+        if rep_["n_ok"]:
+            st.success(f"✅ {rep_['n_ok']} dari {len(rows)} merchant terisi jamnya (hari {rep_['day']}). "
+                       "Sisanya bisa diisi manual di tabel.")
+        else:
+            st.info(f"Tidak ada jam yang terisi (hari {rep_['day']}). Isi manual di tabel di atas.")
         order = {"✅ Terisi": 9}
         rows = sorted(rows, key=lambda x: order.get(x["Hasil"], 0))
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", **TABLE_KW)
         st.caption(
-            "Kolom **Nama di Google** & **Jarak** membantu memastikan tempatnya benar. Yang berstatus ⚠️ / ❓ tidak diisi "
-            "otomatis — isi manual di tabel. Merchant dengan jam istirahat diisi dari buka paling awal sampai tutup paling akhir."
+            "Kolom **Nama di OSM** & **Jarak** membantu memastikan tempatnya benar. Yang berstatus ⚠️ / ❓ / ⚙️ tidak "
+            "diisi otomatis. Merchant dengan jam istirahat diisi dari buka paling awal sampai tutup paling akhir."
         )
-        if st.button("Tutup laporan", key="gm_report_close"):
-            ss.pop("gm_report", None)
+        if st.button("Tutup laporan", key="osm_report_close"):
+            ss.pop("osm_report", None)
             st.rerun()
 
 
@@ -2573,6 +2665,8 @@ if "exclude_outliers_flag" not in st.session_state:
     st.session_state.exclude_outliers_flag = False
 if "balance_time_flag" not in st.session_state:
     st.session_state.balance_time_flag = False
+if "hours_opt_flag" not in st.session_state:
+    st.session_state.hours_opt_flag = True
 if "presets" not in st.session_state:
     st.session_state.presets = {}  # {nama_preset: {pengaturan}} — khusus Mode Pro
 if "preset_flash" not in st.session_state:
@@ -2703,6 +2797,33 @@ def _auth_credentials():
         str(_setting("APP_USERNAME", APP_DEFAULT_USERNAME)),
         str(_setting("APP_PASSWORD", APP_DEFAULT_PASSWORD)),
     )
+
+
+AUTH_COOKIE = "rp_auth"
+AUTH_COOKIE_MAX_AGE = 12 * 3600  # batas atas; cookie sesi tetap hilang saat browser ditutup
+
+
+def _auth_sign(user, exp, expected):
+    key = hashlib.sha256(("rp-auth|" + expected[0] + "|" + expected[1]).encode("utf-8")).digest()
+    return hmac.new(key, f"{user}|{exp}".encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def make_auth_token(user, expected, now):
+    exp = int(now) + AUTH_COOKIE_MAX_AGE
+    return f"{user}|{exp}|{_auth_sign(user, exp, expected)}"
+
+
+def verify_auth_token(token, expected, now):
+    """Return username kalau token sah & belum kedaluwarsa, selain itu None."""
+    try:
+        user, exp, sig = str(token).rsplit("|", 2)
+        if int(exp) < now or not user:
+            return None
+        if hmac.compare_digest(sig, _auth_sign(user, int(exp), expected)):
+            return user
+    except Exception:
+        pass
+    return None
 
 
 def _same(a, b):
@@ -2836,6 +2957,8 @@ def render_login_page():
             if ok:
                 ss["auth_ok"] = True
                 ss["auth_user"] = expected[0]
+                ss["set_cookie"] = make_auth_token(expected[0], expected, time.time())
+                ss.pop("no_autologin", None)
                 ss.pop("login_flash", None)
                 st.rerun()
             else:
@@ -2848,13 +2971,51 @@ def render_login_page():
                 st.warning(flash)
             else:
                 st.error(flash)
-        st.caption("🔒 Sesi login berakhir kalau halaman di-refresh atau ditutup.")
+        st.caption("🔒 Login tetap aktif saat halaman di-refresh, dan berakhir kalau browser ditutup.")
+
+
+def _cookie_login():
+    """Pulihkan login dari cookie sesi (mis. setelah refresh)."""
+    ss = st.session_state
+    if ss.get("no_autologin"):
+        return
+    try:
+        tok = st.context.cookies.get(AUTH_COOKIE)
+    except Exception:
+        return
+    if not isinstance(tok, str):
+        return
+    user = verify_auth_token(tok, _auth_credentials(), time.time())
+    if user:
+        ss["auth_ok"] = True
+        ss["auth_user"] = user
+
+
+def _cookie_js(token):
+    """JS kecil (iframe) yang memasang / menghapus cookie sesi di halaman induk."""
+    if token:
+        val = urllib.parse.quote(token, safe="")
+        body = (f"d.cookie='{AUTH_COOKIE}='+'{val}'+'; path=/; SameSite=Lax; max-age={AUTH_COOKIE_MAX_AGE}'"
+                "+(location.protocol==='https:'?'; Secure':'');")
+    else:
+        body = f"d.cookie='{AUTH_COOKIE}=; path=/; max-age=0; SameSite=Lax';"
+    import streamlit.components.v1 as components
+    components.html(f"<script>try{{var d=window.parent.document;{body}}}catch(e){{}}</script>", height=0)
 
 
 if not st.session_state.get("auth_ok"):
+    _cookie_login()
+
+if not st.session_state.get("auth_ok"):
+    if st.session_state.pop("clear_cookie", False):
+        _cookie_js(None)
     render_login_page()
     render_footer()
     st.stop()
+
+
+if st.session_state.get("auth_ok") and st.session_state.get("set_cookie"):
+    _cookie_js(st.session_state.pop("set_cookie"))
 
 
 def _logout():
@@ -2862,6 +3023,8 @@ def _logout():
     keep = {k: ss[k] for k in ("view_mode", "app_mode") if k in ss}
     ss.clear()
     ss.update(keep)
+    ss["no_autologin"] = True   # cookie lama masih terbaca di sesi ini
+    ss["clear_cookie"] = True
 
 
 def render_user_bar(prefix, compact=False):
@@ -2957,6 +3120,12 @@ def _sync_exclude_outliers():
     )
 
 
+def _sync_hours_opt():
+    st.session_state.hours_opt_flag = st.session_state.get(
+        "_hours_opt_widget", st.session_state.hours_opt_flag
+    )
+
+
 def _sync_balance_time():
     st.session_state.balance_time_flag = st.session_state.get(
         "_balance_time_widget", st.session_state.balance_time_flag
@@ -3018,7 +3187,7 @@ SESSION_WIDGET_KEYS = (
     "_use_extracted_widget", "_starting_link_widget", "_round_trip_widget", "_dedupe_widget",
     "_split_widget", "_plan_widget", "_target_widget", "_visit_widget", "_start_time_widget",
     "_use_multi_depot_widget", "_geo_city_widget", "_balance_time_widget", "_exclude_outliers_widget",
-    "extract_editor",
+    "_hours_opt_widget", "extract_editor",
 )
 # Widget yang nilainya ditimpa saat preset diterapkan (khusus pengaturan, bukan data).
 PRESET_WIDGET_KEYS = (
@@ -3077,6 +3246,7 @@ def build_session_bytes():
             "driver_names": {str(k): str(v) for k, v in ss.driver_names.items()},
             "geocode_city": ss.geocode_city,
             "balance_time_flag": bool(ss.balance_time_flag),
+            "hours_opt_flag": bool(ss.hours_opt_flag),
             "exclude_outliers_flag": bool(ss.exclude_outliers_flag),
         },
         "data_edits": ss.data_edits,
@@ -3137,7 +3307,7 @@ def load_session_bytes(raw):
             pass
     if isinstance(cfg.get("use_multi_depot_flag"), bool):
         updates["use_multi_depot_flag"] = cfg["use_multi_depot_flag"]
-    for _bk in ("balance_time_flag", "exclude_outliers_flag"):
+    for _bk in ("balance_time_flag", "exclude_outliers_flag", "hours_opt_flag"):
         if isinstance(cfg.get(_bk), bool):
             updates[_bk] = cfg[_bk]
     depot_rows_raw = cfg.get("multi_depot_rows")
@@ -3500,7 +3670,8 @@ def render_howto():
             "- **Prioritas** — tambah kolom `prioritas` (ya/tidak) di Excel/CSV, merchant itu dikunjungi lebih dulu.\n"
             "- **Jam operasional** — tambah kolom `jam_buka`/`jam_tutup` (format HH:MM), perkiraan jam tiba "
             "dicek otomatis dan ditandai ⚠️ kalau di luar jam buka. Tidak punya datanya? Ambil otomatis dari "
-            "Google Maps lewat **Lihat & Edit Data Awal** (perlu Google Maps API key).\n"
+            "OpenStreetMap (gratis) atau isi manual lewat **Lihat & Edit Data Awal**, lalu ceklis "
+            "**Optimalkan rute berdasarkan jam operasional** di Langkah 2.\n"
             "- **Multi-depot** — centang \"Pakai banyak titik awal\" dan isi daftar gudang/toko pusat; "
             "tiap rute otomatis mulai dari yang terdekat.\n"
             "- **Nama kurir** — isi di tiap rute setelah dibuat, ikut masuk ke Excel, WhatsApp, dan PDF.\n"
@@ -4088,6 +4259,35 @@ if st.session_state.page == "Routing":
         else:
             balance_time = False
 
+        # Optimasi berdasarkan jam operasional merchant (kolom jam_buka / jam_tutup)
+        _n_hours = int(sum(
+            1 for _i in range(len(df))
+            if _parse_hhmm(df["jam_buka"].iloc[_i] if "jam_buka" in df.columns else None) is not None
+            or _parse_hhmm(df["jam_tutup"].iloc[_i] if "jam_tutup" in df.columns else None) is not None
+        ))
+        hours_opt = st.checkbox(
+            "🕒 Optimalkan rute berdasarkan jam operasional merchant",
+            value=bool(st.session_state.hours_opt_flag and _n_hours),
+            key="_hours_opt_widget",
+            on_change=_sync_hours_opt,
+            disabled=_n_hours == 0,
+            help=(
+                "Urutan kunjungan di dalam tiap rute diatur supaya merchant didatangi saat sedang buka "
+                "(yang tutup lebih awal dikunjungi lebih dulu, yang buka siang belakangan), sambil tetap "
+                "mengejar jarak terpendek. Pembagian merchant ke rute tetap mengikuti area. Kalau tidak mungkin "
+                "memenuhi semua jam, dipilih urutan dengan pelanggaran paling sedikit. Rute yang punya jam "
+                "operasional memakai aturan ini, jadi pengaturan prioritas tidak dipakai di rute tersebut."
+            ),
+        )
+        if _n_hours == 0:
+            st.caption(
+                "🕒 Belum ada jam operasional. Isi di **Lihat & Edit Data Awal** (otomatis dari OpenStreetMap "
+                "atau manual), lalu ceklis ini bisa dipakai."
+            )
+        else:
+            st.caption(f"🕒 {_n_hours} dari {len(df)} merchant punya jam operasional.")
+        hours_opt = bool(hours_opt and _n_hours)
+
         if not IS_PRO:
             # Mode Basic: jumlah rute tetap bisa diatur (di atas), tapi jam
             # mulai/durasi kunjungan/arah rute pakai nilai terakhir yang
@@ -4154,7 +4354,7 @@ if st.session_state.page == "Routing":
         data_fingerprint = (
             len(df), tuple(df["merchant_name"]), max_points_per_route, target_routes, starting_link,
             round_trip, split_mode, int(visit_minutes), start_time.strftime("%H:%M"),
-            use_multi_depot, tuple(depot_rows_raw), balance_time,
+            use_multi_depot, tuple(depot_rows_raw), balance_time, hours_opt,
         )
 
         if run:
@@ -4217,6 +4417,8 @@ if st.session_state.page == "Routing":
 
                 all_routes = []
                 route_summaries = []
+                hours_opt_routes = 0
+                hours_opt_failed = 0
                 any_fallback_used = False
                 osrm_errors = []
                 base_date = datetime.date.today()
@@ -4254,7 +4456,19 @@ if st.session_state.page == "Routing":
                     else:
                         priority_idx = []
 
-                    if priority_idx:
+                    tw = build_time_windows(route_df, start_dt, base_date, has_start) if hours_opt else {}
+                    tw_order = None
+                    if tw:
+                        tw_order = solve_tsp_time_windows(
+                            distance_matrix, duration_matrix, tw, visit_sec,
+                            round_trip=round_trip, first_is_start=has_start,
+                        )
+                    if tw and tw_order is None:
+                        hours_opt_failed += 1
+                    if tw_order is not None:
+                        best_route = tw_order
+                        hours_opt_routes += 1
+                    elif priority_idx:
                         other_idx = [
                             i for i in range(len(route_df))
                             if not (has_start and i == 0) and i not in priority_idx
@@ -4323,6 +4537,8 @@ if st.session_state.page == "Routing":
                 "multi_depot_overrode_single": bool(depots) and bool(starting_link),
                 "n_depots": len(depots),
                 "balance_info": balance_info,
+                "hours_opt_routes": hours_opt_routes,
+                "hours_opt_failed": hours_opt_failed,
             }
 
         result = st.session_state.get("route_result")
@@ -4331,6 +4547,23 @@ if st.session_state.page == "Routing":
                 st.warning("⚠️ Titik awal tidak dikenali (bukan link Google Maps atau koordinat yang valid), jadi dilewati — rute tetap dibuat tanpa titik awal khusus.")
             if result.get("multi_depot_overrode_single"):
                 st.caption("ℹ️ Multi-depot aktif — daftar titik awal menggantikan field 'Titik Awal' tunggal untuk pembuatan rute ini.")
+
+            if result.get("hours_opt_failed"):
+                st.warning(
+                    f"⚠️ Optimasi jam operasional gagal untuk {result['hours_opt_failed']} rute — rute itu memakai "
+                    "urutan jarak terpendek biasa. Coba buat rute lagi."
+                )
+            if result.get("hours_opt_routes"):
+                _n_out = sum(r.get("n_outside_hours", 0) for r in result["route_summaries"])
+                if _n_out:
+                    st.warning(
+                        f"🕒 Urutan sudah dioptimalkan dengan jam operasional, tapi {_n_out} merchant tetap "
+                        "diperkirakan tiba di luar jam buka/tutup. Coba ubah **jam mulai** (Mode Pro), cek jam yang "
+                        "salah di tabel Data Awal, atau pindahkan merchant itu ke hari lain."
+                    )
+                else:
+                    st.success("🕒 Urutan dioptimalkan dengan jam operasional — semua merchant yang punya jam "
+                               "diperkirakan dikunjungi saat buka.")
 
             if not result.get("used_real_roads", True):
                 reason = result.get("osrm_error")
