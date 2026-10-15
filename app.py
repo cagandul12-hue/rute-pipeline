@@ -2751,8 +2751,16 @@ def _cookie_js(token):
                 "+(location.protocol==='https:'?'; Secure':'');")
     else:
         body = f"d.cookie='{AUTH_COOKIE}=; path=/; max-age=0; SameSite=Lax';"
+    script = f"<script>try{{var d=document;{body}}}catch(e){{}}</script>"
     try:
-        import streamlit.components.v1 as components
+        import inspect
+        if "unsafe_allow_javascript" in inspect.signature(st.html).parameters:
+            st.html(script, unsafe_allow_javascript=True)   # Streamlit baru: jalan di halaman utama, tidak deprecated
+            return
+    except Exception:
+        pass
+    try:
+        import streamlit.components.v1 as components      # Streamlit lama: lewat iframe
         components.html(f"<script>try{{var d=window.parent.document;{body}}}catch(e){{}}</script>", height=0)
     except Exception:
         pass   # tanpa cookie, login tetap jalan (hanya tidak bertahan saat refresh)
