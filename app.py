@@ -1597,6 +1597,17 @@ def normalize_hhmm_text(val):
     return f"{h:02d}:{mi:02d}"
 
 
+def normalize_priority_changes(changed):
+    """Kotak centang ⭐ prioritas (True/False) → teks 'ya' / 'tidak' (sama seperti kolom di Excel/CSV)."""
+    out = {}
+    for key, cols in changed.items():
+        new = dict(cols)
+        if "prioritas" in new:
+            new["prioritas"] = "ya" if is_truthy(new["prioritas"]) else "tidak"
+        out[key] = new
+    return out
+
+
 def normalize_hours_changes(changed):
     """Rapikan perubahan kolom jam_buka/jam_tutup dari tabel. Return (perubahan_valid, daftar_salah);
     daftar_salah berisi (row_key, kolom, nilai) untuk isian yang bukan format jam — tidak disimpan."""
@@ -3528,7 +3539,7 @@ def render_howto():
             "*sudah akuisisi*, atau *belum tertarik*. Dua status terakhir **tidak dimasukkan ke rute**. Ubah di tabel "
             "**Lihat & Edit Data Awal**, atau klik titik di **Pratinjau peta** untuk mengubah status / menghapusnya.\n\n"
             "⭐ **Fitur tambahan (Mode Pro):**\n"
-            "- **Prioritas** — tambah kolom `prioritas` (ya/tidak) di Excel/CSV, merchant itu dikunjungi lebih dulu.\n"
+            "- **Prioritas** — centang **⭐ prioritas** di **Lihat & Edit Data Awal** (atau isi kolom `prioritas` ya/tidak di Excel/CSV); merchant itu dikunjungi lebih dulu di rutenya.\n"
             "- **Jam operasional** — isi kolom `jam_buka`/`jam_tutup` (format HH:MM) di Excel/CSV, atau manual di "
             "**Lihat & Edit Data Awal**. Perkiraan jam tiba dicek dan ditandai ⚠️ kalau lewat jam tutup. Ceklis "
             "**Optimalkan rute berdasarkan jam operasional** di Langkah 2 mengatur urutan supaya merchant didatangi "
@@ -3860,15 +3871,19 @@ if st.session_state.page == "Routing":
                    "jam operasional. Dipakai untuk menandai ⚠️ kalau perkiraan jam tiba di luar jam buka, dan untuk "
                    "ceklis **Optimalkan rute berdasarkan jam operasional** di Langkah 2. Kosongkan kalau tidak diketahui."
                    if IS_PRO else "")
+                + ("\n\n⭐ Centang **prioritas** untuk merchant yang harus dikunjungi lebih dulu di rutenya."
+                   if IS_PRO else "")
             )
             _flash_h = st.session_state.pop("hours_flash", None)
             if _flash_h:
                 st.warning(_flash_h)
-            _edit_cols = [c for c in EDITABLE_COLS if c in df.columns or (IS_PRO and c in HOURS_COLS)]
+            _edit_cols = [c for c in EDITABLE_COLS if c in df.columns or (IS_PRO and c in PRO_ONLY_COLS)]
             _info_cols = [c for c in ("source_file", "koordinat_dari") if c in df.columns]
             _view = df.reindex(columns=["_row_key"] + _edit_cols + _info_cols).copy()
             for _tc in _edit_cols:  # kolom teks dibuat string murni supaya editor tidak error pada tipe campuran
-                if _tc not in ("latitude", "longitude"):
+                if _tc == "prioritas":   # kotak centang: kata seperti ya/yes/1/penting dianggap tercentang
+                    _view[_tc] = _view[_tc].apply(is_truthy).astype(bool)
+                elif _tc not in ("latitude", "longitude"):
                     _view[_tc] = _view[_tc].apply(lambda v: "" if pd.isna(v) else str(v))
             _view.insert(0, "hapus", False)
             with st.form(f"data_edit_form_{st.session_state.data_edit_nonce}"):
@@ -3885,6 +3900,9 @@ if st.session_state.page == "Routing":
                         "status": st.column_config.SelectboxColumn(
                             "status", options=STATUS_OPTIONS, required=True, width="medium",
                         ),
+                        "prioritas": st.column_config.CheckboxColumn(
+                            "⭐ prioritas", default=False,
+                            help="Centang kalau merchant ini harus dikunjungi lebih dulu di rutenya."),
                         "jam_buka": st.column_config.TextColumn(
                             "🕒 jam_buka", max_chars=8,
                             help="Jam buka, format HH:MM (mis. 08:00). Kosong = tidak dicek."),
@@ -3898,6 +3916,7 @@ if st.session_state.page == "Routing":
             if _apply_edits:
                 _del, _chg = diff_data_edits(_view, _edited, _edit_cols)
                 _chg, _bad = normalize_hours_changes(_chg)
+                _chg = normalize_priority_changes(_chg)
                 _bad_msg = ""
                 if _bad:
                     _names = _view.set_index("_row_key")["merchant_name"]
