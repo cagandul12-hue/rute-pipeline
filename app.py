@@ -655,7 +655,8 @@ def solve_tsp_with_priority(distance_matrix, priority_idx, other_idx, has_start,
 
 
 # ---------- Optimasi urutan berdasarkan jam operasional (time window) ----------
-TW_LATE_PENALTY = 100   # biaya per detik di luar jam (satuan = meter jarak) → 1 menit telat ≈ 6 km "hukuman"
+TW_LATE_PENALTY = 100   # biaya per detik lewat jam tutup (satuan = meter jarak) → 1 menit telat ≈ 6 km "hukuman"
+TW_WAIT_COST = 2        # biaya per detik menunggu toko buka → 30 menit menunggu ≈ 3,6 km jarak
 
 
 def build_time_windows(route_df, start_dt, base_date, has_start):
@@ -679,11 +680,12 @@ def build_time_windows(route_df, start_dt, base_date, has_start):
 
 def solve_tsp_time_windows(distance_matrix, duration_matrix, windows, visit_sec,
                            round_trip=False, first_is_start=False):
-    """Urutan kunjungan yang meminimalkan jarak SAMBIL berusaha tiba saat merchant buka.
+    """Urutan kunjungan yang meminimalkan jarak SAMBIL tiba saat merchant buka.
 
-    Jam tiba dihitung persis seperti jadwal akhir (tanpa menunggu), jadi hasilnya konsisten dengan
-    penanda ⚠️ di tabel. Jam operasional bersifat "lunak": kalau mustahil dipenuhi semua, solver
-    memilih urutan dengan pelanggaran terkecil — bukan gagal. Return daftar indeks (format sama
+    - Belum buka saat rute sampai → solver mengunjungi merchant lain dulu; kalau tidak ada yang lain, kurir
+      menunggu sampai buka (jadwal akhir memakai aturan yang sama: jam tiba = jam buka).
+    - Lewat jam tutup bersifat "lunak": kalau mustahil dipenuhi semua, solver memilih urutan dengan pelanggaran
+      terkecil — bukan gagal. Merchant yang tutup lebih awal otomatis didahulukan. Return daftar indeks (format sama
     seperti solve_tsp) atau None kalau solver tidak menghasilkan solusi."""
     try:
         return _solve_tsp_time_windows(distance_matrix, duration_matrix, windows, visit_sec,
@@ -717,12 +719,15 @@ def _solve_tsp_time_windows(distance_matrix, duration_matrix, windows, visit_sec
         return int(tm[a][b]) + service
 
     routing.SetArcCostEvaluatorOfAllVehicles(routing.RegisterTransitCallback(dist_cb))
-    routing.AddDimension(routing.RegisterTransitCallback(time_cb), 0, 10 * 86400, True, "Time")
+    # slack = waktu tunggu (boleh sampai 24 jam); menunggu "berbiaya" supaya solver lebih suka mengunjungi
+    # merchant lain dulu daripada diam menunggu.
+    routing.AddDimension(routing.RegisterTransitCallback(time_cb), 86400, 10 * 86400, True, "Time")
     time_dim = routing.GetDimensionOrDie("Time")
+    time_dim.SetSlackCostCoefficientForAllVehicles(TW_WAIT_COST)
     for node, (lo, hi) in windows.items():
         idx = manager.NodeToIndex(node)
         if lo is not None and lo > 0:
-            time_dim.SetCumulVarSoftLowerBound(idx, int(lo), TW_LATE_PENALTY)
+            time_dim.CumulVar(idx).SetMin(int(lo))   # belum buka -> harus menunggu / datang nanti
         if hi is not None:
             time_dim.SetCumulVarSoftUpperBound(idx, max(0, int(hi)), TW_LATE_PENALTY)
 
@@ -1821,30 +1826,43 @@ def _clock(dt, base_date):
     return text + (f" (+{days} hari)" if days > 0 else "")
 
 
-def build_schedule(duration_matrix, order, start_dt, visit_sec, first_is_start, round_trip):
-    """Jam tiba/selesai tiap titik sepanjang urutan kunjungan.
+def build_schedule_waits(duration_matrix, order, start_dt, visit_sec, first_is_start, round_trip, open_secs=None):
+    """Jam tiba/selesai tiap titik sepanjang urutan kunjungan, dengan waktu tunggu.
 
-    Titik awal (kalau ada) tidak dihitung durasi kunjungan. Mengembalikan
-    (jam_tiba, jam_selesai, jam_kembali_atau_None, jam_selesai_rute) sebagai datetime.
-    """
-    arrivals, departs = [], []
+    Titik awal (kalau ada) tidak dihitung durasi kunjungan. `open_secs` = {indeks_titik: detik sejak jam mulai
+    rute}: kalau tiba sebelum merchant buka, kurir MENUNGGU sampai buka (jam tiba = jam buka).
+    Mengembalikan (jam_tiba, jam_selesai, jam_kembali_atau_None, jam_selesai_rute, detik_tunggu_per_titik)."""
+    open_secs = open_secs or {}
+    arrivals, departs, waits = [], [], []
     t = start_dt
     for k, node in enumerate(order):
         if k > 0:
             t = departs[-1] + datetime.timedelta(seconds=duration_matrix[order[k - 1]][node])
+        wait = 0.0
+        if node in open_secs and not (k == 0 and first_is_start):
+            opening = start_dt + datetime.timedelta(seconds=open_secs[node])
+            if t < opening:
+                wait = (opening - t).total_seconds()
+                t = opening
         arrivals.append(t)
+        waits.append(wait)
         stay = 0 if (k == 0 and first_is_start) else visit_sec
         departs.append(t + datetime.timedelta(seconds=stay))
     back = None
     if round_trip and len(order) > 1:
         back = departs[-1] + datetime.timedelta(seconds=duration_matrix[order[-1]][order[0]])
-    return arrivals, departs, back, (back or departs[-1])
+    return arrivals, departs, back, (back or departs[-1]), waits
+
+
+def build_schedule(duration_matrix, order, start_dt, visit_sec, first_is_start, round_trip):
+    """Versi tanpa waktu tunggu: (jam_tiba, jam_selesai, jam_kembali_atau_None, jam_selesai_rute)."""
+    return build_schedule_waits(duration_matrix, order, start_dt, visit_sec, first_is_start, round_trip)[:4]
 
 
 def build_whatsapp_text(r, map_links):
     """Teks siap kirim (format WhatsApp) untuk satu rute."""
     df = r["df"]
-    total_sec = r["duration_sec"] + r.get("visit_sec", 0)
+    total_sec = r["duration_sec"] + r.get("visit_sec", 0) + r.get("wait_sec", 0)
     lines = [
         f"*Rute {r['route_id'] + 1}* — {len(df)} titik · ~{r['distance_km']:.1f} km · ~{format_duration(total_sec)}"
     ]
@@ -1858,7 +1876,7 @@ def build_whatsapp_text(r, map_links):
     for _, row in df.iterrows():
         eta = f" ({row['jam_tiba']})" if "jam_tiba" in df.columns else ""
         star = "⭐ " if row.get("prioritas_flag") else ""
-        warn = f" {row['jadwal_status']}" if row.get("jadwal_status", "").startswith("⚠️") else ""
+        warn = f" {row['jadwal_status']}" if row.get("jadwal_status", "").startswith(("⚠️", "⏳")) else ""
         lines.append(f"{int(row['sequence'])}. {star}{row['merchant_name']}{eta}{warn}")
     if r.get("round_trip"):
         lines.append("↩️ Lalu kembali ke titik awal")
@@ -1875,7 +1893,7 @@ def build_whatsapp_text(r, map_links):
 # HASIL RUTE: finalisasi, ubah urutan manual, peta gabungan, lembar PDF
 # ==========================================================================================
 def finalize_route(route_df, order, distance_matrix, duration_matrix, route_id,
-                   start_dt, visit_sec, has_start, round_trip, base_date):
+                   start_dt, visit_sec, has_start, round_trip, base_date, open_secs=None):
     """Bangun tabel rute + jadwal + total jarak/waktu dari sebuah URUTAN.
 
     Dipakai saat rute pertama kali dibuat (urutan dari TSP) dan saat pengguna
@@ -1885,8 +1903,8 @@ def finalize_route(route_df, order, distance_matrix, duration_matrix, route_id,
     optimized_df = route_df.iloc[order].reset_index(drop=True)
     optimized_df["sequence"] = optimized_df.index + 1
     optimized_df["route_name"] = f"Rute {route_id + 1}"
-    arrivals, departs, back_dt, finish_dt = build_schedule(
-        duration_matrix, order, start_dt, visit_sec, has_start, round_trip
+    arrivals, departs, back_dt, finish_dt, waits = build_schedule_waits(
+        duration_matrix, order, start_dt, visit_sec, has_start, round_trip, open_secs
     )
     optimized_df["jam_tiba"] = [_clock(t, base_date) for t in arrivals]
     if visit_sec:
@@ -1903,6 +1921,8 @@ def finalize_route(route_df, order, distance_matrix, duration_matrix, route_id,
             jb = optimized_df["jam_buka"].iloc[k] if "jam_buka" in optimized_df.columns else None
             jt = optimized_df["jam_tutup"].iloc[k] if "jam_tutup" in optimized_df.columns else None
             status = "" if is_start_row else check_time_window(dt, jb, jt)
+            if status == "✅" and waits[k] >= 60:
+                status = f"⏳ tunggu {round(waits[k] / 60)} mnt (buka {dt.strftime('%H:%M')})"
             if status.startswith("⚠️"):
                 n_late += 1
             statuses.append(status)
@@ -1914,6 +1934,7 @@ def finalize_route(route_df, order, distance_matrix, duration_matrix, route_id,
         "distance_km": route_leg_sum(distance_matrix, order, round_trip) / 1000,
         "duration_sec": route_leg_sum(duration_matrix, order, round_trip),
         "visit_sec": visit_sec * n_visits,
+        "wait_sec": float(sum(waits)),
         "finish_label": _clock(finish_dt, base_date),
         "back_label": _clock(back_dt, base_date) if back_dt else None,
         "n_outside_hours": n_late,
@@ -2033,6 +2054,7 @@ def _move_stop(route_id, action):
         finalize_route(
             r["route_df"], new_order, r["distance_matrix"], r["duration_matrix"], route_id,
             r["start_dt"], r["visit_sec_each"], r["has_start"], r["round_trip"], r["base_date"],
+            r.get("open_secs"),
         )
     )
     r["order"] = new_order
@@ -2219,7 +2241,8 @@ def _pdf_payload(r, links, seq_nums, result):
         "has_start": bool(r.get("has_start")), "round_trip": bool(r.get("round_trip")),
         "back_label": r.get("back_label") or "", "manual": bool(r.get("manual")),
         "distance_km": float(r["distance_km"]), "duration_sec": float(r["duration_sec"]),
-        "visit_sec": float(r.get("visit_sec", 0)), "finish_label": r.get("finish_label") or "",
+        "visit_sec": float(r.get("visit_sec", 0)), "wait_sec": float(r.get("wait_sec", 0)),
+        "finish_label": r.get("finish_label") or "",
         "show_selesai": "jam_selesai" in df.columns,
         "links": [(int(a), int(b), u) for a, b, u in links],
         "seq_nums": [int(x) for x in seq_nums],
@@ -2331,6 +2354,8 @@ def build_routes_pdf(payloads):
                  f"Perjalanan {xml_escape(format_duration(p['duration_sec']))}"]
         if p["visit_sec"]:
             parts.append(f"Kunjungan {xml_escape(format_duration(p['visit_sec']))}")
+        if p.get("wait_sec", 0) >= 60:
+            parts.append(f"Menunggu toko buka {xml_escape(format_duration(p['wait_sec']))}")
         if p["finish_label"]:
             parts.append(f"Selesai +/-{xml_escape(p['finish_label'])}" + (" (sudah pulang)" if p["round_trip"] else ""))
         if p.get("depot_name"):
@@ -4132,11 +4157,13 @@ if st.session_state.page == "Routing":
                 on_change=_sync_hours_opt,
                 disabled=_n_hours == 0,
                 help=(
-                    "Urutan kunjungan di dalam tiap rute diatur supaya merchant didatangi saat sedang buka "
-                    "(yang tutup lebih awal dikunjungi lebih dulu, yang buka siang belakangan), sambil tetap "
-                    "mengejar jarak terpendek. Pembagian merchant ke rute tetap mengikuti area. Kalau tidak mungkin "
-                    "memenuhi semua jam, dipilih urutan dengan pelanggaran paling sedikit. Rute yang punya jam "
-                    "operasional memakai aturan ini, jadi pengaturan prioritas tidak dipakai di rute tersebut."
+                    "Urutan kunjungan di dalam tiap rute diatur supaya merchant didatangi saat sedang buka: yang tutup "
+                    "lebih awal dikunjungi lebih dulu, yang baru buka siang belakangan, sambil tetap mengejar jarak "
+                    "terpendek. Kalau merchant belum buka saat rute dimulai, merchant lain dikunjungi dulu; kalau tidak "
+                    "ada lagi yang bisa dikunjungi, kurir menunggu sampai buka (ditandai ⏳). Merchant tanpa jam buka/"
+                    "tutup tidak dibatasi apa pun, dan rute yang tidak punya jam sama sekali memakai KMeans + TSP biasa. "
+                    "Pembagian merchant ke rute tetap mengikuti area. Kalau tidak mungkin memenuhi semua jam, dipilih "
+                    "urutan dengan pelanggaran paling sedikit. Pengaturan prioritas tidak dipakai di rute yang punya jam."
                 ),
             )
             if _n_hours == 0:
@@ -4339,9 +4366,11 @@ if st.session_state.page == "Routing":
                     else:
                         best_route = solve_tsp(distance_matrix, round_trip=round_trip, fixed_start=has_start)
 
+                    # waktu tunggu hanya dipakai kalau urutan berasal dari optimasi jam operasional
+                    open_secs = {i: lo for i, (lo, _hi) in tw.items() if lo and lo > 0} if tw_order is not None else {}
                     fin = finalize_route(
                         route_df, best_route, distance_matrix, duration_matrix, route_id,
-                        start_dt, visit_sec, has_start, round_trip, base_date,
+                        start_dt, visit_sec, has_start, round_trip, base_date, open_secs,
                     )
                     all_routes.append(fin["df"])
 
@@ -4373,6 +4402,7 @@ if st.session_state.page == "Routing":
                             "manual": False,
                             "start_dt": start_dt,
                             "visit_sec_each": visit_sec,
+                            "open_secs": open_secs,
                             "base_date": base_date,
                         }
                     )
@@ -4418,12 +4448,12 @@ if st.session_state.page == "Routing":
                 if _n_out:
                     st.warning(
                         f"🕒 Urutan sudah dioptimalkan dengan jam operasional, tapi {_n_out} merchant tetap "
-                        "diperkirakan tiba di luar jam buka/tutup. Coba ubah **jam mulai** (Mode Pro), cek jam yang "
+                        "diperkirakan tiba setelah jam tutup. Coba ubah **jam mulai** (Mode Pro), cek jam yang "
                         "salah di tabel Data Awal, atau pindahkan merchant itu ke hari lain."
                     )
                 else:
                     st.success("🕒 Urutan dioptimalkan dengan jam operasional — semua merchant yang punya jam "
-                               "diperkirakan dikunjungi saat buka.")
+                               "diperkirakan dikunjungi saat buka (kalau perlu, kurir menunggu sampai buka).")
 
             if not result.get("used_real_roads", True):
                 reason = result.get("osrm_error")
@@ -4454,7 +4484,7 @@ if st.session_state.page == "Routing":
 
             total_distance = sum(r["distance_km"] for r in route_summaries)
             total_duration = sum(r["duration_sec"] for r in route_summaries)
-            total_visit = sum(r.get("visit_sec", 0) for r in route_summaries)
+            total_visit = sum(r.get("visit_sec", 0) + r.get("wait_sec", 0) for r in route_summaries)
             with st.container(key="grid4"):
                 m1, m2, m3, m4 = st.columns(4)
                 with m1:
@@ -4466,7 +4496,7 @@ if st.session_state.page == "Routing":
                 with m4:
                     metric_card(
                         "⏱️",
-                        "Waktu Total (jalan + kunjungan)" if total_visit else "Estimasi Waktu Tempuh",
+                        "Waktu Total (jalan + kunjungan + tunggu)" if total_visit else "Estimasi Waktu Tempuh",
                         format_duration(total_duration + total_visit),
                     )
 
@@ -4526,7 +4556,7 @@ if st.session_state.page == "Routing":
                 color = ROUTE_COLORS[route_id % len(ROUTE_COLORS)]
                 emoji = ROUTE_EMOJIS[route_id % len(ROUTE_EMOJIS)]
 
-                route_total_sec = r["duration_sec"] + r.get("visit_sec", 0)
+                route_total_sec = r["duration_sec"] + r.get("visit_sec", 0) + r.get("wait_sec", 0)
                 warn_mark = "" if r.get("real_roads", True) else " ⚠️ estimasi"
                 manual_mark = " ✏️ manual" if r.get("manual") else ""
                 with st.expander(
@@ -4538,6 +4568,8 @@ if st.session_state.page == "Routing":
                     parts = [f"🚗 Perjalanan {format_duration(r['duration_sec'])}"]
                     if r.get("visit_sec"):
                         parts.append(f"🏪 Kunjungan {format_duration(r['visit_sec'])}")
+                    if r.get("wait_sec", 0) >= 60:
+                        parts.append(f"⏳ Menunggu toko buka {format_duration(r['wait_sec'])}")
                     if r.get("finish_label"):
                         parts.append(
                             f"🏁 Selesai ±{r['finish_label']}"
