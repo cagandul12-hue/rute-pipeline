@@ -3431,7 +3431,7 @@ def render_howto():
             "**Lihat & Edit Data Awal**, atau klik titik di **Pratinjau peta** untuk mengubah status / menghapusnya.\n\n"
             "⭐ **Fitur tambahan (opsional):**\n"
             "- **Prioritas** — tambah kolom `prioritas` (ya/tidak) di Excel/CSV, merchant itu dikunjungi lebih dulu.\n"
-            "- **Jam operasional** — tambah kolom `jam_buka`/`jam_tutup` (format HH:MM), perkiraan jam tiba "
+            "- **Jam operasional (Mode Pro)** — tambah kolom `jam_buka`/`jam_tutup` (format HH:MM), perkiraan jam tiba "
             "dicek otomatis dan ditandai ⚠️ kalau di luar jam buka. Tidak ada di file? Isi manual di "
             "**Lihat & Edit Data Awal**, lalu ceklis **Optimalkan rute berdasarkan jam operasional** di Langkah 2.\n"
             "- **Multi-depot** — centang \"Pakai banyak titik awal\" dan isi daftar gudang/toko pusat; "
@@ -3528,7 +3528,7 @@ if st.session_state.page == "Routing":
             type=["xlsx", "csv"],
             accept_multiple_files=True,
             key=f"uploader_{st.session_state.uploader_nonce}",
-            help="Format .xlsx atau .csv. Kolom wajib: merchant_name, latitude, longitude (koma desimal seperti -7,56 juga dikenali). latitude/longitude boleh dikosongkan — akan dicari otomatis dari nama merchant (tambah kolom alamat supaya lebih akurat). Kolom opsional: status (prospek / sedang pendekatan / sudah akuisisi / belum tertarik — dua yang terakhir tidak diikutkan ke rute; kosong = prospek), prioritas (ya/tidak — dikunjungi lebih dulu), jam_buka & jam_tutup (HH:MM — dicek terhadap perkiraan jam tiba). Bisa pilih beberapa file sekaligus — nanti otomatis digabung. File yang sudah diupload tetap tersimpan walau kamu pindah ke Maps Extractor.",
+            help="Format .xlsx atau .csv. Kolom wajib: merchant_name, latitude, longitude (koma desimal seperti -7,56 juga dikenali). latitude/longitude boleh dikosongkan — akan dicari otomatis dari nama merchant (tambah kolom alamat supaya lebih akurat). Kolom opsional: status (prospek / sedang pendekatan / sudah akuisisi / belum tertarik — dua yang terakhir tidak diikutkan ke rute; kosong = prospek), prioritas (ya/tidak — dikunjungi lebih dulu), jam_buka & jam_tutup (HH:MM — khusus Mode Pro, dicek terhadap perkiraan jam tiba). Bisa pilih beberapa file sekaligus — nanti otomatis digabung. File yang sudah diupload tetap tersimpan walau kamu pindah ke Maps Extractor.",
         )
         if new_files:
             for nf in new_files:
@@ -3715,6 +3715,9 @@ if st.session_state.page == "Routing":
                     st.rerun()
             st.stop()
         _edited_full = df.copy()  # data setelah edit tabel, sebelum pencarian koordinat/dedupe (untuk download)
+        if not IS_PRO:
+            # Jam operasional khusus Mode Pro: di Basic kolomnya diabaikan (tidak tampil, tidak dicek, tidak dioptimasi).
+            df = df.drop(columns=[c for c in HOURS_COLS if c in df.columns])
         df = handle_missing_coordinates(df)  # isi koordinat kosong lewat pencarian otomatis
         df["latitude"] = pd.to_numeric(df["latitude"])
         df["longitude"] = pd.to_numeric(df["longitude"])
@@ -3751,15 +3754,17 @@ if st.session_state.page == "Routing":
                 "✏️ Klik sel untuk memperbaiki nama, koordinat, atau **status**, atau centang **Hapus** untuk "
                 "membuang baris. Tekan **Terapkan perubahan** supaya tersimpan — file aslinya tidak diubah. "
                 "Status **sudah akuisisi** dan **belum tertarik** tidak diikutkan ke rute; **prospek** dan "
-                "**sedang pendekatan** tetap diikutkan.\n\n"
-                "🕒 Isi **jam_buka** & **jam_tutup** (format HH:MM, mis. 08:00 dan 21:00) untuk merchant yang punya "
-                "jam operasional. Dipakai untuk menandai ⚠️ kalau perkiraan jam tiba di luar jam buka, dan untuk "
-                "ceklis **Optimalkan rute berdasarkan jam operasional** di Langkah 2. Kosongkan kalau tidak diketahui."
+                "**sedang pendekatan** tetap diikutkan."
+                + ("\n\n"
+                   "🕒 Isi **jam_buka** & **jam_tutup** (format HH:MM, mis. 08:00 dan 21:00) untuk merchant yang punya "
+                   "jam operasional. Dipakai untuk menandai ⚠️ kalau perkiraan jam tiba di luar jam buka, dan untuk "
+                   "ceklis **Optimalkan rute berdasarkan jam operasional** di Langkah 2. Kosongkan kalau tidak diketahui."
+                   if IS_PRO else "")
             )
             _flash_h = st.session_state.pop("hours_flash", None)
             if _flash_h:
                 st.warning(_flash_h)
-            _edit_cols = [c for c in EDITABLE_COLS if c in df.columns or c in HOURS_COLS]
+            _edit_cols = [c for c in EDITABLE_COLS if c in df.columns or (IS_PRO and c in HOURS_COLS)]
             _info_cols = [c for c in ("source_file", "koordinat_dari") if c in df.columns]
             _view = df.reindex(columns=["_row_key"] + _edit_cols + _info_cols).copy()
             for _tc in _edit_cols:  # kolom teks dibuat string murni supaya editor tidak error pada tipe campuran
@@ -4043,34 +4048,36 @@ if st.session_state.page == "Routing":
         else:
             balance_time = False
 
-        # Optimasi berdasarkan jam operasional merchant (kolom jam_buka / jam_tutup)
-        _n_hours = int(sum(
-            1 for _i in range(len(df))
-            if _parse_hhmm(df["jam_buka"].iloc[_i] if "jam_buka" in df.columns else None) is not None
-            or _parse_hhmm(df["jam_tutup"].iloc[_i] if "jam_tutup" in df.columns else None) is not None
-        ))
-        hours_opt = st.checkbox(
-            "🕒 Optimalkan rute berdasarkan jam operasional merchant",
-            value=bool(st.session_state.hours_opt_flag and _n_hours),
-            key="_hours_opt_widget",
-            on_change=_sync_hours_opt,
-            disabled=_n_hours == 0,
-            help=(
-                "Urutan kunjungan di dalam tiap rute diatur supaya merchant didatangi saat sedang buka "
-                "(yang tutup lebih awal dikunjungi lebih dulu, yang buka siang belakangan), sambil tetap "
-                "mengejar jarak terpendek. Pembagian merchant ke rute tetap mengikuti area. Kalau tidak mungkin "
-                "memenuhi semua jam, dipilih urutan dengan pelanggaran paling sedikit. Rute yang punya jam "
-                "operasional memakai aturan ini, jadi pengaturan prioritas tidak dipakai di rute tersebut."
-            ),
-        )
-        if _n_hours == 0:
-            st.caption(
-                "🕒 Belum ada jam operasional. Isi kolom **jam_buka** & **jam_tutup** di **Lihat & Edit Data Awal** "
-                "(atau lewat Excel/CSV), lalu ceklis ini bisa dipakai."
+        hours_opt = False
+        if IS_PRO:
+            # Optimasi berdasarkan jam operasional merchant (kolom jam_buka / jam_tutup)
+            _n_hours = int(sum(
+                1 for _i in range(len(df))
+                if _parse_hhmm(df["jam_buka"].iloc[_i] if "jam_buka" in df.columns else None) is not None
+                or _parse_hhmm(df["jam_tutup"].iloc[_i] if "jam_tutup" in df.columns else None) is not None
+            ))
+            hours_opt = st.checkbox(
+                "🕒 Optimalkan rute berdasarkan jam operasional merchant",
+                value=bool(st.session_state.hours_opt_flag and _n_hours),
+                key="_hours_opt_widget",
+                on_change=_sync_hours_opt,
+                disabled=_n_hours == 0,
+                help=(
+                    "Urutan kunjungan di dalam tiap rute diatur supaya merchant didatangi saat sedang buka "
+                    "(yang tutup lebih awal dikunjungi lebih dulu, yang buka siang belakangan), sambil tetap "
+                    "mengejar jarak terpendek. Pembagian merchant ke rute tetap mengikuti area. Kalau tidak mungkin "
+                    "memenuhi semua jam, dipilih urutan dengan pelanggaran paling sedikit. Rute yang punya jam "
+                    "operasional memakai aturan ini, jadi pengaturan prioritas tidak dipakai di rute tersebut."
+                ),
             )
-        else:
-            st.caption(f"🕒 {_n_hours} dari {len(df)} merchant punya jam operasional.")
-        hours_opt = bool(hours_opt and _n_hours)
+            if _n_hours == 0:
+                st.caption(
+                    "🕒 Belum ada jam operasional. Isi kolom **jam_buka** & **jam_tutup** di **Lihat & Edit Data Awal** "
+                    "(atau lewat Excel/CSV), lalu ceklis ini bisa dipakai."
+                )
+            else:
+                st.caption(f"🕒 {_n_hours} dari {len(df)} merchant punya jam operasional.")
+            hours_opt = bool(hours_opt and _n_hours)
 
         if not IS_PRO:
             # Mode Basic: jumlah rute tetap bisa diatur (di atas), tapi jam
@@ -4081,7 +4088,7 @@ if st.session_state.page == "Routing":
             visit_minutes = st.session_state.visit_minutes_flag
             round_trip = st.session_state.round_trip_flag
             st.caption(
-                "💡 Mode Basic: jam mulai, titik-balik, prioritas, dan multi-depot pakai pengaturan "
+                "💡 Mode Basic: jam mulai, titik-balik, prioritas, jam operasional, dan multi-depot pakai pengaturan "
                 "default. Butuh atur semua itu? Pindah ke **🛠️ Pro** di sidebar."
             )
         else:
