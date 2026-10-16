@@ -1580,6 +1580,7 @@ def pick_clicked_index(df, clicked, tooltip=None, tol_deg=2e-4):
 
 # ---------- Jam buka/tutup: isi manual di tabel Data Awal ----------
 HOURS_COLS = ("jam_buka", "jam_tutup")
+PRO_ONLY_COLS = HOURS_COLS + ("prioritas",)   # kolom data yang hanya dipakai di Mode Pro
 
 
 def normalize_hhmm_text(val):
@@ -3496,23 +3497,24 @@ def render_howto():
     with st.expander("ℹ️ Cara Pakai (3 Langkah)", expanded=False):
         st.markdown(
             "**⚡ Mode Basic vs 🛠️ Mode Pro** (tombol di atas)  \n"
-            "**Basic**: upload data → atur jumlah rute (dan titik awal kalau perlu) → buat rute → lihat hasil, "
-            "buka di Google Maps, kirim WhatsApp, atau unduh Excel. Pengaturan lainnya memakai nilai bawaan.  \n"
-            "**Pro** menambah: jam mulai & durasi kunjungan, titik-balik, prioritas merchant, jam operasional + "
-            "optimasi jam buka/tutup, multi-depot, pembagian “isi penuh”, seimbangkan beban waktu, nama kurir, "
-            "urutan manual, PDF, simpan/buka sesi, dan preset. Ganti kapan saja, data yang sudah diisi tidak hilang.\n\n"
+            "- **Basic** — paling ringkas: upload data → atur jumlah rute → buat rute. Rute dimulai 08:00, tanpa "
+            "durasi kunjungan, satu arah, dibagi otomatis per area. Titik awal boleh diisi (opsional).\n"
+            "- **Pro** — semua pengaturan lanjutan: jam mulai & durasi kunjungan, pulang-pergi, prioritas, jam "
+            "operasional, multi-depot, pembagian \"isi penuh\", seimbangkan beban waktu, nama kurir, urutan manual, "
+            "PDF, simpan sesi, dan preset.\n\n"
+            "Ganti kapan saja — data yang sudah diisi tidak hilang.\n\n"
             "**1. Kumpulkan data** 📍  \n"
             "Di **Maps Extractor**: tempel link Google Maps, cari nama merchant, atau isi manual "
             "(koordinat bisa ditempel sekaligus). Sudah punya file Excel/CSV? Upload langsung di "
             "**Routing Optimizer** — atau klik **🧪 Coba dengan data contoh** untuk melihat cara kerjanya.\n\n"
             "**2. Atur rute** 🛣️  \n"
-            "Di **Routing Optimizer**: tentukan jumlah rute (lewat maksimal merchant per rute, atau langsung jumlah "
-            "rute, mis. jumlah sales) dan titik awal (opsional, boleh link Google Maps atau koordinat). "
-            "Di **Mode Pro** kamu juga bisa mengatur jam mulai, durasi kunjungan per toko, dan apakah rute kembali "
-            "ke titik awal. Lalu klik **Buat Rute Optimal Sekarang**.\n\n"
+            "Di **Routing Optimizer**: pilih cara menentukan rute (maksimal titik per rute, atau jumlah rute "
+            "misalnya jumlah sales) dan titik awal (opsional, boleh link Google Maps atau koordinat). "
+            "Di Mode Pro kamu juga bisa mengatur jam mulai, durasi kunjungan per toko, dan apakah rute kembali ke "
+            "titik awal. Lalu klik **Buat Rute Optimal Sekarang**.\n\n"
             "**3. Pakai hasilnya** 📥  \n"
-            "Lihat urutan kunjungan dan perkiraan jam tiba, buka di Google Maps, kirim ke WhatsApp, atau unduh semua "
-            "rute sebagai Excel. Di **Mode Pro** ada juga nama kurir per rute, ubah urutan manual, dan PDF siap cetak.\n\n"
+            "Lihat urutan kunjungan dan perkiraan jam tiba, buka di Google Maps, kirim ke WhatsApp, atau unduh "
+            "semua rute sebagai Excel. Mode Pro menambah nama kurir per rute, ubah urutan manual, dan PDF siap cetak.\n\n"
             "📍 **Koordinat kosong?** Biarkan kolom `latitude`/`longitude` kosong (atau tambah kolom `alamat`) — "
             "app menawarkan pencarian otomatis lewat OpenStreetMap, hasilnya bisa dicek dulu sebelum dipakai.\n\n"
             "✏️ **Data salah?** Buka **Lihat & Edit Data Awal** untuk memperbaiki sel atau menghapus baris, lalu "
@@ -3527,16 +3529,17 @@ def render_howto():
             "**Lihat & Edit Data Awal**, atau klik titik di **Pratinjau peta** untuk mengubah status / menghapusnya.\n\n"
             "⭐ **Fitur tambahan (Mode Pro):**\n"
             "- **Prioritas** — tambah kolom `prioritas` (ya/tidak) di Excel/CSV, merchant itu dikunjungi lebih dulu.\n"
-            "- **Jam operasional** — isi kolom `jam_buka`/`jam_tutup` (format HH:MM) di Excel/CSV atau langsung di "
-            "**Lihat & Edit Data Awal**. Perkiraan jam tiba dicek otomatis dan ditandai ⚠️ kalau lewat jam tutup. "
-            "Centang **Optimalkan rute berdasarkan jam operasional** di Langkah 2: merchant yang tutup lebih awal "
-            "didahulukan, yang baru buka siang belakangan, dan kalau belum buka kurir menunggu (⏳).\n"
+            "- **Jam operasional** — isi kolom `jam_buka`/`jam_tutup` (format HH:MM) di Excel/CSV, atau manual di "
+            "**Lihat & Edit Data Awal**. Perkiraan jam tiba dicek dan ditandai ⚠️ kalau lewat jam tutup. Ceklis "
+            "**Optimalkan rute berdasarkan jam operasional** di Langkah 2 mengatur urutan supaya merchant didatangi "
+            "saat buka: yang tutup lebih awal didahulukan, yang belum buka ditunda (atau kurir menunggu sampai buka).\n"
             "- **Multi-depot** — centang \"Pakai banyak titik awal\" dan isi daftar gudang/toko pusat; "
             "tiap rute otomatis mulai dari yang terdekat.\n"
             "- **Nama kurir** — isi di tiap rute setelah dibuat, ikut masuk ke Excel, WhatsApp, dan PDF.\n"
             "- **Preset pengaturan** — simpan kombinasi pengaturan bernama, mis. “Rute Pagi Sales”.\n\n"
-            "💾 **Tips:** data tetap tersimpan selama halaman tidak di-refresh, walau kamu pindah menu. "
-            "Untuk melanjutkan di lain waktu, pakai **Simpan / Buka Sesi** (Mode Pro)."
+            "💾 **Tips:** data tetap ada selama halaman tidak di-refresh atau ditutup, walau kamu pindah menu "
+            "(login tetap aktif saat refresh, tapi data yang diupload perlu diunggah lagi). Untuk melanjutkan di "
+            "lain waktu, pakai **Simpan / Buka Sesi** (Mode Pro) atau unduh data hasil edit dari **Lihat & Edit Data Awal**."
         )
 
 
@@ -3813,8 +3816,8 @@ if st.session_state.page == "Routing":
         _edited_full = df.copy()  # data setelah edit tabel, sebelum pencarian koordinat/dedupe (untuk download)
         if not IS_PRO:
             # Prioritas & jam operasional khusus Mode Pro: di Basic kolomnya diabaikan (tidak tampil, tidak dicek,
-            # tidak dipakai). Data aslinya tetap ada, jadi muncul lagi kalau pindah ke Pro.
-            df = df.drop(columns=[c for c in (*HOURS_COLS, "prioritas") if c in df.columns])
+            # tidak dioptimasi). Isinya tidak hilang — tetap ada di file download dan muncul lagi di Pro.
+            df = df.drop(columns=[c for c in PRO_ONLY_COLS if c in df.columns])
         df = handle_missing_coordinates(df)  # isi koordinat kosong lewat pencarian otomatis
         df["latitude"] = pd.to_numeric(df["latitude"])
         df["longitude"] = pd.to_numeric(df["longitude"])
@@ -3861,7 +3864,7 @@ if st.session_state.page == "Routing":
             _flash_h = st.session_state.pop("hours_flash", None)
             if _flash_h:
                 st.warning(_flash_h)
-            _edit_cols = [c for c in EDITABLE_COLS if c in df.columns or (IS_PRO and c in HOURS_COLS)]  # Basic: prioritas & jam sudah dibuang dari df
+            _edit_cols = [c for c in EDITABLE_COLS if c in df.columns or (IS_PRO and c in HOURS_COLS)]
             _info_cols = [c for c in ("source_file", "koordinat_dari") if c in df.columns]
             _view = df.reindex(columns=["_row_key"] + _edit_cols + _info_cols).copy()
             for _tc in _edit_cols:  # kolom teks dibuat string murni supaya editor tidak error pada tipe campuran
@@ -4099,13 +4102,7 @@ if st.session_state.page == "Routing":
                 f"Merchant dibagi ke {target_routes} rute mengikuti area lokasi, "
                 f"maksimal {max_points_per_route} merchant per rute supaya beban merata."
             )
-        elif n_cluster_default > 1 and not IS_PRO:
-            split_mode = SPLIT_AUTO   # Basic: selalu per area; "isi penuh" ada di Mode Pro
-            st.caption(
-                f"Merchant dibagi ke {n_cluster_default} rute mengikuti area lokasi, masing-masing maksimal "
-                f"{max_points_per_route} merchant."
-            )
-        elif n_cluster_default > 1:
+        elif n_cluster_default > 1 and IS_PRO:
             split_mode = st.radio(
                 "Cara membagi rute",
                 [SPLIT_AUTO, SPLIT_FULL],
@@ -4129,6 +4126,12 @@ if st.session_state.page == "Routing":
                     f"Pembagian mengikuti area lokasi — {_k} rute, masing-masing maksimal {_m} merchant. "
                     "Pilih **Isi penuh** kalau ingin tiap rute berisi tepat sebanyak maksimal."
                 )
+        elif n_cluster_default > 1:
+            split_mode = SPLIT_AUTO   # Mode Basic: selalu otomatis per area ("Isi penuh" ada di Mode Pro)
+            st.caption(
+                f"Merchant dikelompokkan menurut area lokasi — {n_cluster_default} rute, masing-masing maksimal "
+                f"{max_points_per_route} merchant."
+            )
         else:
             split_mode = st.session_state.split_mode_flag if IS_PRO else SPLIT_AUTO
 
@@ -4193,10 +4196,9 @@ if st.session_state.page == "Routing":
             visit_minutes = st.session_state.visit_minutes_flag
             round_trip = st.session_state.round_trip_flag
             st.caption(
-                "💡 **Mode Basic** memakai pengaturan bawaan untuk jam mulai, durasi kunjungan, titik-balik, prioritas, "
-                "jam operasional, multi-depot, pembagian “isi penuh”, dan seimbangkan beban waktu. Butuh itu semua? "
-                "Pindah ke **🛠️ Pro** di sidebar. Di Basic, data tidak tersimpan kalau halaman di-refresh atau ditutup "
-                "(simpan/buka sesi ada di Pro)."
+                "💡 Mode Basic: rute dimulai 08:00, tanpa durasi kunjungan, satu arah, dibagi otomatis per area. "
+                "Butuh jam mulai & durasi kunjungan, pulang-pergi, prioritas, jam operasional, multi-depot, seimbangkan "
+                "beban waktu, atau simpan sesi? Pindah ke **🛠️ Pro** di sidebar."
             )
         else:
             t1, t2 = st.columns(2)
