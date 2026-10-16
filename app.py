@@ -94,6 +94,41 @@ st.markdown(
     .sidebar-brand .emoji {font-size: 1.9rem; line-height: 1;}
     .sidebar-brand .title {font-weight: 800; font-size: 1.08rem; line-height: 1.2;}
     .sidebar-brand .subtitle {font-size: 0.78rem; opacity: 0.82;}
+
+    /* ---------- Lencana "Developed by" (di atas nama aplikasi) ---------- */
+    .dev-badge {
+        position: relative; display: inline-flex; align-items: center; gap: 9px;
+        padding: 6px 16px 6px 13px; margin: 0 0 12px 0; border-radius: 999px;
+        background: rgba(128,128,128,0.08);
+    }
+    .dev-badge::before {   /* garis tepi gradien */
+        content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 1.5px;
+        background: linear-gradient(135deg, #2563EB 0%, #0D9488 100%);
+        -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+        -webkit-mask-composite: xor; mask-composite: exclude; pointer-events: none;
+    }
+    .dev-badge .dev-dot {
+        width: 8px; height: 8px; border-radius: 50%; flex: none;
+        background: linear-gradient(135deg, #2563EB 0%, #0D9488 100%);
+        animation: devPulse 2.2s ease-in-out infinite;
+    }
+    @keyframes devPulse {
+        0%, 100% {box-shadow: 0 0 0 0 rgba(13,148,136,0.55);}
+        60% {box-shadow: 0 0 0 7px rgba(13,148,136,0);}
+    }
+    .dev-badge .dev-label {
+        font-size: 0.62rem; font-weight: 700; letter-spacing: 0.18em; text-transform: uppercase;
+        opacity: 0.8; white-space: nowrap;
+    }
+    .dev-badge .dev-name {
+        font-size: 0.98rem; font-weight: 800; letter-spacing: 0.02em; padding-bottom: 1px; white-space: nowrap;
+        background: linear-gradient(90deg, #2563EB, #0D9488, #2563EB) no-repeat 0 100% / 200% 2.5px;
+        animation: devSlide 4s linear infinite;
+    }
+    @keyframes devSlide {to {background-position: -200% 100%;}}
+    @media (prefers-reduced-motion: reduce) {
+        .dev-badge .dev-dot, .dev-badge .dev-name {animation: none;}
+    }
     section[data-testid="stSidebar"] button {border-radius: 10px !important;}
 
     /* ---------- Buttons ---------- */
@@ -267,6 +302,12 @@ def empty_state(icon, title, desc):
         """,
         unsafe_allow_html=True,
     )
+
+
+DEV_BADGE_HTML = (
+    '<div class="dev-badge"><span class="dev-dot"></span>'
+    '<span class="dev-label">Developed by</span><span class="dev-name">Abdillah</span></div>'
+)
 
 
 def render_footer():
@@ -1451,6 +1492,33 @@ def _pin_html(name, color, ring, show_label):
     )
 
 
+def fit_js(map_name, south, west, north, east, padding=40, max_zoom=16):
+    """JS yang memastikan peta pas menampilkan SEMUA titik. Folium hanya menghitung zoom saat peta dibuat — kalau
+    panel (expander) sedang tertutup, ukuran peta 0 dan zoom jadi salah. Skrip ini menunggu peta benar-benar
+    tampil (ResizeObserver), lalu menjalankan fitBounds."""
+    return f"""
+(function() {{
+  var m = {map_name};
+  var b = L.latLngBounds([[{south}, {west}], [{north}, {east}]]);
+  var el = m.getContainer(), done = false;
+  function tryFit() {{
+    if (el.clientWidth > 0 && el.clientHeight > 0) {{
+      m.invalidateSize();
+      m.fitBounds(b, {{padding: [{padding}, {padding}], maxZoom: {max_zoom}}});
+      return true;
+    }}
+    return false;
+  }}
+  if (!tryFit() && typeof ResizeObserver !== "undefined") {{
+    var ro = new ResizeObserver(function() {{
+      if (!done && tryFit()) {{ done = true; ro.disconnect(); }}
+    }});
+    ro.observe(el);
+  }}
+}})();
+"""
+
+
 def build_preview_map(df, flagged, selected_idx=None, show_labels=True):
     """Peta semua titik. Warna titik = status merchant; titik janggal diberi cincin merah dan
     titik yang sedang dipilih cincin hitam. Nama merchant tampil di samping titik (opsional).
@@ -1475,11 +1543,12 @@ def build_preview_map(df, flagged, selected_idx=None, show_labels=True):
             ),
             tooltip=html_lib.escape(tip),  # tooltip dirender sebagai HTML — nama dari file harus di-escape
         ).add_to(fmap)
-    fmap.fit_bounds(
-        [[float(df["latitude"].min()), float(df["longitude"].min())],
-         [float(df["latitude"].max()), float(df["longitude"].max())]],
-        padding=(30, 30),
-    )
+    shown = df.loc[normal + special] if (normal or special) else df
+    south, north = float(shown["latitude"].min()), float(shown["latitude"].max())
+    west, east = float(shown["longitude"].min()), float(shown["longitude"].max())
+    fmap.fit_bounds([[south, west], [north, east]], padding=(40, 40), max_zoom=16)
+    # pengaman: fit ulang begitu peta benar-benar terlihat (mis. expander baru dibuka)
+    fmap.get_root().script.add_child(folium.Element(fit_js(fmap.get_name(), south, west, north, east)))
     return fmap
 
 
@@ -2680,6 +2749,7 @@ LOGIN_CSS = """
 
 LOGIN_BRAND_HTML = """
 <div class="login-brand">
+    <div style="text-align:center"><div class="dev-badge"><span class="dev-dot"></span><span class="dev-label">Developed by</span><span class="dev-name">Abdillah</span></div></div>
     <div class="login-logo">⚡</div>
     <div class="login-title">Routing &amp; Extractor</div>
     <div class="login-sub">Masuk untuk melanjutkan ke Routing Optimizer dan Maps Extractor</div>
@@ -3458,7 +3528,7 @@ if IS_MOBILE:
 else:
     with st.sidebar:
         st.markdown(
-            """
+            DEV_BADGE_HTML + """
             <div class="sidebar-brand">
                 <span class="emoji">⚡</span>
                 <div>
@@ -3483,7 +3553,6 @@ else:
             render_session_panel("side")
         st.markdown("---")
         render_user_bar("side")
-        st.caption("⚡ Developed by **Abdillah**")
 
 
 # ================================================================
