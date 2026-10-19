@@ -1627,7 +1627,7 @@ def pick_clicked_index(df, clicked, tooltip=None, tol_deg=2e-4):
 
 # ---------- Jam buka/tutup: isi manual di tabel Data Awal ----------
 HOURS_COLS = ("jam_buka", "jam_tutup")
-PRO_ONLY_COLS = HOURS_COLS + ("prioritas",)   # kolom data yang hanya dipakai di Mode Pro
+PRO_ONLY_COLS = HOURS_COLS + ("prioritas", "catatan", "tgl_kunjungan")   # kolom data yang hanya dipakai di Mode Pro
 
 
 def normalize_hhmm_text(val):
@@ -1671,8 +1671,55 @@ def normalize_hours_changes(changed):
     return ok, bad
 
 
+def normalize_visit_date(val):
+    """Tanggal kunjungan → 'YYYY-MM-DD'. Kosong → ''. Format tak dikenal → None (tidak disimpan).
+    Menerima YYYY-MM-DD, DD/MM/YYYY, DD-MM-YYYY, dan datetime/Timestamp dari Excel."""
+    if val is None or (isinstance(val, float) and math.isnan(val)):
+        return ""
+    if hasattr(val, "strftime"):
+        try:
+            return val.strftime("%Y-%m-%d")
+        except Exception:
+            return None
+    text = str(val).strip()
+    if text in ("", "nan", "None", "NaT"):
+        return ""
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"):
+        try:
+            return datetime.datetime.strptime(text[:10] if fmt.startswith("%Y-") else text, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    try:  # "2026-10-19 00:00:00" dari Excel
+        return datetime.datetime.strptime(text[:10], "%Y-%m-%d").strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def normalize_date_changes(changed):
+    """Rapikan perubahan kolom tgl_kunjungan. Return (perubahan_valid, daftar_salah[(row_key, nilai)])."""
+    ok, bad = {}, []
+    for key, cols in changed.items():
+        for col, val in cols.items():
+            if col == "tgl_kunjungan":
+                norm = normalize_visit_date(val)
+                if norm is None:
+                    bad.append((key, val))
+                    continue
+                val = norm
+            ok.setdefault(key, {})[col] = val
+    return ok, bad
+
+
+def _clean_text(v, limit=200):
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return ""
+    t = str(v).strip()
+    return "" if t in ("nan", "None") else t[:limit]
+
+
 # ---------- Edit data langsung di tabel ----------
-EDITABLE_COLS = ("merchant_name", "latitude", "longitude", "status", "alamat", "prioritas", "jam_buka", "jam_tutup")
+EDITABLE_COLS = ("merchant_name", "latitude", "longitude", "status", "alamat", "prioritas", "jam_buka", "jam_tutup",
+                 "catatan", "tgl_kunjungan")
 
 
 def apply_data_edits(df, edits):
@@ -2121,6 +2168,95 @@ def _move_stop(route_id, action):
     res["excel_bytes"] = build_excel_bytes(res["route_summaries"])
 
 
+def _release_visit_holds():
+    """Dipanggil saat tombol Buat Rute ditekan: merchant yang sudah ditandai selesai kini benar-benar dilewati."""
+    st.session_state.visit_hold_keys = set()
+
+
+def _visit_sig(name, lat, lon):
+    try:
+        return (str(name).strip(), round(float(lat), 5), round(float(lon), 5))
+    except (TypeError, ValueError):
+        return (str(name).strip(), None, None)
+
+
+def render_visit_editor(r):
+    """Tabel kecil di tiap rute: ubah status, catatan, dan tanggal kunjungan tanpa kembali ke tabel Data Awal.
+    Disimpan sebagai edit data (sama seperti tabel Data Awal), jadi ikut terbawa ke unduhan dan sesi."""
+    ss = st.session_state
+    rid = r["route_id"]
+    kmap, vstate = ss.get("row_key_map", {}), ss.get("visit_state", {})
+    rows = []
+    for _, row in r["df"].iterrows():
+        key = kmap.get(_visit_sig(row["merchant_name"], row["latitude"], row["longitude"]))
+        if key is None or key not in vstate:
+            continue
+        v = vstate[key]
+        rows.append({"_key": key, "No": int(row["sequence"]), "Merchant": str(row["merchant_name"]),
+                     "Status": v["status"], "Catatan": v["catatan"], "Tgl kunjungan": v["tgl"]})
+    if not rows:
+        return
+    base = pd.DataFrame(rows)
+    st.markdown("**📝 Hasil kunjungan**")
+    st.caption(
+        "Isi status dan catatan setelah dikunjungi, lalu **Simpan**. Tanggal terisi otomatis hari ini (boleh diubah, "
+        "format YYYY-MM-DD). Merchant yang ditandai **sudah akuisisi / belum tertarik** tetap tampil di rute ini dan "
+        "baru dilewati saat kamu membuat rute lagi."
+    )
+    with st.form(f"visit_form_{rid}_{ss.data_edit_nonce}"):
+        edited = st.data_editor(
+            base, key=f"visit_ed_{rid}_{ss.data_edit_nonce}", hide_index=True, num_rows="fixed", width="stretch",
+            disabled=["_key", "No", "Merchant"],
+            column_config={
+                "_key": None,
+                "Status": st.column_config.SelectboxColumn("Status", options=STATUS_OPTIONS, required=True, width="medium"),
+                "Catatan": st.column_config.TextColumn("Catatan", max_chars=200, width="large"),
+                "Tgl kunjungan": st.column_config.TextColumn("Tgl kunjungan", max_chars=10, width="small"),
+            },
+            **TABLE_KW,
+        )
+        saved = st.form_submit_button("💾 Simpan hasil kunjungan", type="primary")
+    if not saved:
+        return
+    today = datetime.date.today().strftime("%Y-%m-%d")
+    changes, bad = {}, []
+    for _, row in edited.iterrows():
+        key, old = row["_key"], vstate[row["_key"]]
+        new_status = row["Status"] if row["Status"] in STATUS_OPTIONS else old["status"]
+        new_note = _clean_text(row["Catatan"])
+        new_tgl = normalize_visit_date(row["Tgl kunjungan"])
+        if new_tgl is None:
+            bad.append(f"{row['Merchant']} → “{row['Tgl kunjungan']}”")
+            new_tgl = old["tgl"]
+        chg = {}
+        if new_status != old["status"]:
+            chg["status"] = new_status
+        if new_note != old["catatan"]:
+            chg["catatan"] = new_note
+        if new_tgl != old["tgl"]:
+            chg["tgl_kunjungan"] = new_tgl
+        elif chg:  # status/catatan diubah, tanggal tidak disentuh → hari ini
+            chg["tgl_kunjungan"] = today
+        if chg:
+            changes[key] = chg
+    if bad:
+        st.warning("⚠️ Tanggal bukan format YYYY-MM-DD dan tidak diubah: " + "; ".join(bad[:6]))
+    if not changes:
+        if not bad:
+            st.info("Belum ada perubahan untuk disimpan.")
+        return
+    for key, chg in changes.items():
+        ss.data_edits["changed"].setdefault(key, {}).update(chg)
+        if "status" in chg:
+            if chg["status"] in STATUS_EXCLUDED:
+                ss.visit_hold_keys.add(key)
+            else:
+                ss.visit_hold_keys.discard(key)
+    ss.data_edit_nonce += 1
+    ss.visit_flash = f"✅ Hasil kunjungan {len(changes)} merchant disimpan."
+    st.rerun()
+
+
 def render_reorder_controls(r):
     """Pilih satu merchant lalu geser naik/turun — sederhana dan nyaman di HP."""
     rid = r["route_id"]
@@ -2546,6 +2682,14 @@ if "multi_depot_next_id" not in st.session_state:
     st.session_state.multi_depot_next_id = 1
 if "use_multi_depot_flag" not in st.session_state:
     st.session_state.use_multi_depot_flag = False
+if "visit_hold_keys" not in st.session_state:
+    st.session_state.visit_hold_keys = set()  # merchant yang baru ditandai selesai: dilewati baru saat rute dibuat ulang
+if "visit_state" not in st.session_state:
+    st.session_state.visit_state = {}         # {row_key: {status, catatan, tgl}} dari data saat ini
+if "row_key_map" not in st.session_state:
+    st.session_state.row_key_map = {}         # {(nama, lat, lon): row_key} untuk mencocokkan baris hasil rute
+if "visit_flash" not in st.session_state:
+    st.session_state.visit_flash = None
 if "driver_names" not in st.session_state:
     st.session_state.driver_names = {}  # {route_id: nama}
 if "geocode_cache" not in st.session_state:
@@ -3592,6 +3736,9 @@ def render_howto():
                 "- **Jam operasional** — isi `jam_buka`/`jam_tutup` (HH:MM) di Excel/CSV atau di **Lihat & Edit Data Awal**. "
                 "Jam tiba yang lewat jam tutup ditandai ⚠️. Ceklis **Optimalkan rute berdasarkan jam operasional** di "
                 "Langkah 2 mengatur urutan: yang tutup lebih awal didahulukan, yang belum buka ditunda (atau petugas menunggu ⏳).\n"
+                "- **Hasil kunjungan** — di tiap rute (bagian bawah), ubah status, isi catatan, dan tanggal kunjungan "
+                "setelah dikunjungi lalu Simpan. Merchant yang ditandai sudah akuisisi / belum tertarik baru dilewati saat "
+                "rute dibuat lagi. Datanya ikut ke **Lihat & Edit Data Awal** dan unduhan Excel.\n"
                 "- **Multi-depot** — tentukan titik awal untuk tiap rute (Rute 1, Rute 2, …); jumlah rute diatur di Langkah 2.\n"
                 "- **Seimbangkan beban waktu** — durasi tiap rute dibuat lebih mirip.\n"
                 "- **Nama petugas** — isi di tiap rute setelah dibuat; ikut ke Excel, WhatsApp, dan PDF.\n"
@@ -3889,6 +4036,11 @@ if st.session_state.page == "Routing":
                         "prioritas": st.column_config.CheckboxColumn(
                             "⭐ prioritas", default=False,
                             help="Centang kalau merchant ini harus dikunjungi lebih dulu di rutenya."),
+                        "catatan": st.column_config.TextColumn(
+                            "📝 catatan", max_chars=200, help="Catatan hasil kunjungan."),
+                        "tgl_kunjungan": st.column_config.TextColumn(
+                            "📅 tgl_kunjungan", max_chars=10,
+                            help="Tanggal kunjungan terakhir, format YYYY-MM-DD (mis. 2026-10-19). Kosong = belum pernah."),
                         "jam_buka": st.column_config.TextColumn(
                             "🕒 jam_buka", max_chars=8,
                             help="Jam buka, format HH:MM (mis. 08:00). Kosong = tidak dicek."),
@@ -3903,6 +4055,7 @@ if st.session_state.page == "Routing":
                 _del, _chg = diff_data_edits(_view, _edited, _edit_cols)
                 _chg, _bad = normalize_hours_changes(_chg)
                 _chg = normalize_priority_changes(_chg)
+                _chg, _bad_d = normalize_date_changes(_chg)
                 _bad_msg = ""
                 if _bad:
                     _names = _view.set_index("_row_key")["merchant_name"]
@@ -3910,6 +4063,12 @@ if st.session_state.page == "Routing":
                         "⚠️ Jam berikut bukan format HH:MM (mis. 08:00) dan tidak disimpan: "
                         + "; ".join(f"{_names.get(k, k)} → {c} = “{v}”" for k, c, v in _bad[:8])
                         + (f" (+{len(_bad) - 8} lagi)" if len(_bad) > 8 else "")
+                    )
+                if _bad_d:
+                    _names_d = _view.set_index("_row_key")["merchant_name"]
+                    _bad_msg = (_bad_msg + "\n\n" if _bad_msg else "") + (
+                        "⚠️ Tanggal berikut bukan format YYYY-MM-DD dan tidak disimpan: "
+                        + "; ".join(f"{_names_d.get(k, k)} = “{v}”" for k, v in _bad_d[:8])
                     )
                 if _del or _chg:
                     _store = st.session_state.data_edits
@@ -4035,15 +4194,31 @@ if st.session_state.page == "Routing":
                 st.stop()
 
         # Merchant berstatus "sudah akuisisi" / "belum tertarik" tidak dimasukkan ke rute.
-        _skip_status = df["status"].isin(STATUS_EXCLUDED)
+        # Hasil kunjungan (Pro): snapshot status/catatan/tanggal tiap merchant untuk tabel di hasil rute.
+        _vs = {}
+        if IS_PRO:
+            _cat = df["catatan"] if "catatan" in df.columns else pd.Series([""] * len(df), index=df.index)
+            _tgl = df["tgl_kunjungan"] if "tgl_kunjungan" in df.columns else pd.Series([""] * len(df), index=df.index)
+            for _k, _st, _c, _t in zip(df["_row_key"], df["status"], _cat, _tgl):
+                _vs[_k] = {"status": _st, "catatan": _clean_text(_c), "tgl": normalize_visit_date(_t) or ""}
+        st.session_state.visit_state = _vs
+        # Merchant yang BARU ditandai selesai dari hasil rute tetap "ditahan" di data sampai rute dibuat ulang,
+        # supaya hasil rute yang sedang dilihat tidak hilang.
+        _held = df["_row_key"].isin(st.session_state.visit_hold_keys) if IS_PRO else pd.Series(False, index=df.index)
+        _excl_any = df["status"].isin(STATUS_EXCLUDED)
+        _skip_status = _excl_any & ~_held
+        _n_held = int((_excl_any & _held).sum())
         _n_excl_status = int(_skip_status.sum())
-        _n_acq = int((df["status"] == STATUS_AKUISISI).sum())
-        _n_not = int((df["status"] == STATUS_TIDAK).sum())
+        _n_acq = int(((df["status"] == STATUS_AKUISISI) & ~_held).sum())
+        _n_not = int(((df["status"] == STATUS_TIDAK) & ~_held).sum())
         if _skip_status.any():
             df = df[~_skip_status].reset_index(drop=True)
             if df.empty:
                 st.info("Semua merchant berstatus sudah akuisisi / belum tertarik — tidak ada yang bisa dirutekan.")
                 st.stop()
+        st.session_state.row_key_map = {}
+        for _k, _n, _la, _lo in zip(df["_row_key"], df["merchant_name"], df["latitude"], df["longitude"]):
+            st.session_state.row_key_map.setdefault(_visit_sig(_n, _la, _lo), _k)
         df = df.drop(columns=["_row_key"], errors="ignore")
 
         _n_priority = int(df["prioritas"].apply(is_truthy).sum()) if "prioritas" in df.columns else 0
@@ -4065,6 +4240,8 @@ if st.session_state.page == "Routing":
         if _n_excl_status:
             _chk_items.append(f"🚫 **{_n_excl_status}** tidak diikutkan karena status (sudah akuisisi {_n_acq}, belum tertarik {_n_not})")
         _info_items = []
+        if _n_held:
+            _info_items.append(f"✅ {_n_held} merchant baru ditandai selesai — dilewati saat rute dibuat ulang")
         if _n_priority:
             _info_items.append(f"⭐ {_n_priority} merchant prioritas dikunjungi lebih dulu")
         if _n_hours_rows:
@@ -4349,7 +4526,7 @@ if st.session_state.page == "Routing":
         )
 
         st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
-        run = st.button("🚀 Buat Rute Optimal Sekarang", type="primary", width='stretch')
+        run = st.button("🚀 Buat Rute Optimal Sekarang", type="primary", width='stretch', on_click=_release_visit_holds)
 
         # Fingerprint of the current input+settings, so stale results (from a
         # previous file/slider value) don't linger after the inputs change.
@@ -4625,6 +4802,9 @@ if st.session_state.page == "Routing":
                         format_duration(total_duration + total_visit),
                     )
 
+            _vf = st.session_state.pop("visit_flash", None)
+            if _vf:
+                st.toast(_vf)
             _tn_km = sum(r.get("naive_distance_km", r["distance_km"]) for r in route_summaries)
             if _tn_km > 0 and len(df) >= 3 and _tn_km - total_distance > 0.05:
                 st.info(
@@ -4860,6 +5040,9 @@ if st.session_state.page == "Routing":
                                 polyline_coords.append(polyline_coords[0])
                             folium.PolyLine(polyline_coords, weight=4, color=color).add_to(fmap)
                             st_folium(fmap, width=None, height=MAP_H, key=f"map_{route_id}", returned_objects=[])
+
+                        if IS_PRO:
+                            render_visit_editor(r)
 
             elif _view.startswith("🗺️"):
                 st_folium(
