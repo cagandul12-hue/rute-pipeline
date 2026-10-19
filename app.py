@@ -783,6 +783,43 @@ def nearest_depot_index(depots, lat, lon):
     return best_i
 
 
+def assign_routes_to_depots(df, depots):
+    """Tentukan titik awal (depot) tiap rute. df: kolom route/latitude/longitude; depots: list dict lat/lon.
+    Mengembalikan {route_id: indeks_depot}. Tiap depot dapat minimal satu rute kalau jumlah rute cukup
+    (pasangan rute↔depot dengan total jarak terpendek); rute sisanya ikut depot terdekat dari pusat rutenya."""
+    ids = sorted(df["route"].unique())
+    cents = {
+        rid: (float(g["latitude"].mean()), float(g["longitude"].mean()))
+        for rid, g in df.groupby("route")
+    }
+    cost = [[haversine(cents[rid][0], cents[rid][1], d["lat"], d["lon"]) for d in depots] for rid in ids]
+    mapping = {}
+    try:
+        from scipy.optimize import linear_sum_assignment
+        rows, cols = linear_sum_assignment(cost)
+        for r_i, c_i in zip(rows, cols):
+            mapping[ids[int(r_i)]] = int(c_i)
+    except Exception:
+        # Tanpa scipy: pilih rute terdekat untuk tiap depot secara berurutan (tanpa bentrok).
+        free = list(range(len(ids)))
+        for d_i in range(len(depots)):
+            if not free:
+                break
+            r_i = min(free, key=lambda k: cost[k][d_i])
+            mapping[ids[r_i]] = d_i
+            free.remove(r_i)
+    for k, rid in enumerate(ids):
+        if rid not in mapping:
+            mapping[rid] = min(range(len(depots)), key=lambda d_i: cost[k][d_i])
+    return mapping
+
+
+def _n_depots_filled():
+    """Jumlah baris titik awal (multi-depot) yang sudah diisi lokasinya — untuk perkiraan jumlah rute di UI."""
+    ss = st.session_state
+    return sum(1 for rid in ss.multi_depot_rows if str(ss.get(f"depot_loc_{rid}", "") or "").strip())
+
+
 # ---------- Jam operasional (time windows) ----------
 def _parse_hhmm(val):
     """Baca 'HH:MM' (atau datetime.time/Timestamp) jadi datetime.time; None kalau gagal/kosong."""
@@ -3545,7 +3582,7 @@ def render_howto():
                 "- **Jam operasional** — isi `jam_buka`/`jam_tutup` (HH:MM) di Excel/CSV atau di **Lihat & Edit Data Awal**. "
                 "Jam tiba yang lewat jam tutup ditandai ⚠️. Ceklis **Optimalkan rute berdasarkan jam operasional** di "
                 "Langkah 2 mengatur urutan: yang tutup lebih awal didahulukan, yang belum buka ditunda (atau kurir menunggu ⏳).\n"
-                "- **Multi-depot** — beberapa titik awal; tiap rute mulai dari yang terdekat.\n"
+                "- **Multi-depot** — beberapa titik awal; jumlah rute tetap diatur di Langkah 2, tiap rute mulai dari titik awal terdekat.\n"
                 "- **Seimbangkan beban waktu** — durasi tiap rute dibuat lebih mirip.\n"
                 "- **Nama kurir** — isi di tiap rute setelah dibuat; ikut ke Excel, WhatsApp, dan PDF.\n"
                 "- **Preset** — simpan kombinasi pengaturan bernama, mis. “Rute Pagi Sales”.\n\n"
@@ -4043,8 +4080,8 @@ if st.session_state.page == "Routing":
             st.markdown("**🧭 Pembagian rute**")
             if use_multi_depot:
                 st.info(
-                    f"ℹ️ Multi-depot aktif — pengaturan di bawah ini **diabaikan**. Jumlah rute otomatis "
-                    f"mengikuti jumlah titik awal yang kamu isi di Langkah 1.",
+                    "Multi-depot aktif — merchant dibagi ke rute sesuai pengaturan di bawah, lalu tiap rute dimulai dari "
+                    "titik awal terdekat. Di mode \"maksimal per rute\", jumlah rute minimal sebanyak titik awal.",
                     icon="🏭",
                 )
             plan_mode = st.radio(
@@ -4057,6 +4094,8 @@ if st.session_state.page == "Routing":
             )
             max_points_per_route, target_routes = _plan_control(df, plan_mode)
             n_cluster_default = target_routes or math.ceil(len(df) / max_points_per_route)
+            if use_multi_depot and target_routes is None:
+                n_cluster_default = min(max(n_cluster_default, _n_depots_filled(), 1), len(df))
             st.caption(f"🧭 Perkiraan: **{len(df)} merchant → {n_cluster_default} rute**")
 
             if target_routes is not None:
@@ -4065,7 +4104,7 @@ if st.session_state.page == "Routing":
                     f"Merchant dibagi ke {target_routes} rute mengikuti area lokasi, "
                     f"maksimal {max_points_per_route} merchant per rute supaya beban merata."
                 )
-            elif n_cluster_default > 1 and IS_PRO:
+            elif n_cluster_default > 1 and IS_PRO and not use_multi_depot:
                 split_mode = st.radio(
                     "Cara membagi rute",
                     [SPLIT_AUTO, SPLIT_FULL],
@@ -4142,10 +4181,9 @@ if st.session_state.page == "Routing":
                     key="_use_multi_depot_widget",
                     on_change=_sync_use_multi_depot,
                     help=(
-                        "Aktifkan kalau kurir berangkat dari beberapa gudang/toko berbeda. Jumlah rute akan "
-                        "OTOMATIS mengikuti jumlah titik awal di bawah — tiap titik awal jadi 1 rute, berisi "
-                        "merchant yang paling dekat dengannya. Menggantikan 'Titik Awal' tunggal di atas dan "
-                        "pengaturan jumlah rute di Langkah 2."
+                        "Aktifkan kalau kurir berangkat dari beberapa gudang/toko berbeda. Merchant dibagi ke rute "
+                        "sesuai pengaturan jumlah rute di Langkah 2, lalu tiap rute dimulai dari titik awal terdekat. "
+                        "Menggantikan 'Titik Awal' tunggal di atas."
                     ),
                 )
             if use_multi_depot:
@@ -4190,7 +4228,10 @@ if st.session_state.page == "Routing":
 
                 _n_filled = sum(1 for _, loc in depot_rows_raw if loc.strip())
                 if _n_filled:
-                    st.success(f"✅ {_n_filled} titik awal terisi → akan otomatis membuat **{_n_filled} rute**.")
+                    st.success(
+                            f"✅ {_n_filled} titik awal terisi → tiap rute dimulai dari titik awal terdekat; "
+                            "jumlah rute mengikuti pengaturan di Langkah 2."
+                        )
                 else:
                     st.caption("Isi minimal satu titik awal (link Google Maps atau koordinat) di atas.")
 
@@ -4316,8 +4357,7 @@ if st.session_state.page == "Routing":
                 st.stop()
 
             # Daftar depot (kalau multi-depot aktif) — resolve DULU, karena kalau ada
-            # depot valid, jumlah & isi rute ditentukan langsung oleh depot ini, bukan
-            # oleh pengaturan "Atur Pembagian Rute" (Langkah 2) sama sekali.
+            # depot valid, tiap rute dimulai dari depot terdekat (jumlah rute tetap mengikuti Langkah 2).
             depots = []
             if use_multi_depot:
                 depots, depot_errs = parse_depot_rows(depot_rows_raw)
@@ -4342,31 +4382,30 @@ if st.session_state.page == "Routing":
                         start_name = parsed_name or "START POINT"
 
                 balance_info = None
-                if depots:
-                    # Tiap merchant otomatis masuk ke titik awal TERDEKAT — jadi jumlah
-                    # rute = jumlah titik awal, persis seperti yang diharapkan.
-                    df["route"] = df.apply(
-                        lambda row: nearest_depot_index(depots, row["latitude"], row["longitude"]), axis=1
-                    )
+                # Jumlah rute: sesuai pengaturan Langkah 2. Dengan multi-depot, di mode "maksimal per rute"
+                # jumlah rute minimal sebanyak titik awal supaya tiap titik awal dipakai; di mode "jumlah rute"
+                # angkanya persis seperti yang diatur. Tiap rute lalu dimulai dari titik awal terdekat.
+                n_cluster = target_routes or math.ceil(len(df) / max_points_per_route)
+                if depots and target_routes is None:
+                    n_cluster = max(n_cluster, len(depots))
+                n_cluster = max(1, min(n_cluster, len(df)))
+                if target_routes is None and n_cluster > 1 and split_mode == SPLIT_FULL and not depots:
+                    df["route"] = fill_clusters(df, max_points_per_route)
                 else:
-                    n_cluster = target_routes or math.ceil(len(df) / max_points_per_route)
-                    n_cluster = max(1, min(n_cluster, len(df)))
-                    if target_routes is None and n_cluster > 1 and split_mode == SPLIT_FULL:
-                        df["route"] = fill_clusters(df, max_points_per_route)
-                    else:
-                        coords = df[["latitude", "longitude"]]
-                        kmeans = KMeans(n_clusters=n_cluster, random_state=42, n_init=10)
-                        df["route"] = kmeans.fit_predict(coords)
-                        df = balance_clusters(df, max_points_per_route)
-                        if balance_time and df["route"].nunique() > 1:
-                            _start_xy = (start_lat, start_lon) if (start_lat and start_lon) else None
-                            # Mode "jumlah rute": batas maksimal per rute hanya turunan (pembulatan),
-                            # jadi tidak dipakai. Mode "maksimal titik per rute": batasnya tetap dihormati.
-                            _cap = max_points_per_route if target_routes is None else None
-                            new_labels, balance_info = balance_by_time(
-                                df, df["route"].to_numpy(), int(visit_minutes), start=_start_xy, max_points=_cap,
-                            )
-                            df["route"] = new_labels
+                    coords = df[["latitude", "longitude"]]
+                    kmeans = KMeans(n_clusters=n_cluster, random_state=42, n_init=10)
+                    df["route"] = kmeans.fit_predict(coords)
+                    df = balance_clusters(df, max_points_per_route)
+                    if balance_time and df["route"].nunique() > 1:
+                        _start_xy = (start_lat, start_lon) if (start_lat and start_lon) else None
+                        # Mode "jumlah rute": batas maksimal per rute hanya turunan (pembulatan),
+                        # jadi tidak dipakai. Mode "maksimal titik per rute": batasnya tetap dihormati.
+                        _cap = max_points_per_route if target_routes is None else None
+                        new_labels, balance_info = balance_by_time(
+                            df, df["route"].to_numpy(), int(visit_minutes), start=_start_xy, max_points=_cap,
+                        )
+                        df["route"] = new_labels
+                route_depot = assign_routes_to_depots(df, depots) if depots else {}
 
                 all_routes = []
                 route_summaries = []
@@ -4381,8 +4420,7 @@ if st.session_state.page == "Routing":
                     route_df = df[df["route"] == route_id].reset_index(drop=True)
 
                     if depots:
-                        # route_id SUDAH berupa indeks depot (lihat nearest_depot_index di atas).
-                        chosen_depot = depots[int(route_id)]
+                        chosen_depot = depots[route_depot[route_id]]
                         route_start_name = chosen_depot["name"]
                         route_start_lat, route_start_lon = chosen_depot["lat"], chosen_depot["lon"]
                     else:
@@ -4456,6 +4494,7 @@ if st.session_state.page == "Routing":
                             "round_trip": round_trip,
                             "has_start": has_start,
                             "depot_name": route_start_name if has_start else "",
+                            "depot_idx": route_depot.get(route_id),
                             "driver": st.session_state.driver_names.get(route_id, ""),
                             # data mentah untuk ubah-urutan manual (tanpa memanggil OSRM lagi)
                             "route_df": route_df,
@@ -4549,11 +4588,13 @@ if st.session_state.page == "Routing":
                     f"{format_duration(_bal['before_spread_min'] * 60)} menjadi {format_duration(_bal['after_spread_min'] * 60)}; "
                     f"rute terlama dari ±{format_duration(_bal['before_max_min'] * 60)} menjadi ±{format_duration(_bal['after_max_min'] * 60)}."
                 )
-            if result.get("multi_depot_used") and len(route_summaries) < result.get("n_depots", 0):
-                st.caption(
-                    f"ℹ️ {result['n_depots']} titik awal diisi, tapi hanya {len(route_summaries)} yang "
-                    "kebagian merchant terdekat — titik awal lain tidak dipakai di hasil ini."
-                )
+            if result.get("multi_depot_used"):
+                _used_dep = len({r.get("depot_idx") for r in route_summaries})
+                if _used_dep < result.get("n_depots", 0):
+                    st.caption(
+                        f"ℹ️ {result['n_depots']} titik awal diisi, tapi dengan {len(route_summaries)} rute hanya "
+                        f"{_used_dep} yang terpakai — tambah jumlah rute supaya semua titik awal dipakai."
+                    )
 
             total_distance = sum(r["distance_km"] for r in route_summaries)
             total_duration = sum(r["duration_sec"] for r in route_summaries)
