@@ -682,7 +682,7 @@ def solve_tsp_time_windows(distance_matrix, duration_matrix, windows, visit_sec,
                            round_trip=False, first_is_start=False):
     """Urutan kunjungan yang meminimalkan jarak SAMBIL tiba saat merchant buka.
 
-    - Belum buka saat rute sampai → solver mengunjungi merchant lain dulu; kalau tidak ada yang lain, kurir
+    - Belum buka saat rute sampai → solver mengunjungi merchant lain dulu; kalau tidak ada yang lain, petugas
       menunggu sampai buka (jadwal akhir memakai aturan yang sama: jam tiba = jam buka).
     - Lewat jam tutup bersifat "lunak": kalau mustahil dipenuhi semua, solver memilih urutan dengan pelanggaran
       terkecil — bukan gagal. Merchant yang tutup lebih awal otomatis didahulukan. Return daftar indeks (format sama
@@ -1889,7 +1889,7 @@ def build_schedule_waits(duration_matrix, order, start_dt, visit_sec, first_is_s
     """Jam tiba/selesai tiap titik sepanjang urutan kunjungan, dengan waktu tunggu.
 
     Titik awal (kalau ada) tidak dihitung durasi kunjungan. `open_secs` = {indeks_titik: detik sejak jam mulai
-    rute}: kalau tiba sebelum merchant buka, kurir MENUNGGU sampai buka (jam tiba = jam buka).
+    rute}: kalau tiba sebelum merchant buka, petugas MENUNGGU sampai buka (jam tiba = jam buka).
     Mengembalikan (jam_tiba, jam_selesai, jam_kembali_atau_None, jam_selesai_rute, detik_tunggu_per_titik)."""
     open_secs = open_secs or {}
     arrivals, departs, waits = [], [], []
@@ -1926,7 +1926,7 @@ def build_whatsapp_text(r, map_links):
         f"*Rute {r['route_id'] + 1}* — {len(df)} titik · ~{r['distance_km']:.1f} km · ~{format_duration(total_sec)}"
     ]
     if r.get("driver"):
-        lines.append(f"🧑‍✈️ Kurir: {r['driver']}")
+        lines.append(f"🧑‍✈️ Petugas: {r['driver']}")
     if r.get("depot_name"):
         lines.append(f"🏭 Titik awal: {r['depot_name']}")
     if r.get("finish_label"):
@@ -2008,7 +2008,7 @@ def build_excel_bytes(route_summaries):
     for r in route_summaries:
         d = r["df"].copy()
         if r.get("driver"):
-            d["kurir"] = r["driver"]
+            d["petugas"] = r["driver"]
         if r.get("depot_name"):
             d["titik_awal"] = r["depot_name"]
         parts.append(d)
@@ -2020,7 +2020,7 @@ def build_excel_bytes(route_summaries):
         saved_km = naive_km - r["distance_km"]
         summary_rows.append({
             "rute": f"Rute {r['route_id'] + 1}",
-            "kurir": r.get("driver", ""),
+            "petugas": r.get("driver", ""),
             "titik_awal": r.get("depot_name", ""),
             "jumlah_titik": len(r["df"]),
             "jarak_km": round(r["distance_km"], 2),
@@ -2322,7 +2322,7 @@ if PDF_OK:
             self.canv._route_label = self.label
 
     class _CheckBox(Flowable):
-        """Kotak kosong untuk dicentang kurir dengan pena."""
+        """Kotak kosong untuk dicentang petugas dengan pena."""
         def __init__(self, size=5.0 * mm):
             super().__init__()
             self.size = size
@@ -2351,7 +2351,7 @@ def _qr_drawing(url, size):
 
 
 def build_routes_pdf(payloads):
-    """Satu PDF; tiap rute mulai di halaman baru. Untuk satu rute = lembar cetak per kurir."""
+    """Satu PDF; tiap rute mulai di halaman baru. Untuk satu rute = lembar cetak per petugas."""
     buf = io.BytesIO()
     doc = BaseDocTemplate(
         buf, pagesize=A4, leftMargin=14 * mm, rightMargin=14 * mm,
@@ -2421,9 +2421,9 @@ def build_routes_pdf(payloads):
             parts.append(f"Titik awal: {xml_escape(p['depot_name'])}")
         story.append(Paragraph("  |  ".join(parts), st_meta))
         story.append(Spacer(1, 2 * mm))
-        kurir_val = f"<b>{xml_escape(p['driver'])}</b>" if p.get("driver") else "________________________________"
+        petugas_val = f"<b>{xml_escape(p['driver'])}</b>" if p.get("driver") else "________________________________"
         story.append(Paragraph(
-            f"Kurir: {kurir_val} &nbsp;&nbsp;&nbsp; Kendaraan / Plat: ____________________", st_meta))
+            f"Petugas: {petugas_val} &nbsp;&nbsp;&nbsp; Kendaraan / Plat: ____________________", st_meta))
         if p["manual"]:
             story.append(Spacer(1, 1.5 * mm))
             story.append(Paragraph("Urutan kunjungan telah disesuaikan secara manual.", st_small))
@@ -3512,7 +3512,7 @@ def render_app_mode_toggle(prefix):
             "🛠️ Pro", key=f"{prefix}_appmode_pro", width='stretch',
             type="primary" if mode == "Pro" else "secondary",
             on_click=_set_app_mode, args=("Pro",),
-            help="Semua pengaturan: multi-depot, prioritas, jam operasional, nama kurir, urutan manual, PDF, simpan sesi, dll.",
+            help="Semua pengaturan: multi-depot, prioritas, jam operasional, nama petugas, urutan manual, PDF, simpan sesi, dll.",
         )
 
 
@@ -3572,7 +3572,7 @@ def render_howto():
                 "- **⚡ Basic** — paling ringkas: upload data → atur jumlah rute → buat rute. Rute dimulai 08:00, "
                 "tanpa durasi kunjungan, satu arah, dibagi otomatis per area. Titik awal boleh diisi (opsional).\n"
                 "- **🛠️ Pro** — semua pengaturan lanjutan: jam mulai & durasi kunjungan, pulang-pergi, prioritas, jam "
-                "operasional, multi-depot, pembagian \"isi penuh\", seimbangkan beban waktu, nama kurir, urutan manual, "
+                "operasional, multi-depot, pembagian \"isi penuh\", seimbangkan beban waktu, nama petugas, urutan manual, "
                 "PDF, simpan sesi, dan preset."
             )
         with t_more:
@@ -3591,10 +3591,10 @@ def render_howto():
                 "di Excel/CSV); merchant itu dikunjungi lebih dulu di rutenya.\n"
                 "- **Jam operasional** — isi `jam_buka`/`jam_tutup` (HH:MM) di Excel/CSV atau di **Lihat & Edit Data Awal**. "
                 "Jam tiba yang lewat jam tutup ditandai ⚠️. Ceklis **Optimalkan rute berdasarkan jam operasional** di "
-                "Langkah 2 mengatur urutan: yang tutup lebih awal didahulukan, yang belum buka ditunda (atau kurir menunggu ⏳).\n"
+                "Langkah 2 mengatur urutan: yang tutup lebih awal didahulukan, yang belum buka ditunda (atau petugas menunggu ⏳).\n"
                 "- **Multi-depot** — tentukan titik awal untuk tiap rute (Rute 1, Rute 2, …); jumlah rute diatur di Langkah 2.\n"
                 "- **Seimbangkan beban waktu** — durasi tiap rute dibuat lebih mirip.\n"
-                "- **Nama kurir** — isi di tiap rute setelah dibuat; ikut ke Excel, WhatsApp, dan PDF.\n"
+                "- **Nama petugas** — isi di tiap rute setelah dibuat; ikut ke Excel, WhatsApp, dan PDF.\n"
                 "- **Preset** — simpan kombinasi pengaturan bernama, mis. “Rute Pagi Sales”.\n\n"
                 "💾 **Tips:** data tetap ada selama halaman tidak di-refresh atau ditutup, walau pindah menu (login "
                 "tetap aktif saat refresh, tapi file yang diupload perlu diunggah lagi). Untuk melanjutkan di lain "
@@ -4189,7 +4189,7 @@ if st.session_state.page == "Routing":
                     key="_use_multi_depot_widget",
                     on_change=_sync_use_multi_depot,
                     help=(
-                        "Aktifkan kalau tiap rute berangkat dari titik berbeda (gudang/toko/rumah kurir). Jumlah rute diatur "
+                        "Aktifkan kalau tiap rute berangkat dari titik berbeda (gudang/toko/rumah petugas). Jumlah rute diatur "
                         "di bagian Pembagian rute, lalu kamu mengisi titik awal untuk tiap rute. Merchant dibagi menurut "
                         "area dan tiap rute dipasangkan dengan titik awal yang paling cocok. Menggantikan 'Titik Awal' tunggal di atas."
                     ),
@@ -4325,7 +4325,7 @@ if st.session_state.page == "Routing":
                             "Urutan kunjungan di dalam tiap rute diatur supaya merchant didatangi saat sedang buka.\n\n"
                             "- Yang **tutup lebih awal** dikunjungi lebih dulu; yang **baru buka siang** belakangan.\n"
                             "- Kalau merchant **belum buka** saat rute dimulai, merchant lain dikunjungi dulu; kalau tidak ada lagi, "
-                            "kurir menunggu sampai buka (ditandai ⏳).\n"
+                            "petugas menunggu sampai buka (ditandai ⏳).\n"
                             "- Merchant **tanpa jam** tidak dibatasi; rute tanpa jam sama sekali memakai KMeans + TSP biasa.\n"
                             "- Pembagian merchant ke rute tetap mengikuti area. Kalau semua jam tak mungkin dipenuhi, dipilih "
                             "urutan dengan pelanggaran paling sedikit.\n"
@@ -4569,7 +4569,7 @@ if st.session_state.page == "Routing":
                     )
                 else:
                     st.success("🕒 Urutan dioptimalkan dengan jam operasional — semua merchant yang punya jam "
-                               "diperkirakan dikunjungi saat buka (kalau perlu, kurir menunggu sampai buka).")
+                               "diperkirakan dikunjungi saat buka (kalau perlu, petugas menunggu sampai buka).")
 
             if not result.get("used_real_roads", True):
                 reason = result.get("osrm_error")
@@ -4584,7 +4584,7 @@ if st.session_state.page == "Routing":
 
             render_stepper(stepper_slot, 3)
             route_summaries = result["route_summaries"]
-            # Nama kurir diselaraskan SEBELUM tombol unduh/WhatsApp dibuat (tombol kini ada di atas daftar rute,
+            # Nama petugas diselaraskan SEBELUM tombol unduh/WhatsApp dibuat (tombol kini ada di atas daftar rute,
             # jadi nama yang baru diketik di tiap rute harus sudah terbaca di sini).
             for _r0 in route_summaries:
                 _rid0 = _r0["route_id"]
@@ -4645,8 +4645,8 @@ if st.session_state.page == "Routing":
                     dl1, dl2 = st.container(), None
                 with dl1:
                     # Dibangun ulang di sini (bukan pakai result["excel_bytes"] yang
-                    # dicache saat generate) supaya nama kurir yang baru diisi ikut
-                    # terbawa — kolom "kurir" dibaca langsung dari r["driver"].
+                    # dicache saat generate) supaya nama petugas yang baru diisi ikut
+                    # terbawa — kolom "petugas" dibaca langsung dari r["driver"].
                     st.download_button(
                         label="📥 Excel (semua rute)",
                         data=build_excel_bytes(route_summaries),
@@ -4741,7 +4741,7 @@ if st.session_state.page == "Routing":
 
                         if IS_PRO:
                             driver_val = st.text_input(
-                                "🧑‍✈️ Nama kurir/sopir (opsional)",
+                                "🧑‍✈️ Nama petugas (opsional)",
                                 value=st.session_state.driver_names.get(route_id, ""),
                                 key=f"driver_{route_id}",
                                 placeholder="Mis. Budi",
