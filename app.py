@@ -3766,7 +3766,9 @@ if st.session_state.page == "Routing":
             # Prioritas & jam operasional khusus Mode Pro: di Basic kolomnya diabaikan (tidak tampil, tidak dicek,
             # tidak dioptimasi). Isinya tidak hilang — tetap ada di file download dan muncul lagi di Pro.
             df = df.drop(columns=[c for c in PRO_ONLY_COLS if c in df.columns])
+        _n_before_geo = len(df)
         df = handle_missing_coordinates(df)  # isi koordinat kosong lewat pencarian otomatis
+        _n_nocoord = _n_before_geo - len(df)  # baris yang belum punya koordinat (belum ikut rute)
         df["latitude"] = pd.to_numeric(df["latitude"])
         df["longitude"] = pd.to_numeric(df["longitude"])
         _geo_filled = df[["_row_key", "latitude", "longitude"]].copy()
@@ -3987,15 +3989,10 @@ if st.session_state.page == "Routing":
 
         # Merchant berstatus "sudah akuisisi" / "belum tertarik" tidak dimasukkan ke rute.
         _skip_status = df["status"].isin(STATUS_EXCLUDED)
+        _n_excl_status = int(_skip_status.sum())
+        _n_acq = int((df["status"] == STATUS_AKUISISI).sum())
+        _n_not = int((df["status"] == STATUS_TIDAK).sum())
         if _skip_status.any():
-            _n_acq = int((df["status"] == STATUS_AKUISISI).sum())
-            _n_not = int((df["status"] == STATUS_TIDAK).sum())
-            st.info(
-                f"🚫 **{int(_skip_status.sum())} merchant tidak diikutkan ke rute** karena statusnya "
-                f"sudah akuisisi ({_n_acq}) atau belum tertarik ({_n_not}). Ubah statusnya di tabel Data Awal "
-                "atau pratinjau peta kalau ingin diikutkan.",
-                icon="🚫",
-            )
             df = df[~_skip_status].reset_index(drop=True)
             if df.empty:
                 st.info("Semua merchant berstatus sudah akuisisi / belum tertarik — tidak ada yang bisa dirutekan.")
@@ -4004,13 +4001,36 @@ if st.session_state.page == "Routing":
 
         _n_priority = int(df["prioritas"].apply(is_truthy).sum()) if "prioritas" in df.columns else 0
         _has_hours = "jam_buka" in df.columns or "jam_tutup" in df.columns
-        if _n_priority or _has_hours:
-            _notes = []
-            if _n_priority:
-                _notes.append(f"**{_n_priority} merchant prioritas** (kolom `prioritas`) akan dikunjungi lebih dulu di tiap rute")
-            if _has_hours:
-                _notes.append("**jam operasional** (kolom `jam_buka`/`jam_tutup`) akan dicek terhadap perkiraan jam tiba")
-            st.info("ℹ️ " + " · ".join(_notes) + ".", icon="ℹ️")
+        _n_hours_rows = 0
+        if _has_hours:
+            _n_hours_rows = int(sum(
+                1 for _i in range(len(df))
+                if _parse_hhmm(df["jam_buka"].iloc[_i] if "jam_buka" in df.columns else None) is not None
+                or _parse_hhmm(df["jam_tutup"].iloc[_i] if "jam_tutup" in df.columns else None) is not None
+            ))
+        _chk_items = []
+        if _n_nocoord:
+            _chk_items.append(f"📍 **{_n_nocoord}** belum punya koordinat — belum ikut rute (lengkapi di atas)")
+        if _outliers:
+            _chk_items.append(f"⚠️ **{len(_outliers)}** titik tampak janggal — " + ("dikeluarkan dari rute" if _exclude_outliers else "tetap diikutkan"))
+        if n_dup:
+            _chk_items.append(f"🧹 **{n_dup}** baris duplikat — " + ("sudah dihapus" if remove_dups else "masih diikutkan"))
+        if _n_excl_status:
+            _chk_items.append(f"🚫 **{_n_excl_status}** tidak diikutkan karena status (sudah akuisisi {_n_acq}, belum tertarik {_n_not})")
+        _info_items = []
+        if _n_priority:
+            _info_items.append(f"⭐ {_n_priority} merchant prioritas dikunjungi lebih dulu")
+        if _n_hours_rows:
+            _info_items.append(f"🕒 {_n_hours_rows} merchant punya jam operasional")
+        with st.container(border=True):
+            st.markdown(f"**✅ Pemeriksaan data — {len(df)} merchant siap dirutekan**")
+            if _chk_items:
+                st.markdown("\n".join("- " + _x for _x in _chk_items))
+                st.caption("Perbaiki lewat **Lihat & Edit Data Awal** atau **Pratinjau peta** di atas, atau biarkan kalau memang disengaja.")
+            else:
+                st.caption("Tidak ada masalah — semua titik punya koordinat dan tampak wajar.")
+            if _info_items:
+                st.caption(" · ".join(_info_items))
 
         section_header(
             "2️⃣", "Atur Pembagian Rute",
@@ -4514,6 +4534,13 @@ if st.session_state.page == "Routing":
 
             render_stepper(stepper_slot, 3)
             route_summaries = result["route_summaries"]
+            # Nama kurir diselaraskan SEBELUM tombol unduh/WhatsApp dibuat (tombol kini ada di atas daftar rute,
+            # jadi nama yang baru diketik di tiap rute harus sudah terbaca di sini).
+            for _r0 in route_summaries:
+                _rid0 = _r0["route_id"]
+                _nm0 = st.session_state.get(f"driver_{_rid0}", st.session_state.driver_names.get(_rid0, ""))
+                st.session_state.driver_names[_rid0] = _nm0
+                _r0["driver"] = _nm0
             st.success(f"🎉 Rute berhasil dibuat! {len(route_summaries)} rute siap dipakai.")
             _bal = result.get("balance_info")
             if _bal and _bal["before_spread_min"] - _bal["after_spread_min"] > 1:
@@ -4546,279 +4573,294 @@ if st.session_state.page == "Routing":
                         format_duration(total_duration + total_visit),
                     )
 
-            # Perbandingan dengan mengunjungi merchant sesuai urutan di file (tanpa optimasi).
-            total_naive_km = sum(r.get("naive_distance_km", r["distance_km"]) for r in route_summaries)
-            total_naive_sec = sum(r.get("naive_duration_sec", r["duration_sec"]) for r in route_summaries)
-            delta_km = total_naive_km - total_distance
-            delta_sec = total_naive_sec - total_duration
-            if total_naive_km > 0 and len(df) >= 3:
-                section_header(
-                    "📉", "Sebelum vs Sesudah Optimasi",
-                    "Dibanding mengunjungi merchant sesuai urutan di file kamu",
+            _tn_km = sum(r.get("naive_distance_km", r["distance_km"]) for r in route_summaries)
+            if _tn_km > 0 and len(df) >= 3 and _tn_km - total_distance > 0.05:
+                st.info(
+                    f"**Hemat {_tn_km - total_distance:.1f} km ({(_tn_km - total_distance) / _tn_km * 100:.0f}%)** "
+                    f"dibanding urutan di file: {_tn_km:.1f} km → {total_distance:.1f} km.",
+                    icon="📉",
                 )
-                saving_pct = delta_km / total_naive_km * 100
-                with st.container(key="grid3cmp"):
-                    cm1, cm2, cm3 = st.columns(3)
-                    with cm1:
-                        metric_card("📋", "Urutan di file", f"{total_naive_km:.1f} km")
-                    with cm2:
-                        metric_card("✅", "Setelah optimasi", f"{total_distance:.1f} km")
-                    with cm3:
-                        if delta_km > 0.05:
-                            metric_card("📉", "Penghematan", f"{delta_km:.1f} km ({saving_pct:.0f}%)")
-                        else:
-                            metric_card("⚖️", "Selisih", "≈ sama")
-                if delta_km > 0.05:
-                    st.caption(
-                        f"💡 Hemat ±{format_duration(max(delta_sec, 0))} waktu perjalanan dibanding urutan di file "
-                        "(belum termasuk waktu kunjungan)."
+
+            section_header(
+                "3️⃣", "Hasil Rute",
+                "Unduh atau bagikan langsung, lalu lihat detail, peta, dan perbandingannya di bawah",
+            )
+            with st.container(border=True):
+                st.markdown("**📥 Unduh**" + (" — Excel dan PDF siap cetak" if IS_PRO else " — Excel berisi semua rute"))
+                if IS_PRO:
+                    dl1, dl2 = st.columns(2)
+                else:
+                    dl1, dl2 = st.container(), None
+                with dl1:
+                    # Dibangun ulang di sini (bukan pakai result["excel_bytes"] yang
+                    # dicache saat generate) supaya nama kurir yang baru diisi ikut
+                    # terbawa — kolom "kurir" dibaca langsung dari r["driver"].
+                    st.download_button(
+                        label="📥 Excel (semua rute)",
+                        data=build_excel_bytes(route_summaries),
+                        file_name="hasil_routing.xlsx",
+                        mime="application/vnd.ms-excel",
+                        type="primary",
+                        width='stretch',
                     )
-                elif delta_km < -0.05:
-                    st.caption(
-                        f"ℹ️ Rute sekarang {abs(delta_km):.1f} km lebih panjang dari urutan di file — biasanya karena "
-                        "merchant prioritas diutamakan atau urutan diubah manual."
+                if IS_PRO:
+                    with dl2:
+                        if PDF_OK:
+                            all_payloads = []
+                            for _r in route_summaries:
+                                _links, _seq, _ = route_links_info(_r, MAPS_MAX_WAYPOINTS_DESKTOP)
+                                all_payloads.append(_pdf_payload(_r, _links, _seq, result))
+                            st.download_button(
+                                label="🖨️ PDF semua rute (1 rute/halaman)",
+                                data=_routes_pdf_cached(all_payloads),
+                                file_name="lembar_rute_semua.pdf",
+                                mime="application/pdf",
+                                width='stretch',
+                            )
+                        else:
+                            st.caption("PDF belum tersedia: pustaka `reportlab` belum terpasang di server.")
+
+                st.markdown("**📲 Kirim via WhatsApp** — satu pesan ringkas berisi semua rute")
+                _all_wa_parts = []
+                for _r in route_summaries:
+                    _links, _, _ = route_links_info(_r, MAPS_MAX_WAYPOINTS_DESKTOP)
+                    _all_wa_parts.append(build_whatsapp_text(_r, _links))
+                wa_text_all = (
+                    f"*Ringkasan {len(route_summaries)} Rute*\n\n"
+                    + ("\n\n" + "━" * 20 + "\n\n").join(_all_wa_parts)
+                )
+                wa_url_all = "https://wa.me/?text=" + quote(wa_text_all, safe="")
+                if len(wa_url_all) <= 3800:
+                    st.link_button(
+                        "📲 Kirim Semua Rute via WhatsApp", wa_url_all, type="primary", width='stretch'
                     )
                 else:
-                    st.caption("ℹ️ Urutan di file kamu ternyata sudah hampir seefisien hasil optimasi.")
+                    st.caption(
+                        f"ℹ️ Teks gabungan {len(route_summaries)} rute ini terlalu panjang untuk tombol "
+                        "WhatsApp langsung. Salin manual lewat tombol di bawah, atau kirim tiap rute "
+                        "terpisah lewat tombol WhatsApp di masing-masing rute di atas (lebih aman untuk "
+                        "rute dengan banyak titik)."
+                    )
+                with st.popover("📋 Salin teks semua rute"):
+                    st.code(wa_text_all, language=None)
 
-            if len(route_summaries) >= 2:
-                section_header(
-                    "🗺️", "Peta Semua Rute",
-                    "Gambaran keseluruhan — nyalakan atau matikan tiap rute lewat kontrol di pojok kanan atas peta",
-                )
+            _views = ["🛣️ Detail rute"] + (["🗺️ Peta semua rute"] if len(route_summaries) >= 2 else []) + ["📊 Ringkasan & perbandingan"]
+            if st.session_state.get("_result_view") not in _views:
+                st.session_state["_result_view"] = _views[0]
+            _view = st.radio("Tampilan hasil", _views, key="_result_view", horizontal=True, label_visibility="collapsed")
+            if _view == _views[0]:
+                first_route_id = route_summaries[0]["route_id"]
+                for r in route_summaries:
+                    route_id = r["route_id"]
+                    optimized_df = r["df"]
+                    color = ROUTE_COLORS[route_id % len(ROUTE_COLORS)]
+                    emoji = ROUTE_EMOJIS[route_id % len(ROUTE_EMOJIS)]
+
+                    route_total_sec = r["duration_sec"] + r.get("visit_sec", 0) + r.get("wait_sec", 0)
+                    warn_mark = "" if r.get("real_roads", True) else " ⚠️ estimasi"
+                    manual_mark = " ✏️ manual" if r.get("manual") else ""
+                    with st.expander(
+                        f"{emoji} Rute {route_id + 1} — {len(optimized_df)} titik — "
+                        f"~{r['distance_km']:.1f} km — ~{format_duration(route_total_sec)}{warn_mark}{manual_mark}",
+                        # tetap terbuka saat sedang diedit (judulnya berubah tiap urutan digeser)
+                        expanded=(route_id == first_route_id) or bool(st.session_state.get(f"edit_{route_id}", False)),
+                    ):
+                        parts = [f"🚗 Perjalanan {format_duration(r['duration_sec'])}"]
+                        if r.get("visit_sec"):
+                            parts.append(f"🏪 Kunjungan {format_duration(r['visit_sec'])}")
+                        if r.get("wait_sec", 0) >= 60:
+                            parts.append(f"⏳ Menunggu toko buka {format_duration(r['wait_sec'])}")
+                        if r.get("finish_label"):
+                            parts.append(
+                                f"🏁 Selesai ±{r['finish_label']}"
+                                + (" (sudah termasuk pulang)" if r.get("round_trip") else "")
+                            )
+                        if r.get("depot_name"):
+                            parts.append(f"🏭 Titik awal: {r['depot_name']}")
+                        _route_saved = r.get("naive_distance_km", r["distance_km"]) - r["distance_km"]
+                        if _route_saved > 0.05:
+                            parts.append(f"📉 Hemat {_route_saved:.1f} km vs urutan file")
+                        st.caption(" · ".join(parts))
+                        if r.get("n_outside_hours"):
+                            st.warning(
+                                f"⚠️ {r['n_outside_hours']} merchant diperkirakan dikunjungi di luar jam "
+                                "operasional (lihat kolom status di tabel / Catatan di PDF)."
+                            )
+
+                        if IS_PRO:
+                            driver_val = st.text_input(
+                                "🧑‍✈️ Nama kurir/sopir (opsional)",
+                                value=st.session_state.driver_names.get(route_id, ""),
+                                key=f"driver_{route_id}",
+                                placeholder="Mis. Budi",
+                            )
+                            st.session_state.driver_names[route_id] = driver_val
+                            r["driver"] = driver_val
+
+                        left, right = st.columns([1, 1.4])
+                        with left:
+                            map_links, seq_nums, link_df = route_links_info(r, MAPS_MAX_WAYPOINTS_DESKTOP)
+                            _display_cols = ["sequence", "merchant_name"]
+                            _display_cols += [c for c in ("jam_tiba", "jam_selesai") if c in optimized_df.columns]
+                            _show_df = optimized_df[_display_cols + ["latitude", "longitude"]].copy()
+                            if "prioritas_flag" in optimized_df.columns:
+                                _show_df.insert(2, "⭐ Prioritas", optimized_df["prioritas_flag"].map({True: "⭐", False: ""}))
+                            if "jadwal_status" in optimized_df.columns:
+                                _show_df["Status Jam"] = optimized_df["jadwal_status"]
+
+                            _table_obj = _show_df
+                            if len(map_links) > 1:
+                                # Rute dibagi jadi beberapa link Google Maps: tandai tiap baris masuk bagian mana.
+                                _part_labels, _part_tints = maps_part_labels(map_links, len(_show_df))
+                                _show_df.insert(1, "Bagian Maps", _part_labels)
+                                _tint_by_idx = dict(zip(_show_df.index, _part_tints))
+                                try:
+                                    _table_obj = _show_df.style.apply(
+                                        lambda row: [f"background-color: {_tint_by_idx[row.name]}"] * len(row), axis=1
+                                    )
+                                except Exception:
+                                    _table_obj = _show_df  # tanpa pewarnaan kalau Styler tak tersedia
+                            st.dataframe(
+                                _table_obj,
+                                width='stretch',
+                                **TABLE_KW,
+                                hide_index=True,
+                            )
+                            if len(map_links) > 1:
+                                st.caption(
+                                    "🧭 Kolom **Bagian Maps** menunjukkan merchant ini masuk link Google Maps yang mana "
+                                    "(mis. 1/3 = link pertama dari 3). Baris **abu-abu** dengan dua bagian adalah titik "
+                                    "sambungan: tujuan bagian sebelumnya sekaligus titik awal bagian berikutnya."
+                                )
+                            if IS_PRO and st.checkbox(
+                                "✏️ Ubah urutan manual", key=f"edit_{route_id}",
+                                help="Geser merchant naik/turun, misalnya karena toko tutup jam tertentu atau ada janji. "
+                                     "Jarak, jam tiba, peta, Excel, WhatsApp, dan PDF ikut diperbarui."
+                            ):
+                                render_reorder_controls(r)
+                            # Batas 9 titik singgah berlaku untuk aplikasi Google Maps (Android/iOS)
+                            # MAUPUN desktop — dan tap link di HP hampir selalu membuka aplikasi
+                            # tersebut (deep-link), bukan browser HP. Batas 3 titik singgah menurut
+                            # Google hanya berlaku kalau link dibuka di BROWSER HP secara spesifik,
+                            # jadi kita pakai 9 sebagai default supaya tidak kepecah link-nya tanpa
+                            # alasan untuk kasus paling umum, dan cukup beri catatan untuk skenario
+                            # browser-HP yang lebih jarang terjadi.
+                            max_wp = MAPS_MAX_WAYPOINTS_DESKTOP
+                            link_waypoints = max(0, len(link_df) - 2)
+                            if len(map_links) == 1:
+                                st.link_button("🚗 Buka di Google Maps", map_links[0][2], width='stretch')
+                                if IS_MOBILE and link_waypoints > MAPS_MAX_WAYPOINTS_MOBILE:
+                                    st.caption(
+                                        "ℹ️ Kalau link ini dibuka di **browser HP** (bukan aplikasi Google "
+                                        f"Maps), Google Maps mungkin hanya menampilkan {MAPS_MAX_WAYPOINTS_MOBILE} "
+                                        "titik singgah pertama. Buka lewat aplikasi Google Maps untuk rute lengkap."
+                                    )
+                            elif len(map_links) > 1:
+                                st.caption(
+                                    f"ℹ️ Google Maps membatasi titik singgah (maks. {max_wp} per link), "
+                                    f"jadi rute dibagi jadi {len(map_links)} link. Buka berurutan — "
+                                    "tiap bagian dimulai dari titik akhir bagian sebelumnya."
+                                )
+                                for i, (ia, ib, url) in enumerate(map_links, start=1):
+                                    st.link_button(
+                                        f"{MAPS_PART_EMOJIS[(i - 1) % len(MAPS_PART_EMOJIS)]} 🚗 Bagian {i}/{len(map_links)} · titik {seq_nums[ia]} → {seq_nums[ib]}",
+                                        url,
+                                        width='stretch',
+                                    )
+
+                            wa_text = build_whatsapp_text(r, map_links)
+                            wa_url = "https://wa.me/?text=" + quote(wa_text, safe="")
+                            if len(wa_url) <= 3800:
+                                st.link_button("📲 Kirim via WhatsApp", wa_url, width='stretch')
+                            else:
+                                st.caption(
+                                    "ℹ️ Teks rute terlalu panjang untuk tombol langsung — "
+                                    "salin lewat tombol di bawah lalu tempel di WhatsApp."
+                                )
+                            with st.popover("📋 Salin teks rute"):
+                                st.code(wa_text, language=None)
+                            if IS_PRO and PDF_OK:
+                                st.download_button(
+                                    "🖨️ Unduh PDF (siap cetak)",
+                                    data=_routes_pdf_cached([_pdf_payload(r, map_links, seq_nums, result)]),
+                                    file_name=f"lembar_rute_{route_id + 1}.pdf",
+                                    mime="application/pdf",
+                                    key=f"pdf_{route_id}",
+                                    width='stretch',
+                                )
+
+                        with right:
+                            center_lat = optimized_df["latitude"].mean()
+                            center_lon = optimized_df["longitude"].mean()
+                            fmap = folium.Map(location=[center_lat, center_lon], zoom_start=12)
+                            polyline_coords = []
+                            for idx, row in optimized_df.iterrows():
+                                coord = [row["latitude"], row["longitude"]]
+                                polyline_coords.append(coord)
+                                is_start_pt = bool(r.get("has_start")) and idx == 0
+                                folium.Marker(
+                                    coord,
+                                    popup=f"{idx + 1}. {row['merchant_name']}",
+                                    tooltip=f"{'Titik awal' if is_start_pt else idx + 1} · {row['merchant_name']}",
+                                    icon=numbered_icon("S" if is_start_pt else idx + 1, color, is_start_pt),
+                                ).add_to(fmap)
+                            if r.get("round_trip") and polyline_coords:
+                                polyline_coords.append(polyline_coords[0])
+                            folium.PolyLine(polyline_coords, weight=4, color=color).add_to(fmap)
+                            st_folium(fmap, width=None, height=MAP_H, key=f"map_{route_id}", returned_objects=[])
+
+            elif _view.startswith("🗺️"):
                 st_folium(
                     build_combined_map(route_summaries), width=None, height=COMBINED_MAP_H,
                     key="map_all", returned_objects=[],
                 )
 
-            section_header(
-                "3️⃣", "Rute yang Sudah Dioptimalkan",
-                "Klik tiap rute untuk lihat urutan kunjungan dan petanya",
-            )
-            first_route_id = route_summaries[0]["route_id"]
-            for r in route_summaries:
-                route_id = r["route_id"]
-                optimized_df = r["df"]
-                color = ROUTE_COLORS[route_id % len(ROUTE_COLORS)]
-                emoji = ROUTE_EMOJIS[route_id % len(ROUTE_EMOJIS)]
-
-                route_total_sec = r["duration_sec"] + r.get("visit_sec", 0) + r.get("wait_sec", 0)
-                warn_mark = "" if r.get("real_roads", True) else " ⚠️ estimasi"
-                manual_mark = " ✏️ manual" if r.get("manual") else ""
-                with st.expander(
-                    f"{emoji} Rute {route_id + 1} — {len(optimized_df)} titik — "
-                    f"~{r['distance_km']:.1f} km — ~{format_duration(route_total_sec)}{warn_mark}{manual_mark}",
-                    # tetap terbuka saat sedang diedit (judulnya berubah tiap urutan digeser)
-                    expanded=(route_id == first_route_id) or bool(st.session_state.get(f"edit_{route_id}", False)),
-                ):
-                    parts = [f"🚗 Perjalanan {format_duration(r['duration_sec'])}"]
-                    if r.get("visit_sec"):
-                        parts.append(f"🏪 Kunjungan {format_duration(r['visit_sec'])}")
-                    if r.get("wait_sec", 0) >= 60:
-                        parts.append(f"⏳ Menunggu toko buka {format_duration(r['wait_sec'])}")
-                    if r.get("finish_label"):
-                        parts.append(
-                            f"🏁 Selesai ±{r['finish_label']}"
-                            + (" (sudah termasuk pulang)" if r.get("round_trip") else "")
-                        )
-                    if r.get("depot_name"):
-                        parts.append(f"🏭 Titik awal: {r['depot_name']}")
-                    _route_saved = r.get("naive_distance_km", r["distance_km"]) - r["distance_km"]
-                    if _route_saved > 0.05:
-                        parts.append(f"📉 Hemat {_route_saved:.1f} km vs urutan file")
-                    st.caption(" · ".join(parts))
-                    if r.get("n_outside_hours"):
-                        st.warning(
-                            f"⚠️ {r['n_outside_hours']} merchant diperkirakan dikunjungi di luar jam "
-                            "operasional (lihat kolom status di tabel / Catatan di PDF)."
-                        )
-
-                    if IS_PRO:
-                        driver_val = st.text_input(
-                            "🧑‍✈️ Nama kurir/sopir (opsional)",
-                            value=st.session_state.driver_names.get(route_id, ""),
-                            key=f"driver_{route_id}",
-                            placeholder="Mis. Budi",
-                        )
-                        st.session_state.driver_names[route_id] = driver_val
-                        r["driver"] = driver_val
-
-                    left, right = st.columns([1, 1.4])
-                    with left:
-                        map_links, seq_nums, link_df = route_links_info(r, MAPS_MAX_WAYPOINTS_DESKTOP)
-                        _display_cols = ["sequence", "merchant_name"]
-                        _display_cols += [c for c in ("jam_tiba", "jam_selesai") if c in optimized_df.columns]
-                        _show_df = optimized_df[_display_cols + ["latitude", "longitude"]].copy()
-                        if "prioritas_flag" in optimized_df.columns:
-                            _show_df.insert(2, "⭐ Prioritas", optimized_df["prioritas_flag"].map({True: "⭐", False: ""}))
-                        if "jadwal_status" in optimized_df.columns:
-                            _show_df["Status Jam"] = optimized_df["jadwal_status"]
-
-                        _table_obj = _show_df
-                        if len(map_links) > 1:
-                            # Rute dibagi jadi beberapa link Google Maps: tandai tiap baris masuk bagian mana.
-                            _part_labels, _part_tints = maps_part_labels(map_links, len(_show_df))
-                            _show_df.insert(1, "Bagian Maps", _part_labels)
-                            _tint_by_idx = dict(zip(_show_df.index, _part_tints))
-                            try:
-                                _table_obj = _show_df.style.apply(
-                                    lambda row: [f"background-color: {_tint_by_idx[row.name]}"] * len(row), axis=1
-                                )
-                            except Exception:
-                                _table_obj = _show_df  # tanpa pewarnaan kalau Styler tak tersedia
-                        st.dataframe(
-                            _table_obj,
-                            width='stretch',
-                            **TABLE_KW,
-                            hide_index=True,
-                        )
-                        if len(map_links) > 1:
-                            st.caption(
-                                "🧭 Kolom **Bagian Maps** menunjukkan merchant ini masuk link Google Maps yang mana "
-                                "(mis. 1/3 = link pertama dari 3). Baris **abu-abu** dengan dua bagian adalah titik "
-                                "sambungan: tujuan bagian sebelumnya sekaligus titik awal bagian berikutnya."
-                            )
-                        if IS_PRO and st.checkbox(
-                            "✏️ Ubah urutan manual", key=f"edit_{route_id}",
-                            help="Geser merchant naik/turun, misalnya karena toko tutup jam tertentu atau ada janji. "
-                                 "Jarak, jam tiba, peta, Excel, WhatsApp, dan PDF ikut diperbarui."
-                        ):
-                            render_reorder_controls(r)
-                        # Batas 9 titik singgah berlaku untuk aplikasi Google Maps (Android/iOS)
-                        # MAUPUN desktop — dan tap link di HP hampir selalu membuka aplikasi
-                        # tersebut (deep-link), bukan browser HP. Batas 3 titik singgah menurut
-                        # Google hanya berlaku kalau link dibuka di BROWSER HP secara spesifik,
-                        # jadi kita pakai 9 sebagai default supaya tidak kepecah link-nya tanpa
-                        # alasan untuk kasus paling umum, dan cukup beri catatan untuk skenario
-                        # browser-HP yang lebih jarang terjadi.
-                        max_wp = MAPS_MAX_WAYPOINTS_DESKTOP
-                        link_waypoints = max(0, len(link_df) - 2)
-                        if len(map_links) == 1:
-                            st.link_button("🚗 Buka di Google Maps", map_links[0][2], width='stretch')
-                            if IS_MOBILE and link_waypoints > MAPS_MAX_WAYPOINTS_MOBILE:
-                                st.caption(
-                                    "ℹ️ Kalau link ini dibuka di **browser HP** (bukan aplikasi Google "
-                                    f"Maps), Google Maps mungkin hanya menampilkan {MAPS_MAX_WAYPOINTS_MOBILE} "
-                                    "titik singgah pertama. Buka lewat aplikasi Google Maps untuk rute lengkap."
-                                )
-                        elif len(map_links) > 1:
-                            st.caption(
-                                f"ℹ️ Google Maps membatasi titik singgah (maks. {max_wp} per link), "
-                                f"jadi rute dibagi jadi {len(map_links)} link. Buka berurutan — "
-                                "tiap bagian dimulai dari titik akhir bagian sebelumnya."
-                            )
-                            for i, (ia, ib, url) in enumerate(map_links, start=1):
-                                st.link_button(
-                                    f"{MAPS_PART_EMOJIS[(i - 1) % len(MAPS_PART_EMOJIS)]} 🚗 Bagian {i}/{len(map_links)} · titik {seq_nums[ia]} → {seq_nums[ib]}",
-                                    url,
-                                    width='stretch',
-                                )
-
-                        wa_text = build_whatsapp_text(r, map_links)
-                        wa_url = "https://wa.me/?text=" + quote(wa_text, safe="")
-                        if len(wa_url) <= 3800:
-                            st.link_button("📲 Kirim via WhatsApp", wa_url, width='stretch')
-                        else:
-                            st.caption(
-                                "ℹ️ Teks rute terlalu panjang untuk tombol langsung — "
-                                "salin lewat tombol di bawah lalu tempel di WhatsApp."
-                            )
-                        with st.popover("📋 Salin teks rute"):
-                            st.code(wa_text, language=None)
-                        if IS_PRO and PDF_OK:
-                            st.download_button(
-                                "🖨️ Unduh PDF (siap cetak)",
-                                data=_routes_pdf_cached([_pdf_payload(r, map_links, seq_nums, result)]),
-                                file_name=f"lembar_rute_{route_id + 1}.pdf",
-                                mime="application/pdf",
-                                key=f"pdf_{route_id}",
-                                width='stretch',
-                            )
-
-                    with right:
-                        center_lat = optimized_df["latitude"].mean()
-                        center_lon = optimized_df["longitude"].mean()
-                        fmap = folium.Map(location=[center_lat, center_lon], zoom_start=12)
-                        polyline_coords = []
-                        for idx, row in optimized_df.iterrows():
-                            coord = [row["latitude"], row["longitude"]]
-                            polyline_coords.append(coord)
-                            is_start_pt = bool(r.get("has_start")) and idx == 0
-                            folium.Marker(
-                                coord,
-                                popup=f"{idx + 1}. {row['merchant_name']}",
-                                tooltip=f"{'Titik awal' if is_start_pt else idx + 1} · {row['merchant_name']}",
-                                icon=numbered_icon("S" if is_start_pt else idx + 1, color, is_start_pt),
-                            ).add_to(fmap)
-                        if r.get("round_trip") and polyline_coords:
-                            polyline_coords.append(polyline_coords[0])
-                        folium.PolyLine(polyline_coords, weight=4, color=color).add_to(fmap)
-                        st_folium(fmap, width=None, height=MAP_H, key=f"map_{route_id}", returned_objects=[])
-
-            section_header(
-                "📥", "Unduh Hasil",
-                "Excel berisi semua rute per-sheet"
-                + (", dan PDF siap cetak untuk dibawa kurir" if IS_PRO else ""),
-            )
-            if IS_PRO:
-                dl1, dl2 = st.columns(2)
             else:
-                dl1, dl2 = st.container(), None
-            with dl1:
-                # Dibangun ulang di sini (bukan pakai result["excel_bytes"] yang
-                # dicache saat generate) supaya nama kurir yang baru diisi ikut
-                # terbawa — kolom "kurir" dibaca langsung dari r["driver"].
-                st.download_button(
-                    label="📥 Excel (semua rute)",
-                    data=build_excel_bytes(route_summaries),
-                    file_name="hasil_routing.xlsx",
-                    mime="application/vnd.ms-excel",
-                    type="primary",
-                    width='stretch',
-                )
-            if IS_PRO:
-                with dl2:
-                    if PDF_OK:
-                        all_payloads = []
-                        for _r in route_summaries:
-                            _links, _seq, _ = route_links_info(_r, MAPS_MAX_WAYPOINTS_DESKTOP)
-                            all_payloads.append(_pdf_payload(_r, _links, _seq, result))
-                        st.download_button(
-                            label="🖨️ PDF semua rute (1 rute/halaman)",
-                            data=_routes_pdf_cached(all_payloads),
-                            file_name="lembar_rute_semua.pdf",
-                            mime="application/pdf",
-                            width='stretch',
+                _sum_rows = [
+                    {
+                        "Rute": f"Rute {r['route_id'] + 1}" + (f" — {r['driver']}" if r.get("driver") else ""),
+                        "Titik": len(r["df"]),
+                        "Jarak (km)": round(r["distance_km"], 1),
+                        "Waktu total": format_duration(r["duration_sec"] + r.get("visit_sec", 0) + r.get("wait_sec", 0)),
+                    }
+                    for r in route_summaries
+                ]
+                st.dataframe(pd.DataFrame(_sum_rows), width="stretch", hide_index=True)
+                # Perbandingan dengan mengunjungi merchant sesuai urutan di file (tanpa optimasi).
+                total_naive_km = sum(r.get("naive_distance_km", r["distance_km"]) for r in route_summaries)
+                total_naive_sec = sum(r.get("naive_duration_sec", r["duration_sec"]) for r in route_summaries)
+                delta_km = total_naive_km - total_distance
+                delta_sec = total_naive_sec - total_duration
+                if total_naive_km > 0 and len(df) >= 3:
+                    section_header(
+                        "📉", "Sebelum vs Sesudah Optimasi",
+                        "Dibanding mengunjungi merchant sesuai urutan di file kamu",
+                    )
+                    saving_pct = delta_km / total_naive_km * 100
+                    with st.container(key="grid3cmp"):
+                        cm1, cm2, cm3 = st.columns(3)
+                        with cm1:
+                            metric_card("📋", "Urutan di file", f"{total_naive_km:.1f} km")
+                        with cm2:
+                            metric_card("✅", "Setelah optimasi", f"{total_distance:.1f} km")
+                        with cm3:
+                            if delta_km > 0.05:
+                                metric_card("📉", "Penghematan", f"{delta_km:.1f} km ({saving_pct:.0f}%)")
+                            else:
+                                metric_card("⚖️", "Selisih", "≈ sama")
+                    if delta_km > 0.05:
+                        st.caption(
+                            f"💡 Hemat ±{format_duration(max(delta_sec, 0))} waktu perjalanan dibanding urutan di file "
+                            "(belum termasuk waktu kunjungan)."
+                        )
+                    elif delta_km < -0.05:
+                        st.caption(
+                            f"ℹ️ Rute sekarang {abs(delta_km):.1f} km lebih panjang dari urutan di file — biasanya karena "
+                            "merchant prioritas diutamakan atau urutan diubah manual."
                         )
                     else:
-                        st.caption("PDF belum tersedia: pustaka `reportlab` belum terpasang di server.")
+                        st.caption("ℹ️ Urutan di file kamu ternyata sudah hampir seefisien hasil optimasi.")
 
-            section_header(
-                "📲", "Kirim via WhatsApp",
-                "Satu pesan ringkas berisi semua rute sekaligus",
-            )
-            _all_wa_parts = []
-            for _r in route_summaries:
-                _links, _, _ = route_links_info(_r, MAPS_MAX_WAYPOINTS_DESKTOP)
-                _all_wa_parts.append(build_whatsapp_text(_r, _links))
-            wa_text_all = (
-                f"*Ringkasan {len(route_summaries)} Rute*\n\n"
-                + ("\n\n" + "━" * 20 + "\n\n").join(_all_wa_parts)
-            )
-            wa_url_all = "https://wa.me/?text=" + quote(wa_text_all, safe="")
-            if len(wa_url_all) <= 3800:
-                st.link_button(
-                    "📲 Kirim Semua Rute via WhatsApp", wa_url_all, type="primary", width='stretch'
-                )
-            else:
-                st.caption(
-                    f"ℹ️ Teks gabungan {len(route_summaries)} rute ini terlalu panjang untuk tombol "
-                    "WhatsApp langsung. Salin manual lewat tombol di bawah, atau kirim tiap rute "
-                    "terpisah lewat tombol WhatsApp di masing-masing rute di atas (lebih aman untuk "
-                    "rute dengan banyak titik)."
-                )
-            with st.popover("📋 Salin teks semua rute"):
-                st.code(wa_text_all, language=None)
         elif result and result["fingerprint"] != data_fingerprint:
             st.info("ℹ️ Pengaturan atau data berubah — tekan **Buat Rute Optimal Sekarang** lagi untuk memperbarui hasil.")
     else:
