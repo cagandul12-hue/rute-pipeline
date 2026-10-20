@@ -19,6 +19,7 @@ import html as html_lib
 import hashlib
 import hmac
 import threading
+import contextlib
 import urllib.parse
 from urllib.parse import unquote, quote
 from xml.sax.saxutils import escape as xml_escape
@@ -49,6 +50,62 @@ st.markdown(
     }
 
     .block-container {padding-top: 1.5rem; padding-bottom: 3rem; max-width: 1200px;}
+
+    /* ---------- Loading animation ---------- */
+    .rp-loader {
+        display: flex; flex-direction: column; align-items: center; gap: 0.7rem;
+        padding: 1.3rem 1.1rem; margin: 0.6rem 0; text-align: center;
+        border-radius: 18px; border: 1px solid rgba(37,99,235,0.28);
+        background: linear-gradient(135deg, rgba(37,99,235,0.09), rgba(13,148,136,0.12));
+        box-shadow: 0 8px 24px rgba(37,99,235,0.10);
+    }
+    .rp-track {position: relative; width: min(440px, 90%); height: 48px; margin-top: 2px;}
+    .rp-line {
+        position: absolute; left: 10px; right: 10px; top: 30px; height: 4px; border-radius: 4px; overflow: hidden;
+        background: linear-gradient(90deg, #2563EB, #0D9488); opacity: 0.5;
+    }
+    .rp-line::after {
+        content: ""; position: absolute; inset: 0;
+        background: repeating-linear-gradient(90deg, rgba(255,255,255,0.9) 0 7px, transparent 7px 15px);
+        animation: rp-dash 0.9s linear infinite;
+    }
+    .rp-stop {
+        position: absolute; top: 23px; width: 16px; height: 16px; margin-left: -8px; box-sizing: border-box;
+        border-radius: 50%; background: #fff; border: 3px solid #2563EB; animation: rp-stop 2.6s ease-in-out infinite;
+    }
+    .rp-stop.s1 {left: 4%;  animation-delay: 0.1s;}
+    .rp-stop.s2 {left: 36%; animation-delay: 1.0s;}
+    .rp-stop.s3 {left: 68%; animation-delay: 1.45s;}
+    .rp-stop.s4 {left: 96%; animation-delay: 2.3s;}
+    .rp-van {
+        position: absolute; top: 0; left: 0; font-size: 26px; line-height: 1;
+        animation: rp-drive 2.6s cubic-bezier(0.45, 0, 0.55, 1) infinite; filter: drop-shadow(0 3px 3px rgba(0,0,0,0.25));
+    }
+    .rp-van span {display: inline-block; transform: scaleX(-1);}
+    .rp-title {font-weight: 700; font-size: 1.02rem;}
+    .rp-sub {opacity: 0.78; font-size: 0.88rem; margin-top: -0.35rem;}
+    .rp-dots b {display: inline-block; opacity: 0.2; animation: rp-blink 1.2s infinite;}
+    .rp-dots b:nth-child(2) {animation-delay: 0.2s;}
+    .rp-dots b:nth-child(3) {animation-delay: 0.4s;}
+    .rp-bar {position: relative; width: min(440px, 90%); height: 8px; border-radius: 99px; overflow: hidden; background: rgba(127,127,127,0.2);}
+    .rp-bar i {
+        display: block; height: 100%; border-radius: 99px; transition: width 0.35s ease;
+        background: linear-gradient(90deg, #2563EB, #0D9488, #2563EB); background-size: 200% 100%;
+        animation: rp-shimmer 1.6s linear infinite;
+    }
+    .rp-indet i {width: 40%; animation: rp-shimmer 1.6s linear infinite, rp-slide 1.5s ease-in-out infinite;}
+    .rp-pct {font-size: 0.8rem; opacity: 0.75; font-variant-numeric: tabular-nums;}
+    @keyframes rp-drive {0% {left: 0;} 100% {left: calc(100% - 28px);}}
+    @keyframes rp-dash {to {background-position: 15px 0;}}
+    @keyframes rp-stop {
+        0%, 100% {background: #fff; border-color: #2563EB; box-shadow: 0 0 0 0 rgba(13,148,136,0);}
+        6% {background: #0D9488; border-color: #0D9488; box-shadow: 0 0 0 7px rgba(13,148,136,0.22);}
+        24% {background: #fff; border-color: #2563EB; box-shadow: 0 0 0 0 rgba(13,148,136,0);}
+    }
+    @keyframes rp-blink {0%, 80%, 100% {opacity: 0.2;} 40% {opacity: 1;}}
+    @keyframes rp-shimmer {to {background-position: -200% 0;}}
+    @keyframes rp-slide {0% {margin-left: -40%;} 100% {margin-left: 100%;}}
+    @media (prefers-reduced-motion: reduce) {.rp-loader *, .rp-loader *::after {animation: none !important;}}
 
     /* ---------- Hero header ---------- */
     .hero-header {
@@ -260,6 +317,58 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+
+def loader_html(title, sub="", pct=None):
+    """Animasi loading bertema rute (motor melaju melewati titik-titik singgah) + bar progres.
+    pct=None → bar berjalan terus (tidak tahu berapa lama); pct 0–1 → bar sesuai kemajuan."""
+    t = html_lib.escape(str(title))
+    sub_html = f'<div class="rp-sub">{html_lib.escape(str(sub))}</div>' if sub else ""
+    if pct is None:
+        bar = '<div class="rp-bar rp-indet"><i></i></div>'
+    else:
+        p = max(0, min(100, int(round(float(pct) * 100))))
+        bar = f'<div class="rp-bar"><i style="width:{p}%"></i></div><div class="rp-pct">{p}%</div>'
+    return (
+        '<div class="rp-loader" role="status" aria-live="polite"><div class="rp-track"><div class="rp-line"></div>'
+        '<span class="rp-stop s1"></span><span class="rp-stop s2"></span><span class="rp-stop s3"></span>'
+        '<span class="rp-stop s4"></span><div class="rp-van"><span>🛵</span></div></div>'
+        f'<div class="rp-title">{t}<span class="rp-dots"><b>.</b><b>.</b><b>.</b></span></div>{sub_html}{bar}</div>'
+    )
+
+
+class FancyLoader:
+    """Penampil loading yang bisa diperbarui (judul, keterangan, persen) lalu ditutup."""
+
+    def __init__(self, title="Memproses", sub="", pct=None):
+        self._slot = st.empty()
+        self._title, self._sub, self._pct = title, sub, pct
+        self._render()
+
+    def _render(self):
+        self._slot.markdown(loader_html(self._title, self._sub, self._pct), unsafe_allow_html=True)
+
+    def update(self, title=None, sub=None, pct=None):
+        if title is not None:
+            self._title = title
+        if sub is not None:
+            self._sub = sub
+        if pct is not None:
+            self._pct = pct
+        self._render()
+
+    def close(self):
+        self._slot.empty()
+
+
+@contextlib.contextmanager
+def fancy_loading(title="Memproses", sub="", pct=None):
+    """Pengganti st.spinner: `with fancy_loading("Judul", "keterangan") as ld:` lalu ld.update(sub=..., pct=...)."""
+    ld = FancyLoader(title, sub, pct)
+    try:
+        yield ld
+    finally:
+        ld.close()
 
 
 def metric_card(icon, label, value):
@@ -1525,7 +1634,7 @@ def handle_missing_coordinates(df):
         if st.button(label, type="primary", width="stretch", key="_geo_run",
                      help="Memakai OpenStreetMap (gratis). Dibatasi ±1 pencarian per detik, jadi butuh waktu sekitar "
                           f"{math.ceil(len(todo) * GEO_DELAY_SEC)} detik. Cakupan merchant kecil/UMKM terbatas."):
-            progress = st.progress(0.0, text="Mencari koordinat...")
+            progress = FancyLoader("Mencari koordinat otomatis", f"0 dari {len(todo)} merchant", pct=0.0)
             found_n, abort_msg, done_keys = 0, None, set()
             for n, i in enumerate(todo, start=1):
                 k = key_of(i)
@@ -1543,9 +1652,9 @@ def handle_missing_coordinates(df):
                     found_n += 1
                 else:
                     cache[k] = {"failed": True, "city": city}
-                progress.progress(n / len(todo), text=f"Mencari koordinat... {n}/{len(todo)}")
+                progress.update(sub=f"{n} dari {len(todo)} merchant", pct=n / len(todo))
                 time.sleep(GEO_DELAY_SEC)
-            progress.empty()
+            progress.close()
             if abort_msg:
                 st.session_state.geocode_flash = (
                     "error", f"⚠️ Pencarian berhenti di tengah jalan: {abort_msg} Hasil yang sudah ketemu tetap tersimpan — klik lagi untuk melanjutkan."
@@ -3799,7 +3908,8 @@ def render_howto():
                 "Langkah 2 mengatur urutan: yang tutup lebih awal didahulukan, yang belum buka ditunda (atau petugas menunggu ⏳).\n"
                 "- **Rencana beberapa hari** — centang di Langkah 2 untuk membagi ratusan merchant ke beberapa petugas "
                 "(tiap petugas satu wilayah) dan ke hari kerja. Atur jumlah petugas, hari kerja, maks. merchant per hari, "
-                "dan tanggal mulai; hasilnya jadwal petugas × tanggal. **Kunci wilayah** menjaga petugas tetap di areanya.\n"
+                "dan tanggal mulai; hasilnya jadwal petugas × tanggal. **Kunci wilayah** menjaga petugas tetap di areanya. "
+                "Selama mode ini aktif, **Pembagian rute** dan **Titik awal** biasa dinonaktifkan (titik awal diisi per petugas).\n"
                 "- **Multi-depot** — tentukan titik awal untuk tiap rute (Rute 1, Rute 2, …); jumlah rute diatur di Langkah 2.\n"
                 "- **Seimbangkan beban waktu** — durasi tiap rute dibuat lebih mirip.\n"
                 "- **Nama petugas** — isi di tiap rute setelah dibuat; ikut ke Excel, WhatsApp, dan PDF.\n"
@@ -4370,10 +4480,15 @@ if st.session_state.page == "Routing":
                 max_points_per_route, target_routes = dp_cap, None
                 n_cluster_default = max(1, dp_n * _dp_days_est)
                 split_mode, balance_time = SPLIT_AUTO, False
-                st.caption(
-                    "Mode **Rencana beberapa hari** aktif: jumlah rute ditentukan oleh jumlah petugas, hari kerja, dan "
-                    "batas merchant per hari di atas."
+                st.info(
+                    "Dinonaktifkan karena **Rencana beberapa hari** aktif — jumlah rute ditentukan oleh jumlah petugas, "
+                    "hari kerja, dan batas merchant per hari di atas.",
+                    icon="🔒",
                 )
+                st.radio("Cara menentukan jumlah rute", [PLAN_MAX, PLAN_COUNT], index=0, key="_plan_off",
+                         horizontal=not IS_MOBILE, disabled=True)
+                st.number_input("Maksimal merchant per rute", min_value=1, max_value=60, value=int(dp_cap), step=1,
+                                key="_cap_off", disabled=True)
             else:
                 if use_multi_depot:
                     st.info(
@@ -4459,6 +4574,7 @@ if st.session_state.page == "Routing":
                 value=st.session_state.starting_link_saved,
                 key="_starting_link_widget",
                 on_change=_sync_starting_link,
+                disabled=dp_on,
                 placeholder="Link Google Maps atau koordinat (-7.5665, 110.8167)",
                 help=(
                     "Misalnya lokasi gudang atau toko pusat. Kalau diisi, titik ini otomatis jadi awal setiap rute. "
@@ -4470,8 +4586,14 @@ if st.session_state.page == "Routing":
             use_multi_depot = False
             depot_rows_raw = []  # [(nama, lokasi), ...] — mentah, belum divalidasi/resolve
             if dp_on:
-                st.caption("Dipakai untuk petugas yang titik awalnya tidak diisi di Rencana beberapa hari. "
-                           "Kosong = titik mulai dipilih otomatis.")
+                starting_link = ""  # tidak dipakai di Rencana beberapa hari
+                st.info(
+                    "Dinonaktifkan karena **Rencana beberapa hari** aktif — isi titik awal tiap petugas di bagian "
+                    "Rencana beberapa hari di atas (kosong = titik mulai dipilih otomatis).",
+                    icon="🔒",
+                )
+                if IS_PRO:
+                    st.checkbox("🏭 Pakai banyak titik awal (multi-depot)", value=False, key="_md_off", disabled=True)
             if IS_PRO and not dp_on:
                 use_multi_depot = st.checkbox(
                     "🏭 Pakai banyak titik awal (multi-depot)",
@@ -4635,7 +4757,7 @@ if st.session_state.page == "Routing":
             f"**Ringkasan:** {len(df)} merchant → {_plan_txt} · mulai {start_time:%H:%M} · "
             + (f"{int(visit_minutes)} menit/toko" if visit_minutes else "tanpa durasi kunjungan")
             + " · " + ("pulang-pergi" if round_trip else "satu arah")
-            + " · titik awal: " + ("sesuai isian" if starting_link else "otomatis (paling efisien)"),
+            + " · titik awal: " + ("per petugas" if dp_on else ("sesuai isian" if starting_link else "otomatis (paling efisien)")),
             icon="🧾",
         )
 
@@ -4667,7 +4789,7 @@ if st.session_state.page == "Routing":
                     st.error("❌ Multi-depot aktif tapi belum ada titik awal yang valid. Isi titik awal minimal satu rute, atau matikan multi-depot.")
                     st.stop()
 
-            with st.spinner("🔄 Mengelompokkan titik dan mencari rute tercepat di jalan asli..."):
+            with fancy_loading("Membuat rute optimal", "Mengelompokkan titik dan mencari rute tercepat di jalan asli", pct=0.03) as _ld:
                 # Titik awal tunggal (dipakai kalau multi-depot tidak aktif). Di-resolve SEBELUM
                 # pengelompokan karena pemerataan beban waktu ikut memperhitungkan titik awal.
                 start_name, start_lat, start_lon = "START POINT", None, None
@@ -4750,10 +4872,9 @@ if st.session_state.page == "Routing":
                 start_dt = datetime.datetime.combine(base_date, start_time)
                 visit_sec = int(visit_minutes) * 60
                 _route_ids = sorted(df["route"].unique())
-                _prog = st.empty()
+                _ld.update(sub=f"Menghitung {len(_route_ids)} rute di jalan asli", pct=0.1)
                 for _ri, route_id in enumerate(_route_ids, start=1):
-                    if len(_route_ids) > 3:
-                        _prog.caption(f"⏳ Menghitung rute {_ri} dari {len(_route_ids)}…")
+                    _ld.update(sub=f"Menghitung rute {_ri} dari {len(_route_ids)}", pct=0.1 + 0.88 * (_ri - 1) / len(_route_ids))
                     route_df = df[df["route"] == route_id].reset_index(drop=True)
 
                     if depots or dp_on:
@@ -4860,7 +4981,6 @@ if st.session_state.page == "Routing":
                         }
                     )
 
-            _prog.empty()
             excel_bytes = build_excel_bytes(route_summaries)
             n_start_points = sum(1 for r in route_summaries if r["has_start"])
 
@@ -5322,7 +5442,7 @@ elif st.session_state.page == "Extract":
                 if not new_link.strip():
                     st.error("❌ Link tidak boleh kosong.")
                 else:
-                    with st.spinner("Membaca link..."):
+                    with fancy_loading("Membaca link Google Maps", "Mengambil nama dan koordinat lokasi"):
                         name, lat, lon = extract_google_maps_data(new_link)
 
                     if lat is not None and lon is not None:
@@ -5384,7 +5504,7 @@ elif st.session_state.page == "Extract":
                     if search_city.strip()
                     else search_query.strip()
                 )
-                with st.spinner("Mencari di OpenStreetMap..."):
+                with fancy_loading("Mencari lokasi", "Menelusuri OpenStreetMap"):
                     results, search_error = search_nominatim(full_query)
                 st.session_state.nominatim_results = results
                 st.session_state.nominatim_searched_for = full_query
