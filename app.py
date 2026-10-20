@@ -830,6 +830,177 @@ def assign_routes_to_depots(df, depots):
     return new_of, depot_of
 
 
+# ---------- Rencana beberapa hari (petugas × hari kerja) ----------
+ID_DAYS = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
+ID_DAYS_SHORT = ["Sen", "Sel", "Rab", "Kam", "Jum", "Sab", "Min"]
+
+
+def make_work_dates(start_date, weekdays, n):
+    """n tanggal kerja berurutan mulai start_date; hanya hari yang ada di `weekdays` (0 = Senin … 6 = Minggu)."""
+    out, d, guard = [], start_date, 0
+    if not weekdays:
+        return out
+    while len(out) < n and guard < 3700:
+        if d.weekday() in weekdays:
+            out.append(d)
+        d += datetime.timedelta(days=1)
+        guard += 1
+    return out
+
+
+def fmt_day_label(d, short=True):
+    """'Sen 26 Okt' (atau 'Senin 26 Oktober')."""
+    mon = _ID_MONTHS[d.month - 1]
+    if short:
+        return f"{ID_DAYS_SHORT[d.weekday()]} {d.day} {mon[:3]}"
+    return f"{ID_DAYS[d.weekday()]} {d.day} {mon}"
+
+
+def _xy_arr(lat, lon):
+    lat = np.asarray(lat, dtype=float)
+    lon = np.asarray(lon, dtype=float)
+    k = math.cos(math.radians(float(np.nanmean(lat)))) if len(lat) else 1.0
+    return np.column_stack([lon * k, lat]), k
+
+
+def _cap_balance(xy, labels, cap):
+    """Pastikan tiap kelompok ≤ cap: titik kelebihan dipindah ke kelompok terdekat yang masih muat."""
+    labels = np.array(labels, dtype=int)
+    k = int(labels.max()) + 1 if len(labels) else 0
+    for _ in range(len(labels) * 2 + 5):
+        sizes = np.bincount(labels, minlength=k)
+        over = [c for c in range(k) if sizes[c] > cap]
+        if not over:
+            break
+        c = over[0]
+        under = [j for j in range(k) if sizes[j] < cap and sizes[j] > 0]
+        if not under:
+            under = [j for j in range(k) if sizes[j] < cap]
+        if not under:
+            break
+        cent = {j: xy[labels == j].mean(axis=0) for j in range(k) if sizes[j] > 0}
+        own = cent[c]
+        best, best_cost = None, float("inf")
+        for i in np.where(labels == c)[0]:
+            d_own = float(np.linalg.norm(xy[i] - own))
+            for j in under:
+                tgt = cent.get(j, xy[i])
+                cost = float(np.linalg.norm(xy[i] - tgt)) - d_own
+                if cost < best_cost:
+                    best, best_cost = (i, j), cost
+        labels[best[0]] = best[1]
+    return labels
+
+
+def _assign_territories(xy, kscale, n_petugas, starts, assigned, seed=42):
+    """Wilayah tiap petugas: indeks petugas (0..P-1) untuk setiap merchant."""
+    n, P = len(xy), n_petugas
+    start_xy = [None if s is None else np.array([s[1] * kscale, s[0]]) for s in starts]
+    if assigned is not None and (assigned >= 0).any():  # wilayah dikunci: pakai penugasan yang ada
+        terr = np.array(assigned, dtype=int)
+        anchors = {p: xy[terr == p].mean(axis=0) for p in range(P) if (terr == p).any()}
+        for i in np.where(terr < 0)[0]:
+            terr[i] = min(anchors, key=lambda p: float(np.linalg.norm(xy[i] - anchors[p])))
+        return terr
+    k = max(1, min(P, n))
+    lab = KMeans(n_clusters=k, random_state=seed, n_init=10).fit_predict(xy) if k > 1 else np.zeros(n, dtype=int)
+    lab = _cap_balance(xy, lab, math.ceil(n / k * 1.25))
+    cents = {c: xy[lab == c].mean(axis=0) for c in range(k) if (lab == c).any()}
+    cl_ids = sorted(cents)
+    petugas_for, used = {}, set()
+    with_start = [p for p in range(P) if start_xy[p] is not None]
+    if with_start and cl_ids:
+        cost = [[float(np.linalg.norm(cents[c] - start_xy[p])) for p in with_start] for c in cl_ids]
+        try:
+            from scipy.optimize import linear_sum_assignment
+            rows, cols = linear_sum_assignment(cost)
+            pairs = list(zip(rows, cols))
+        except Exception:
+            pairs, free_c = [], list(range(len(cl_ids)))
+            for j in range(len(with_start)):
+                if not free_c:
+                    break
+                i = min(free_c, key=lambda a: cost[a][j])
+                pairs.append((i, j))
+                free_c.remove(i)
+        for i, j in pairs:
+            petugas_for[cl_ids[int(i)]] = with_start[int(j)]
+            used.add(with_start[int(j)])
+    free_p = [p for p in range(P) if p not in used]
+    rest = sorted((c for c in cl_ids if c not in petugas_for), key=lambda c: cents[c][0])  # barat → timur
+    for c, p in zip(rest, free_p):
+        petugas_for[c] = p
+    return np.array([petugas_for[c] for c in lab], dtype=int)
+
+
+def plan_multi_day(lat, lon, n_petugas, cap, starts=None, assigned=None, seed=42):
+    """Bagi merchant ke petugas (wilayah) lalu ke hari kunjungan.
+
+    starts: list titik awal tiap petugas [(lat, lon) | None]. assigned: array indeks petugas per merchant
+    (-1 = belum ditugaskan) untuk wilayah terkunci. Tiap (petugas, hari) menjadi satu rute berisi ≤ cap merchant,
+    hari-hari seorang petugas disusun berurutan dari yang terdekat ke titik awalnya (area bersebelahan di hari berdekatan).
+    Mengembalikan (label_rute per merchant, [{"route_id", "p", "day"}]) — rute diurutkan per hari lalu petugas."""
+    n = len(lat)
+    P = max(1, int(n_petugas))
+    cap = max(1, int(cap))
+    starts = list(starts or [])
+    starts += [None] * (P - len(starts))
+    xy, kscale = _xy_arr(lat, lon)
+    terr = _assign_territories(xy, kscale, P, starts, assigned, seed)
+    day = np.zeros(n, dtype=int)
+    for p in range(P):
+        idx = np.where(terr == p)[0]
+        if len(idx) == 0:
+            continue
+        R = math.ceil(len(idx) / cap)
+        if R <= 1:
+            sub = np.zeros(len(idx), dtype=int)
+        else:
+            sub = KMeans(n_clusters=R, random_state=seed, n_init=10).fit_predict(xy[idx])
+            sub = _cap_balance(xy[idx], sub, math.ceil(len(idx) / R))  # ukuran hari dibuat merata (≤ cap)
+        labs = sorted(set(sub.tolist()))
+        cents = {l: xy[idx][sub == l].mean(axis=0) for l in labs}
+        cur = None if starts[p] is None else np.array([starts[p][1] * kscale, starts[p][0]])
+        order, remaining = [], set(labs)
+        if cur is None:
+            first = min(remaining, key=lambda l: cents[l][0])
+            order.append(first)
+            remaining.discard(first)
+            cur = cents[first]
+        while remaining:
+            nxt = min(remaining, key=lambda l: float(np.linalg.norm(cents[l] - cur)))
+            order.append(nxt)
+            remaining.discard(nxt)
+            cur = cents[nxt]
+        day_of = {l: d for d, l in enumerate(order)}
+        day[idx] = [day_of[l] for l in sub]
+    keys = sorted(set(zip(day.tolist(), terr.tolist())))
+    rid = {key: i for i, key in enumerate(keys)}
+    labels = np.array([rid[(d, p)] for d, p in zip(day.tolist(), terr.tolist())], dtype=int)
+    meta = [{"route_id": i, "day": d, "p": p} for (d, p), i in rid.items()]
+    meta.sort(key=lambda m: m["route_id"])
+    return labels, meta
+
+
+def build_schedule_matrix(route_summaries):
+    """Tabel jadwal: baris = petugas, kolom = tanggal, isi = 'N titik · X km'. None kalau bukan rencana beberapa hari."""
+    rows = [r for r in route_summaries if r.get("tanggal")]
+    if not rows:
+        return None
+    cols = sorted({r["tanggal"] for r in rows})
+    names = []
+    for r in rows:
+        if r.get("petugas") not in names:
+            names.append(r.get("petugas"))
+    lab = {c: fmt_day_label(datetime.date.fromisoformat(c)) for c in cols}
+    data = {lab[c]: {} for c in cols}
+    for r in rows:
+        data[lab[r["tanggal"]]][r["petugas"]] = f"{len(r['df']) - (1 if r.get('has_start') else 0)} titik · {r['distance_km']:.0f} km"
+    mat = pd.DataFrame(data).reindex(index=names, columns=[lab[c] for c in cols]).fillna("—")
+    mat.index.name = "Petugas"
+    return mat
+
+
 # ---------- Jam operasional (time windows) ----------
 def _parse_hhmm(val):
     """Baca 'HH:MM' (atau datetime.time/Timestamp) jadi datetime.time; None kalau gagal/kosong."""
@@ -1627,7 +1798,7 @@ def pick_clicked_index(df, clicked, tooltip=None, tol_deg=2e-4):
 
 # ---------- Jam buka/tutup: isi manual di tabel Data Awal ----------
 HOURS_COLS = ("jam_buka", "jam_tutup")
-PRO_ONLY_COLS = HOURS_COLS + ("prioritas", "catatan", "tgl_kunjungan")   # kolom data yang hanya dipakai di Mode Pro
+PRO_ONLY_COLS = HOURS_COLS + ("prioritas", "petugas")   # kolom data yang hanya dipakai di Mode Pro
 
 
 def normalize_hhmm_text(val):
@@ -1671,55 +1842,9 @@ def normalize_hours_changes(changed):
     return ok, bad
 
 
-def normalize_visit_date(val):
-    """Tanggal kunjungan → 'YYYY-MM-DD'. Kosong → ''. Format tak dikenal → None (tidak disimpan).
-    Menerima YYYY-MM-DD, DD/MM/YYYY, DD-MM-YYYY, dan datetime/Timestamp dari Excel."""
-    if val is None or (isinstance(val, float) and math.isnan(val)):
-        return ""
-    if hasattr(val, "strftime"):
-        try:
-            return val.strftime("%Y-%m-%d")
-        except Exception:
-            return None
-    text = str(val).strip()
-    if text in ("", "nan", "None", "NaT"):
-        return ""
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"):
-        try:
-            return datetime.datetime.strptime(text[:10] if fmt.startswith("%Y-") else text, fmt).strftime("%Y-%m-%d")
-        except ValueError:
-            continue
-    try:  # "2026-10-19 00:00:00" dari Excel
-        return datetime.datetime.strptime(text[:10], "%Y-%m-%d").strftime("%Y-%m-%d")
-    except ValueError:
-        return None
-
-
-def normalize_date_changes(changed):
-    """Rapikan perubahan kolom tgl_kunjungan. Return (perubahan_valid, daftar_salah[(row_key, nilai)])."""
-    ok, bad = {}, []
-    for key, cols in changed.items():
-        for col, val in cols.items():
-            if col == "tgl_kunjungan":
-                norm = normalize_visit_date(val)
-                if norm is None:
-                    bad.append((key, val))
-                    continue
-                val = norm
-            ok.setdefault(key, {})[col] = val
-    return ok, bad
-
-
-def _clean_text(v, limit=200):
-    if v is None or (isinstance(v, float) and math.isnan(v)):
-        return ""
-    t = str(v).strip()
-    return "" if t in ("nan", "None") else t[:limit]
-
-
 # ---------- Edit data langsung di tabel ----------
 EDITABLE_COLS = ("merchant_name", "latitude", "longitude", "status", "alamat", "prioritas", "jam_buka", "jam_tutup",
-                 "catatan", "tgl_kunjungan")
+                 "petugas")
 
 
 def apply_data_edits(df, edits):
@@ -1972,6 +2097,8 @@ def build_whatsapp_text(r, map_links):
     lines = [
         f"*Rute {r['route_id'] + 1}* — {len(df)} titik · ~{r['distance_km']:.1f} km · ~{format_duration(total_sec)}"
     ]
+    if r.get("tanggal"):
+        lines.append(f"📅 {fmt_day_label(datetime.date.fromisoformat(r['tanggal']), short=False)}")
     if r.get("driver"):
         lines.append(f"🧑‍✈️ Petugas: {r['driver']}")
     if r.get("depot_name"):
@@ -2058,6 +2185,9 @@ def build_excel_bytes(route_summaries):
             d["petugas"] = r["driver"]
         if r.get("depot_name"):
             d["titik_awal"] = r["depot_name"]
+        if r.get("tanggal"):
+            d["tanggal"] = r["tanggal"]
+            d["hari"] = r.get("hari", "")
         parts.append(d)
     final_df = pd.concat(parts, ignore_index=True)
 
@@ -2067,6 +2197,8 @@ def build_excel_bytes(route_summaries):
         saved_km = naive_km - r["distance_km"]
         summary_rows.append({
             "rute": f"Rute {r['route_id'] + 1}",
+            "tanggal": r.get("tanggal", ""),
+            "hari": r.get("hari", ""),
             "petugas": r.get("driver", ""),
             "titik_awal": r.get("depot_name", ""),
             "jumlah_titik": len(r["df"]),
@@ -2080,9 +2212,13 @@ def build_excel_bytes(route_summaries):
 
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        _mat = build_schedule_matrix(route_summaries)
+        if _mat is not None:
+            _mat.to_excel(writer, sheet_name="Jadwal")
         final_df.to_excel(writer, index=False, sheet_name="Semua Rute")
         for r, d in zip(route_summaries, parts):
-            sheet_name = f"Rute {r['route_id'] + 1}"[:31]
+            sheet_name = (f"Rute {r['route_id'] + 1}"
+                          + (f" {fmt_day_label(datetime.date.fromisoformat(r['tanggal']))}" if r.get("tanggal") else ""))[:31]
             d.to_excel(writer, index=False, sheet_name=sheet_name)
         summary_df.to_excel(writer, index=False, sheet_name="Ringkasan")
     return buffer.getvalue()
@@ -2168,93 +2304,22 @@ def _move_stop(route_id, action):
     res["excel_bytes"] = build_excel_bytes(res["route_summaries"])
 
 
-def _release_visit_holds():
-    """Dipanggil saat tombol Buat Rute ditekan: merchant yang sudah ditandai selesai kini benar-benar dilewati."""
-    st.session_state.visit_hold_keys = set()
-
-
-def _visit_sig(name, lat, lon):
+def _row_sig(name, lat, lon):
     try:
         return (str(name).strip(), round(float(lat), 5), round(float(lon), 5))
     except (TypeError, ValueError):
         return (str(name).strip(), None, None)
 
 
-def render_visit_editor(r):
-    """Tabel kecil di tiap rute: ubah status, catatan, dan tanggal kunjungan tanpa kembali ke tabel Data Awal.
-    Disimpan sebagai edit data (sama seperti tabel Data Awal), jadi ikut terbawa ke unduhan dan sesi."""
+def _save_territories(assign):
+    """Callback: simpan penugasan petugas (wilayah) tiap merchant ke data sebagai edit kolom `petugas`."""
     ss = st.session_state
-    rid = r["route_id"]
-    kmap, vstate = ss.get("row_key_map", {}), ss.get("visit_state", {})
-    rows = []
-    for _, row in r["df"].iterrows():
-        key = kmap.get(_visit_sig(row["merchant_name"], row["latitude"], row["longitude"]))
-        if key is None or key not in vstate:
-            continue
-        v = vstate[key]
-        rows.append({"_key": key, "No": int(row["sequence"]), "Merchant": str(row["merchant_name"]),
-                     "Status": v["status"], "Catatan": v["catatan"], "Tgl kunjungan": v["tgl"]})
-    if not rows:
-        return
-    base = pd.DataFrame(rows)
-    st.markdown("**📝 Hasil kunjungan**")
-    st.caption(
-        "Isi status dan catatan setelah dikunjungi, lalu **Simpan**. Tanggal terisi otomatis hari ini (boleh diubah, "
-        "format YYYY-MM-DD). Merchant yang ditandai **sudah akuisisi / belum tertarik** tetap tampil di rute ini dan "
-        "baru dilewati saat kamu membuat rute lagi."
-    )
-    with st.form(f"visit_form_{rid}_{ss.data_edit_nonce}"):
-        edited = st.data_editor(
-            base, key=f"visit_ed_{rid}_{ss.data_edit_nonce}", hide_index=True, num_rows="fixed", width="stretch",
-            disabled=["_key", "No", "Merchant"],
-            column_config={
-                "_key": None,
-                "Status": st.column_config.SelectboxColumn("Status", options=STATUS_OPTIONS, required=True, width="medium"),
-                "Catatan": st.column_config.TextColumn("Catatan", max_chars=200, width="large"),
-                "Tgl kunjungan": st.column_config.TextColumn("Tgl kunjungan", max_chars=10, width="small"),
-            },
-            **TABLE_KW,
-        )
-        saved = st.form_submit_button("💾 Simpan hasil kunjungan", type="primary")
-    if not saved:
-        return
-    today = datetime.date.today().strftime("%Y-%m-%d")
-    changes, bad = {}, []
-    for _, row in edited.iterrows():
-        key, old = row["_key"], vstate[row["_key"]]
-        new_status = row["Status"] if row["Status"] in STATUS_OPTIONS else old["status"]
-        new_note = _clean_text(row["Catatan"])
-        new_tgl = normalize_visit_date(row["Tgl kunjungan"])
-        if new_tgl is None:
-            bad.append(f"{row['Merchant']} → “{row['Tgl kunjungan']}”")
-            new_tgl = old["tgl"]
-        chg = {}
-        if new_status != old["status"]:
-            chg["status"] = new_status
-        if new_note != old["catatan"]:
-            chg["catatan"] = new_note
-        if new_tgl != old["tgl"]:
-            chg["tgl_kunjungan"] = new_tgl
-        elif chg:  # status/catatan diubah, tanggal tidak disentuh → hari ini
-            chg["tgl_kunjungan"] = today
-        if chg:
-            changes[key] = chg
-    if bad:
-        st.warning("⚠️ Tanggal bukan format YYYY-MM-DD dan tidak diubah: " + "; ".join(bad[:6]))
-    if not changes:
-        if not bad:
-            st.info("Belum ada perubahan untuk disimpan.")
-        return
-    for key, chg in changes.items():
-        ss.data_edits["changed"].setdefault(key, {}).update(chg)
-        if "status" in chg:
-            if chg["status"] in STATUS_EXCLUDED:
-                ss.visit_hold_keys.add(key)
-            else:
-                ss.visit_hold_keys.discard(key)
+    n = 0
+    for key, name in assign.items():
+        ss.data_edits["changed"].setdefault(key, {})["petugas"] = name
+        n += 1
     ss.data_edit_nonce += 1
-    ss.visit_flash = f"✅ Hasil kunjungan {len(changes)} merchant disimpan."
-    st.rerun()
+    ss.territory_flash = f"🔒 Wilayah {n} merchant disimpan ke kolom petugas."
 
 
 def render_reorder_controls(r):
@@ -2441,7 +2506,7 @@ def _pdf_payload(r, links, seq_nums, result):
         "show_selesai": "jam_selesai" in df.columns,
         "links": [(int(a), int(b), u) for a, b, u in links],
         "seq_nums": [int(x) for x in seq_nums],
-        "date": result.get("base_date", ""), "start_label": result.get("start_label", ""),
+        "date": r.get("tanggal") or result.get("base_date", ""), "start_label": result.get("start_label", ""),
         "driver": r.get("driver") or "", "depot_name": r.get("depot_name") or "",
     }
 
@@ -2682,14 +2747,10 @@ if "multi_depot_next_id" not in st.session_state:
     st.session_state.multi_depot_next_id = 1
 if "use_multi_depot_flag" not in st.session_state:
     st.session_state.use_multi_depot_flag = False
-if "visit_hold_keys" not in st.session_state:
-    st.session_state.visit_hold_keys = set()  # merchant yang baru ditandai selesai: dilewati baru saat rute dibuat ulang
-if "visit_state" not in st.session_state:
-    st.session_state.visit_state = {}         # {row_key: {status, catatan, tgl}} dari data saat ini
 if "row_key_map" not in st.session_state:
-    st.session_state.row_key_map = {}         # {(nama, lat, lon): row_key} untuk mencocokkan baris hasil rute
-if "visit_flash" not in st.session_state:
-    st.session_state.visit_flash = None
+    st.session_state.row_key_map = {}         # {(nama, lat, lon): row_key} — mencocokkan baris hasil rute ke data
+if "territory_flash" not in st.session_state:
+    st.session_state.territory_flash = None
 if "driver_names" not in st.session_state:
     st.session_state.driver_names = {}  # {route_id: nama}
 if "geocode_cache" not in st.session_state:
@@ -3736,9 +3797,9 @@ def render_howto():
                 "- **Jam operasional** — isi `jam_buka`/`jam_tutup` (HH:MM) di Excel/CSV atau di **Lihat & Edit Data Awal**. "
                 "Jam tiba yang lewat jam tutup ditandai ⚠️. Ceklis **Optimalkan rute berdasarkan jam operasional** di "
                 "Langkah 2 mengatur urutan: yang tutup lebih awal didahulukan, yang belum buka ditunda (atau petugas menunggu ⏳).\n"
-                "- **Hasil kunjungan** — di tiap rute (bagian bawah), ubah status, isi catatan, dan tanggal kunjungan "
-                "setelah dikunjungi lalu Simpan. Merchant yang ditandai sudah akuisisi / belum tertarik baru dilewati saat "
-                "rute dibuat lagi. Datanya ikut ke **Lihat & Edit Data Awal** dan unduhan Excel.\n"
+                "- **Rencana beberapa hari** — centang di Langkah 2 untuk membagi ratusan merchant ke beberapa petugas "
+                "(tiap petugas satu wilayah) dan ke hari kerja. Atur jumlah petugas, hari kerja, maks. merchant per hari, "
+                "dan tanggal mulai; hasilnya jadwal petugas × tanggal. **Kunci wilayah** menjaga petugas tetap di areanya.\n"
                 "- **Multi-depot** — tentukan titik awal untuk tiap rute (Rute 1, Rute 2, …); jumlah rute diatur di Langkah 2.\n"
                 "- **Seimbangkan beban waktu** — durasi tiap rute dibuat lebih mirip.\n"
                 "- **Nama petugas** — isi di tiap rute setelah dibuat; ikut ke Excel, WhatsApp, dan PDF.\n"
@@ -4036,11 +4097,10 @@ if st.session_state.page == "Routing":
                         "prioritas": st.column_config.CheckboxColumn(
                             "⭐ prioritas", default=False,
                             help="Centang kalau merchant ini harus dikunjungi lebih dulu di rutenya."),
-                        "catatan": st.column_config.TextColumn(
-                            "📝 catatan", max_chars=200, help="Catatan hasil kunjungan."),
-                        "tgl_kunjungan": st.column_config.TextColumn(
-                            "📅 tgl_kunjungan", max_chars=10,
-                            help="Tanggal kunjungan terakhir, format YYYY-MM-DD (mis. 2026-10-19). Kosong = belum pernah."),
+                        "petugas": st.column_config.TextColumn(
+                            "👤 petugas", max_chars=60,
+                            help="Wilayah tetap: nama petugas yang memegang merchant ini. Dipakai di Rencana beberapa "
+                                 "hari saat 'Kunci wilayah petugas' aktif; ubah di sini untuk memindahkan merchant antar petugas."),
                         "jam_buka": st.column_config.TextColumn(
                             "🕒 jam_buka", max_chars=8,
                             help="Jam buka, format HH:MM (mis. 08:00). Kosong = tidak dicek."),
@@ -4055,7 +4115,6 @@ if st.session_state.page == "Routing":
                 _del, _chg = diff_data_edits(_view, _edited, _edit_cols)
                 _chg, _bad = normalize_hours_changes(_chg)
                 _chg = normalize_priority_changes(_chg)
-                _chg, _bad_d = normalize_date_changes(_chg)
                 _bad_msg = ""
                 if _bad:
                     _names = _view.set_index("_row_key")["merchant_name"]
@@ -4063,12 +4122,6 @@ if st.session_state.page == "Routing":
                         "⚠️ Jam berikut bukan format HH:MM (mis. 08:00) dan tidak disimpan: "
                         + "; ".join(f"{_names.get(k, k)} → {c} = “{v}”" for k, c, v in _bad[:8])
                         + (f" (+{len(_bad) - 8} lagi)" if len(_bad) > 8 else "")
-                    )
-                if _bad_d:
-                    _names_d = _view.set_index("_row_key")["merchant_name"]
-                    _bad_msg = (_bad_msg + "\n\n" if _bad_msg else "") + (
-                        "⚠️ Tanggal berikut bukan format YYYY-MM-DD dan tidak disimpan: "
-                        + "; ".join(f"{_names_d.get(k, k)} = “{v}”" for k, v in _bad_d[:8])
                     )
                 if _del or _chg:
                     _store = st.session_state.data_edits
@@ -4194,23 +4247,10 @@ if st.session_state.page == "Routing":
                 st.stop()
 
         # Merchant berstatus "sudah akuisisi" / "belum tertarik" tidak dimasukkan ke rute.
-        # Hasil kunjungan (Pro): snapshot status/catatan/tanggal tiap merchant untuk tabel di hasil rute.
-        _vs = {}
-        if IS_PRO:
-            _cat = df["catatan"] if "catatan" in df.columns else pd.Series([""] * len(df), index=df.index)
-            _tgl = df["tgl_kunjungan"] if "tgl_kunjungan" in df.columns else pd.Series([""] * len(df), index=df.index)
-            for _k, _st, _c, _t in zip(df["_row_key"], df["status"], _cat, _tgl):
-                _vs[_k] = {"status": _st, "catatan": _clean_text(_c), "tgl": normalize_visit_date(_t) or ""}
-        st.session_state.visit_state = _vs
-        # Merchant yang BARU ditandai selesai dari hasil rute tetap "ditahan" di data sampai rute dibuat ulang,
-        # supaya hasil rute yang sedang dilihat tidak hilang.
-        _held = df["_row_key"].isin(st.session_state.visit_hold_keys) if IS_PRO else pd.Series(False, index=df.index)
-        _excl_any = df["status"].isin(STATUS_EXCLUDED)
-        _skip_status = _excl_any & ~_held
-        _n_held = int((_excl_any & _held).sum())
+        _skip_status = df["status"].isin(STATUS_EXCLUDED)
         _n_excl_status = int(_skip_status.sum())
-        _n_acq = int(((df["status"] == STATUS_AKUISISI) & ~_held).sum())
-        _n_not = int(((df["status"] == STATUS_TIDAK) & ~_held).sum())
+        _n_acq = int((df["status"] == STATUS_AKUISISI).sum())
+        _n_not = int((df["status"] == STATUS_TIDAK).sum())
         if _skip_status.any():
             df = df[~_skip_status].reset_index(drop=True)
             if df.empty:
@@ -4218,7 +4258,7 @@ if st.session_state.page == "Routing":
                 st.stop()
         st.session_state.row_key_map = {}
         for _k, _n, _la, _lo in zip(df["_row_key"], df["merchant_name"], df["latitude"], df["longitude"]):
-            st.session_state.row_key_map.setdefault(_visit_sig(_n, _la, _lo), _k)
+            st.session_state.row_key_map.setdefault(_row_sig(_n, _la, _lo), _k)
         df = df.drop(columns=["_row_key"], errors="ignore")
 
         _n_priority = int(df["prioritas"].apply(is_truthy).sum()) if "prioritas" in df.columns else 0
@@ -4240,8 +4280,6 @@ if st.session_state.page == "Routing":
         if _n_excl_status:
             _chk_items.append(f"🚫 **{_n_excl_status}** tidak diikutkan karena status (sudah akuisisi {_n_acq}, belum tertarik {_n_not})")
         _info_items = []
-        if _n_held:
-            _info_items.append(f"✅ {_n_held} merchant baru ditandai selesai — dilewati saat rute dibuat ulang")
         if _n_priority:
             _info_items.append(f"⭐ {_n_priority} merchant prioritas dikunjungi lebih dulu")
         if _n_hours_rows:
@@ -4262,84 +4300,156 @@ if st.session_state.page == "Routing":
         )
         if IS_PRO:
             render_preset_panel()
-        use_multi_depot = bool(IS_PRO and st.session_state.use_multi_depot_flag)  # nilai widget = flag ini
+        dp_on = False
+        dp_n, dp_cap, dp_lock, _dp_days_est = 1, 12, False, 0
+        dp_names, dp_rows, dp_days_sel, dp_start_date = [], [], [], datetime.date.today()
+        if IS_PRO:
+            _ss = st.session_state
+            _today = datetime.date.today()
+            _ss.setdefault("dp_on", False)
+            _ss.setdefault("dp_n", 2)
+            _ss.setdefault("dp_cap", 12)
+            _ss.setdefault("dp_days", ID_DAYS[:5])
+            _ss.setdefault("dp_lock", False)
+            _ss.setdefault("dp_start_date", _today + datetime.timedelta(days=(7 - _today.weekday()) % 7))
+            for _k in ["dp_on", "dp_n", "dp_cap", "dp_days", "dp_lock", "dp_start_date"] + [
+                f"{_p}_{_i}" for _i in range(30) for _p in ("dp_name", "dp_start")
+            ]:
+                if _k in _ss:
+                    _ss[_k] = _ss[_k]   # jaga isian walau bagian ini sempat tidak tampil
+            with st.container(border=True):
+                dp_on = st.checkbox(
+                    "📅 Rencana beberapa hari (bagi ke hari kerja & petugas)", key="dp_on",
+                    help="Untuk ratusan merchant: dibagi ke beberapa petugas (tiap petugas satu wilayah) lalu ke hari "
+                         "kerja. Tiap petugas-hari menjadi satu rute. Menggantikan pengaturan jumlah rute dan multi-depot.",
+                )
+                if dp_on:
+                    dc1, dc2, dc3 = st.columns(3)
+                    with dc1:
+                        dp_n = int(st.number_input("Jumlah petugas", min_value=1, max_value=30, step=1, key="dp_n"))
+                    with dc2:
+                        dp_cap = int(st.number_input("Maks. merchant per petugas per hari", min_value=1, max_value=60,
+                                                     step=1, key="dp_cap"))
+                    with dc3:
+                        dp_start_date = st.date_input("Mulai tanggal", key="dp_start_date")
+                    dp_days_sel = st.multiselect("Hari kerja", ID_DAYS, key="dp_days")
+                    dp_lock = st.checkbox(
+                        "🔒 Kunci wilayah petugas", key="dp_lock",
+                        help="Merchant yang sudah punya kolom `petugas` (nama sama dengan daftar di bawah) tetap di petugas "
+                             "itu; merchant baru masuk ke wilayah petugas terdekat. Simpan wilayah dari hasil rute lewat "
+                             "tombol 🔒 di tab Ringkasan, atau isi kolom petugas di Lihat & Edit Data Awal / Excel.",
+                    )
+                    st.markdown("**Petugas** — nama dan titik awal (rumah/kantor, opsional)")
+                    for _i in range(dp_n):
+                        pc1, pc2 = st.columns([1, 2])
+                        with pc1:
+                            _nm = st.text_input(f"Nama petugas {_i + 1}", key=f"dp_name_{_i}", placeholder=f"Petugas {_i + 1}",
+                                                label_visibility="collapsed")
+                        with pc2:
+                            _loc = st.text_input(f"Titik awal petugas {_i + 1}", key=f"dp_start_{_i}",
+                                                 placeholder="Titik awal: link Google Maps atau koordinat (opsional)",
+                                                 label_visibility="collapsed")
+                        dp_names.append(_nm.strip() or f"Petugas {_i + 1}")
+                        dp_rows.append((_nm.strip(), _loc))
+                    if len(set(n.lower() for n in dp_names)) < len(dp_names):
+                        st.warning("⚠️ Ada nama petugas yang kembar — beri nama berbeda supaya wilayahnya tidak tertukar.")
+                    if not dp_days_sel:
+                        st.warning("⚠️ Pilih minimal satu hari kerja.")
+                    _per = math.ceil(len(df) / dp_n)
+                    _dp_days_est = math.ceil(_per / dp_cap)
+                    _weeks = math.ceil(_dp_days_est / max(1, len(dp_days_sel)))
+                    st.caption(
+                        f"📅 Perkiraan: {len(df)} merchant → {dp_n} petugas × ±{_dp_days_est} hari kerja "
+                        f"(≈{_weeks} minggu), ±{dp_n * _dp_days_est} rute."
+                    )
+        use_multi_depot = bool(IS_PRO and st.session_state.use_multi_depot_flag and not dp_on)  # nilai widget = flag ini
         with st.container(border=True):
             st.markdown("**🧭 Pembagian rute**")
-            if use_multi_depot:
-                st.info(
-                    "Multi-depot aktif — atur jumlah rute di bawah, lalu tentukan titik awal tiap rute di bagian "
-                    "**Titik awal**.",
-                    icon="🏭",
-                )
-            plan_mode = st.radio(
-                "Cara menentukan jumlah rute",
-                [PLAN_MAX, PLAN_COUNT],
-                index=0 if st.session_state.plan_mode_flag == PLAN_MAX else 1,
-                key="_plan_widget",
-                on_change=_sync_plan,
-                horizontal=not IS_MOBILE,
-            )
-            max_points_per_route, target_routes = _plan_control(df, plan_mode)
-            n_cluster_default = target_routes or math.ceil(len(df) / max_points_per_route)
-            st.caption(f"🧭 Perkiraan: **{len(df)} merchant → {n_cluster_default} rute**")
-
-            if target_routes is not None:
-                split_mode = SPLIT_AUTO
+            if dp_on:
+                plan_mode = PLAN_MAX
+                max_points_per_route, target_routes = dp_cap, None
+                n_cluster_default = max(1, dp_n * _dp_days_est)
+                split_mode, balance_time = SPLIT_AUTO, False
                 st.caption(
-                    f"Merchant dibagi ke {target_routes} rute mengikuti area lokasi, "
-                    f"maksimal {max_points_per_route} merchant per rute supaya beban merata."
+                    "Mode **Rencana beberapa hari** aktif: jumlah rute ditentukan oleh jumlah petugas, hari kerja, dan "
+                    "batas merchant per hari di atas."
                 )
-            elif n_cluster_default > 1 and IS_PRO and not use_multi_depot:
-                split_mode = st.radio(
-                    "Cara membagi rute",
-                    [SPLIT_AUTO, SPLIT_FULL],
-                    index=0 if st.session_state.split_mode_flag == SPLIT_AUTO else 1,
-                    key="_split_widget",
-                    on_change=_sync_split,
-                    horizontal=not IS_MOBILE,
-                    help=(
-                        "Otomatis: merchant dikelompokkan menurut area/kedekatan lokasi, jadi jarak tempuh "
-                        "lebih pendek, tapi isi tiap rute bisa berbeda (selalu di bawah atau sama dengan maksimal). "
-                        "Isi penuh: tiap rute diisi sampai batas maksimal dan sisanya masuk rute terakhir, "
-                        "tapi rute bisa lebih melebar karena merchant dari area lain ikut terambil."
-                    ),
-                )
-                _n, _k, _m = len(df), n_cluster_default, max_points_per_route
-                if split_mode == SPLIT_FULL:
-                    full_sizes = [_m] * (_k - 1) + [_n - _m * (_k - 1)]
-                    st.caption(f"Isi tiap rute: {_fmt_sizes(full_sizes)} merchant.")
-                else:
-                    st.caption(
-                        f"Pembagian mengikuti area lokasi — {_k} rute, masing-masing maksimal {_m} merchant. "
-                        "Pilih **Isi penuh** kalau ingin tiap rute berisi tepat sebanyak maksimal."
+            else:
+                if use_multi_depot:
+                    st.info(
+                        "Multi-depot aktif — atur jumlah rute di bawah, lalu tentukan titik awal tiap rute di bagian "
+                        "**Titik awal**.",
+                        icon="🏭",
                     )
-            elif n_cluster_default > 1:
-                split_mode = SPLIT_AUTO   # Mode Basic: selalu otomatis per area ("Isi penuh" ada di Mode Pro)
-                st.caption(
-                    f"Merchant dikelompokkan menurut area lokasi — {n_cluster_default} rute, masing-masing maksimal "
-                    f"{max_points_per_route} merchant."
+                plan_mode = st.radio(
+                    "Cara menentukan jumlah rute",
+                    [PLAN_MAX, PLAN_COUNT],
+                    index=0 if st.session_state.plan_mode_flag == PLAN_MAX else 1,
+                    key="_plan_widget",
+                    on_change=_sync_plan,
+                    horizontal=not IS_MOBILE,
                 )
-            else:
-                split_mode = st.session_state.split_mode_flag if IS_PRO else SPLIT_AUTO
+                max_points_per_route, target_routes = _plan_control(df, plan_mode)
+                n_cluster_default = target_routes or math.ceil(len(df) / max_points_per_route)
+                st.caption(f"🧭 Perkiraan: **{len(df)} merchant → {n_cluster_default} rute**")
 
-            # Pemerataan beban waktu: hanya relevan kalau ada >1 rute hasil pengelompokan per area.
-            if IS_PRO and n_cluster_default > 1 and not use_multi_depot and split_mode == SPLIT_AUTO:
-                balance_time = st.checkbox(
-                    "⏱️ Seimbangkan beban waktu antar rute",
-                    value=st.session_state.balance_time_flag,
-                    key="_balance_time_widget",
-                    on_change=_sync_balance_time,
-                    help=(
-                        "Tanpa ini, rute dibagi berdasarkan area dan jumlah merchant, jadi satu rute bisa 2 jam "
-                        "sementara yang lain 5 jam. Dengan ini, merchant di perbatasan antar rute dipindahkan supaya "
-                        "durasi (perjalanan + kunjungan) tiap rute lebih mirip. Perkiraan memakai jarak garis lurus; "
-                        "rute akhir tetap dihitung dengan jarak jalan asli."
-                        + (" Batas maksimal merchant per rute tetap dihormati." if target_routes is None
-                           else " Di mode jumlah rute, jumlah merchant per rute boleh berbeda demi menyamakan waktu.")
-                    ),
-                )
-            else:
-                balance_time = False
+                if target_routes is not None:
+                    split_mode = SPLIT_AUTO
+                    st.caption(
+                        f"Merchant dibagi ke {target_routes} rute mengikuti area lokasi, "
+                        f"maksimal {max_points_per_route} merchant per rute supaya beban merata."
+                    )
+                elif n_cluster_default > 1 and IS_PRO and not use_multi_depot:
+                    split_mode = st.radio(
+                        "Cara membagi rute",
+                        [SPLIT_AUTO, SPLIT_FULL],
+                        index=0 if st.session_state.split_mode_flag == SPLIT_AUTO else 1,
+                        key="_split_widget",
+                        on_change=_sync_split,
+                        horizontal=not IS_MOBILE,
+                        help=(
+                            "Otomatis: merchant dikelompokkan menurut area/kedekatan lokasi, jadi jarak tempuh "
+                            "lebih pendek, tapi isi tiap rute bisa berbeda (selalu di bawah atau sama dengan maksimal). "
+                            "Isi penuh: tiap rute diisi sampai batas maksimal dan sisanya masuk rute terakhir, "
+                            "tapi rute bisa lebih melebar karena merchant dari area lain ikut terambil."
+                        ),
+                    )
+                    _n, _k, _m = len(df), n_cluster_default, max_points_per_route
+                    if split_mode == SPLIT_FULL:
+                        full_sizes = [_m] * (_k - 1) + [_n - _m * (_k - 1)]
+                        st.caption(f"Isi tiap rute: {_fmt_sizes(full_sizes)} merchant.")
+                    else:
+                        st.caption(
+                            f"Pembagian mengikuti area lokasi — {_k} rute, masing-masing maksimal {_m} merchant. "
+                            "Pilih **Isi penuh** kalau ingin tiap rute berisi tepat sebanyak maksimal."
+                        )
+                elif n_cluster_default > 1:
+                    split_mode = SPLIT_AUTO   # Mode Basic: selalu otomatis per area ("Isi penuh" ada di Mode Pro)
+                    st.caption(
+                        f"Merchant dikelompokkan menurut area lokasi — {n_cluster_default} rute, masing-masing maksimal "
+                        f"{max_points_per_route} merchant."
+                    )
+                else:
+                    split_mode = st.session_state.split_mode_flag if IS_PRO else SPLIT_AUTO
+
+                # Pemerataan beban waktu: hanya relevan kalau ada >1 rute hasil pengelompokan per area.
+                if IS_PRO and n_cluster_default > 1 and not use_multi_depot and split_mode == SPLIT_AUTO:
+                    balance_time = st.checkbox(
+                        "⏱️ Seimbangkan beban waktu antar rute",
+                        value=st.session_state.balance_time_flag,
+                        key="_balance_time_widget",
+                        on_change=_sync_balance_time,
+                        help=(
+                            "Tanpa ini, rute dibagi berdasarkan area dan jumlah merchant, jadi satu rute bisa 2 jam "
+                            "sementara yang lain 5 jam. Dengan ini, merchant di perbatasan antar rute dipindahkan supaya "
+                            "durasi (perjalanan + kunjungan) tiap rute lebih mirip. Perkiraan memakai jarak garis lurus; "
+                            "rute akhir tetap dihitung dengan jarak jalan asli."
+                            + (" Batas maksimal merchant per rute tetap dihormati." if target_routes is None
+                               else " Di mode jumlah rute, jumlah merchant per rute boleh berbeda demi menyamakan waktu.")
+                        ),
+                    )
+                else:
+                    balance_time = False
 
 
         with st.container(border=True):
@@ -4359,7 +4469,10 @@ if st.session_state.page == "Routing":
 
             use_multi_depot = False
             depot_rows_raw = []  # [(nama, lokasi), ...] — mentah, belum divalidasi/resolve
-            if IS_PRO:
+            if dp_on:
+                st.caption("Dipakai untuk petugas yang titik awalnya tidak diisi di Rencana beberapa hari. "
+                           "Kosong = titik mulai dipilih otomatis.")
+            if IS_PRO and not dp_on:
                 use_multi_depot = st.checkbox(
                     "🏭 Pakai banyak titik awal (multi-depot)",
                     value=st.session_state.use_multi_depot_flag,
@@ -4512,6 +4625,7 @@ if st.session_state.page == "Routing":
 
 
         _plan_txt = (
+            f"{dp_n} petugas × ±{_dp_days_est} hari kerja (maks. {dp_cap}/hari)" if dp_on else
             f"{target_routes} rute (maks. {max_points_per_route}/rute)" if target_routes is not None
             else f"{n_cluster_default} rute (maks. {max_points_per_route} merchant/rute"
                  + (", isi penuh" if n_cluster_default > 1 and split_mode == SPLIT_FULL else
@@ -4526,7 +4640,7 @@ if st.session_state.page == "Routing":
         )
 
         st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
-        run = st.button("🚀 Buat Rute Optimal Sekarang", type="primary", width='stretch', on_click=_release_visit_holds)
+        run = st.button("🚀 Buat Rute Optimal Sekarang", type="primary", width='stretch')
 
         # Fingerprint of the current input+settings, so stale results (from a
         # previous file/slider value) don't linger after the inputs change.
@@ -4534,6 +4648,7 @@ if st.session_state.page == "Routing":
             len(df), tuple(df["merchant_name"]), max_points_per_route, target_routes, starting_link,
             round_trip, split_mode, int(visit_minutes), start_time.strftime("%H:%M"),
             use_multi_depot, tuple(depot_rows_raw), balance_time, hours_opt,
+            (dp_n, tuple(dp_names), tuple(dp_rows), tuple(dp_days_sel), dp_cap, str(dp_start_date), dp_lock) if dp_on else None,
         )
 
         if run:
@@ -4567,30 +4682,63 @@ if st.session_state.page == "Routing":
                         start_name = parsed_name or "START POINT"
 
                 balance_info = None
-                # Jumlah rute: sesuai pengaturan Langkah 2. Dengan multi-depot, tiap rute lalu dipasangkan
-                # dengan titik awal yang diisi untuk rute itu (lihat assign_routes_to_depots).
-                n_cluster = target_routes or math.ceil(len(df) / max_points_per_route)
-                n_cluster = max(1, min(n_cluster, len(df)))
-                if target_routes is None and n_cluster > 1 and split_mode == SPLIT_FULL and not depots:
-                    df["route"] = fill_clusters(df, max_points_per_route)
-                else:
-                    coords = df[["latitude", "longitude"]]
-                    kmeans = KMeans(n_clusters=n_cluster, random_state=42, n_init=10)
-                    df["route"] = kmeans.fit_predict(coords)
-                    df = balance_clusters(df, max_points_per_route)
-                    if balance_time and df["route"].nunique() > 1:
-                        _start_xy = (start_lat, start_lon) if (start_lat and start_lon) else None
-                        # Mode "jumlah rute": batas maksimal per rute hanya turunan (pembulatan),
-                        # jadi tidak dipakai. Mode "maksimal titik per rute": batasnya tetap dihormati.
-                        _cap = max_points_per_route if target_routes is None else None
-                        new_labels, balance_info = balance_by_time(
-                            df, df["route"].to_numpy(), int(visit_minutes), start=_start_xy, max_points=_cap,
-                        )
-                        df["route"] = new_labels
+                dp_meta = {}
                 route_depot = {}
-                if depots:
-                    _new_of, route_depot = assign_routes_to_depots(df, depots)
-                    df["route"] = df["route"].map(_new_of)
+                if dp_on:
+                    if not dp_days_sel:
+                        st.error("❌ Pilih minimal satu hari kerja untuk Rencana beberapa hari.")
+                        st.stop()
+                    _starts = [None] * dp_n
+                    _dp_deps, _dp_errs = parse_depot_rows(dp_rows)
+                    for _e in _dp_errs:
+                        st.warning("⚠️ " + _e.replace("Titik awal Rute", "Titik awal petugas").replace("rute ini dimulai otomatis", "dimulai otomatis"))
+                    for _d in _dp_deps:
+                        _starts[_d["row"]] = (_d["lat"], _d["lon"])
+                    _assigned = None
+                    if dp_lock and "petugas" in df.columns:
+                        _by_name = {n.strip().lower(): i for i, n in enumerate(dp_names)}
+                        _assigned = np.array([_by_name.get(str(v).strip().lower(), -1) for v in df["petugas"]], dtype=int)
+                    _labels, _meta = plan_multi_day(
+                        df["latitude"], df["longitude"], dp_n, dp_cap, starts=_starts, assigned=_assigned,
+                    )
+                    df["route"] = _labels
+                    _wd = {ID_DAYS.index(x) for x in dp_days_sel}
+                    _dates = make_work_dates(dp_start_date, _wd, max(m["day"] for m in _meta) + 1)
+                    for _m in _meta:
+                        _dt = _dates[_m["day"]]
+                        dp_meta[_m["route_id"]] = {
+                            "petugas": dp_names[_m["p"]], "date": _dt.isoformat(), "hari": fmt_day_label(_dt, short=False),
+                        }
+                        _sp = _starts[_m["p"]]
+                        route_depot[_m["route_id"]] = (
+                            {"name": f"Titik awal {dp_names[_m['p']]}", "lat": _sp[0], "lon": _sp[1], "row": _m["p"]}
+                            if _sp else None
+                        )
+                else:
+                    # Jumlah rute: sesuai pengaturan Langkah 2. Dengan multi-depot, tiap rute lalu dipasangkan
+                    # dengan titik awal yang diisi untuk rute itu (lihat assign_routes_to_depots).
+                    n_cluster = target_routes or math.ceil(len(df) / max_points_per_route)
+                    n_cluster = max(1, min(n_cluster, len(df)))
+                    if target_routes is None and n_cluster > 1 and split_mode == SPLIT_FULL and not depots:
+                        df["route"] = fill_clusters(df, max_points_per_route)
+                    else:
+                        coords = df[["latitude", "longitude"]]
+                        kmeans = KMeans(n_clusters=n_cluster, random_state=42, n_init=10)
+                        df["route"] = kmeans.fit_predict(coords)
+                        df = balance_clusters(df, max_points_per_route)
+                        if balance_time and df["route"].nunique() > 1:
+                            _start_xy = (start_lat, start_lon) if (start_lat and start_lon) else None
+                            # Mode "jumlah rute": batas maksimal per rute hanya turunan (pembulatan),
+                            # jadi tidak dipakai. Mode "maksimal titik per rute": batasnya tetap dihormati.
+                            _cap = max_points_per_route if target_routes is None else None
+                            new_labels, balance_info = balance_by_time(
+                                df, df["route"].to_numpy(), int(visit_minutes), start=_start_xy, max_points=_cap,
+                            )
+                            df["route"] = new_labels
+                    route_depot = {}
+                    if depots:
+                        _new_of, route_depot = assign_routes_to_depots(df, depots)
+                        df["route"] = df["route"].map(_new_of)
 
                 all_routes = []
                 route_summaries = []
@@ -4601,14 +4749,20 @@ if st.session_state.page == "Routing":
                 base_date = datetime.date.today()
                 start_dt = datetime.datetime.combine(base_date, start_time)
                 visit_sec = int(visit_minutes) * 60
-                for route_id in sorted(df["route"].unique()):
+                _route_ids = sorted(df["route"].unique())
+                _prog = st.empty()
+                for _ri, route_id in enumerate(_route_ids, start=1):
+                    if len(_route_ids) > 3:
+                        _prog.caption(f"⏳ Menghitung rute {_ri} dari {len(_route_ids)}…")
                     route_df = df[df["route"] == route_id].reset_index(drop=True)
 
-                    if depots:
+                    if depots or dp_on:
                         chosen_depot = route_depot.get(route_id)
                         if chosen_depot:
                             route_start_name = chosen_depot["name"]
                             route_start_lat, route_start_lon = chosen_depot["lat"], chosen_depot["lon"]
+                        elif dp_on:  # petugas tanpa titik awal sendiri → pakai titik awal tunggal (kalau ada)
+                            route_start_name, route_start_lat, route_start_lon = start_name, start_lat, start_lon
                         else:  # baris titik awal rute ini dikosongkan → titik mulai dipilih otomatis
                             route_start_name, route_start_lat, route_start_lon = "START POINT", None, None
                     else:
@@ -4672,6 +4826,9 @@ if st.session_state.page == "Routing":
                     naive_distance_km = route_leg_sum(distance_matrix, naive_order, round_trip) / 1000
                     naive_duration_sec = route_leg_sum(duration_matrix, naive_order, round_trip)
 
+                    if dp_on:  # nama petugas rute ini = petugas pemegang wilayahnya (bisa diubah lagi di tiap rute)
+                        st.session_state.driver_names[route_id] = dp_meta[route_id]["petugas"]
+                        st.session_state[f"driver_{route_id}"] = dp_meta[route_id]["petugas"]
                     route_summaries.append(
                         {
                             "route_id": route_id,
@@ -4684,6 +4841,9 @@ if st.session_state.page == "Routing":
                             "depot_name": route_start_name if has_start else "",
                             "depot_idx": (route_depot.get(route_id) or {}).get("row"),
                             "driver": st.session_state.driver_names.get(route_id, ""),
+                            "petugas": dp_meta.get(route_id, {}).get("petugas", ""),
+                            "tanggal": dp_meta.get(route_id, {}).get("date", ""),
+                            "hari": dp_meta.get(route_id, {}).get("hari", ""),
                             # data mentah untuk ubah-urutan manual (tanpa memanggil OSRM lagi)
                             "route_df": route_df,
                             "distance_matrix": distance_matrix,
@@ -4700,6 +4860,7 @@ if st.session_state.page == "Routing":
                         }
                     )
 
+            _prog.empty()
             excel_bytes = build_excel_bytes(route_summaries)
             n_start_points = sum(1 for r in route_summaries if r["has_start"])
 
@@ -4722,6 +4883,7 @@ if st.session_state.page == "Routing":
                 "balance_info": balance_info,
                 "hours_opt_routes": hours_opt_routes,
                 "hours_opt_failed": hours_opt_failed,
+                "day_plan": dp_on,
             }
 
         result = st.session_state.get("route_result")
@@ -4802,9 +4964,14 @@ if st.session_state.page == "Routing":
                         format_duration(total_duration + total_visit),
                     )
 
-            _vf = st.session_state.pop("visit_flash", None)
-            if _vf:
-                st.toast(_vf)
+            _tf = st.session_state.pop("territory_flash", None)
+            if _tf:
+                st.toast(_tf)
+            _sched = build_schedule_matrix(route_summaries)
+            if _sched is not None:
+                with st.container(border=True):
+                    st.markdown("**📅 Jadwal petugas**")
+                    st.dataframe(_sched, width="stretch")
             _tn_km = sum(r.get("naive_distance_km", r["distance_km"]) for r in route_summaries)
             if _tn_km > 0 and len(df) >= 3 and _tn_km - total_distance > 0.05:
                 st.info(
@@ -4882,7 +5049,13 @@ if st.session_state.page == "Routing":
             _view = st.radio("Tampilan hasil", _views, key="_result_view", horizontal=True, label_visibility="collapsed")
             if _view == _views[0]:
                 first_route_id = route_summaries[0]["route_id"]
+                _pf = "Semua"
+                if any(r.get("tanggal") for r in route_summaries):
+                    _pnames = list(dict.fromkeys(r["petugas"] for r in route_summaries))
+                    _pf = st.selectbox("Tampilkan petugas", ["Semua"] + _pnames, key="_dp_filter")
                 for r in route_summaries:
+                    if _pf != "Semua" and r.get("petugas") != _pf:
+                        continue
                     route_id = r["route_id"]
                     optimized_df = r["df"]
                     color = ROUTE_COLORS[route_id % len(ROUTE_COLORS)]
@@ -4892,7 +5065,9 @@ if st.session_state.page == "Routing":
                     warn_mark = "" if r.get("real_roads", True) else " ⚠️ estimasi"
                     manual_mark = " ✏️ manual" if r.get("manual") else ""
                     with st.expander(
-                        f"{emoji} Rute {route_id + 1} — {len(optimized_df)} titik — "
+                        f"{emoji} Rute {route_id + 1}"
+                        + (f" · {fmt_day_label(datetime.date.fromisoformat(r['tanggal']))} · {r['petugas']}" if r.get("tanggal") else "")
+                        + f" — {len(optimized_df)} titik — "
                         f"~{r['distance_km']:.1f} km — ~{format_duration(route_total_sec)}{warn_mark}{manual_mark}",
                         # tetap terbuka saat sedang diedit (judulnya berubah tiap urutan digeser)
                         expanded=(route_id == first_route_id) or bool(st.session_state.get(f"edit_{route_id}", False)),
@@ -5041,9 +5216,6 @@ if st.session_state.page == "Routing":
                             folium.PolyLine(polyline_coords, weight=4, color=color).add_to(fmap)
                             st_folium(fmap, width=None, height=MAP_H, key=f"map_{route_id}", returned_objects=[])
 
-                        if IS_PRO:
-                            render_visit_editor(r)
-
             elif _view.startswith("🗺️"):
                 st_folium(
                     build_combined_map(route_summaries), width=None, height=COMBINED_MAP_H,
@@ -5054,13 +5226,30 @@ if st.session_state.page == "Routing":
                 _sum_rows = [
                     {
                         "Rute": f"Rute {r['route_id'] + 1}" + (f" — {r['driver']}" if r.get("driver") else ""),
+                        "Tanggal": fmt_day_label(datetime.date.fromisoformat(r["tanggal"])) if r.get("tanggal") else "",
                         "Titik": len(r["df"]),
                         "Jarak (km)": round(r["distance_km"], 1),
                         "Waktu total": format_duration(r["duration_sec"] + r.get("visit_sec", 0) + r.get("wait_sec", 0)),
                     }
                     for r in route_summaries
                 ]
+                if not any(x["Tanggal"] for x in _sum_rows):
+                    for x in _sum_rows:
+                        x.pop("Tanggal", None)
                 st.dataframe(pd.DataFrame(_sum_rows), width="stretch", hide_index=True)
+                if result.get("day_plan"):
+                    _assign = {}
+                    for _r in route_summaries:
+                        for _, _row in _r["df"].iterrows():
+                            _key = st.session_state.row_key_map.get(_row_sig(_row["merchant_name"], _row["latitude"], _row["longitude"]))
+                            if _key:
+                                _assign[_key] = _r["petugas"]
+                    st.button(
+                        "🔒 Simpan wilayah petugas ke data", key="_save_terr", on_click=_save_territories, args=(_assign,),
+                        help="Menyimpan siapa memegang merchant mana ke kolom petugas. Aktifkan 'Kunci wilayah petugas' "
+                             "supaya pembagian berikutnya tetap memakai wilayah ini (merchant baru ikut area terdekat).",
+                    )
+                    st.caption("Wilayah tersimpan ikut ke **Lihat & Edit Data Awal**, unduhan data hasil edit, dan Simpan/Buka Sesi.")
                 # Perbandingan dengan mengunjungi merchant sesuai urutan di file (tanpa optimasi).
                 total_naive_km = sum(r.get("naive_distance_km", r["distance_km"]) for r in route_summaries)
                 total_naive_sec = sum(r.get("naive_duration_sec", r["duration_sec"]) for r in route_summaries)
