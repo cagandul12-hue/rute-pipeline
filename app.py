@@ -4312,17 +4312,17 @@ if st.session_state.page == "Routing":
                 elif _tc not in ("latitude", "longitude"):
                     _view[_tc] = _view[_tc].apply(lambda v: "" if pd.isna(v) else str(v))
             _view.insert(0, "hapus", False)
-            _editor_nonce = st.session_state.data_edit_nonce
-
             @st.fragment
-            def _data_edit_fragment():
+            def _data_edit_fragment(view, edit_cols, info_cols, editor_nonce):
                 # Fragment: mengetik di tabel hanya menjalankan ulang bagian ini (bukan seluruh halaman),
                 # jadi jumlah perubahan yang belum diterapkan bisa ditampilkan langsung.
+                # PENTING: semua data masuk lewat argumen. Pada rerun fragment skrip utama tidak dijalankan ulang,
+                # jadi variabel global bernama sama (mis. _view di bagian hasil rute) bisa sudah berubah isinya.
                 _edited = st.data_editor(
-                    _view,
-                    key=f"data_editor_{_editor_nonce}",
+                    view,
+                    key=f"data_editor_{editor_nonce}",
                     hide_index=True, num_rows="fixed", width="stretch",
-                    disabled=["_row_key"] + _info_cols,
+                    disabled=["_row_key"] + info_cols,
                     column_config={
                         "_row_key": None,
                         "hapus": st.column_config.CheckboxColumn("🗑️ Hapus", default=False),
@@ -4347,7 +4347,7 @@ if st.session_state.page == "Routing":
                     },
                     **TABLE_KW,
                 )
-                _p_del, _p_chg = diff_data_edits(_view, _edited, _edit_cols)
+                _p_del, _p_chg = diff_data_edits(view, _edited, edit_cols)
                 _n_pending = len(_p_del) + sum(len(c) for c in _p_chg.values())
                 if _n_pending:
                     st.warning(
@@ -4356,7 +4356,7 @@ if st.session_state.page == "Routing":
                     )
                 _apply_edits = st.button(
                     "✅ Terapkan perubahan" + (f" ({_n_pending})" if _n_pending else ""),
-                    key=f"data_edit_apply_{_editor_nonce}", type="primary",
+                    key=f"data_edit_apply_{editor_nonce}", type="primary",
                 )
                 if _apply_edits:
                     _del, _chg = _p_del, _p_chg
@@ -4364,7 +4364,7 @@ if st.session_state.page == "Routing":
                     _chg = normalize_priority_changes(_chg)
                     _bad_msg = ""
                     if _bad:
-                        _names = _view.set_index("_row_key")["merchant_name"]
+                        _names = view.set_index("_row_key")["merchant_name"]
                         _bad_msg = (
                             "⚠️ Jam berikut bukan format HH:MM (mis. 08:00) dan tidak disimpan: "
                             + "; ".join(f"{_names.get(k, k)} → {c} = “{v}”" for k, c, v in _bad[:8])
@@ -4385,7 +4385,7 @@ if st.session_state.page == "Routing":
                     else:
                         st.info("Belum ada perubahan untuk diterapkan.")
 
-            _data_edit_fragment()
+            _data_edit_fragment(_view, _edit_cols, _info_cols, st.session_state.data_edit_nonce)
             if _n_edits:
                 _dl1, _dl2 = st.columns(2)
                 with _dl1:
