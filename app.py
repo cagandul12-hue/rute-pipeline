@@ -1910,6 +1910,28 @@ HOURS_COLS = ("jam_buka", "jam_tutup")
 PRO_ONLY_COLS = HOURS_COLS + ("prioritas", "petugas")   # kolom data yang hanya dipakai di Mode Pro
 
 
+def pro_columns_with_data(df):
+    """Kolom khusus Pro (prioritas, jam operasional, petugas) yang benar-benar ada isinya di data.
+    Dipakai Mode Basic untuk memberi tahu bahwa kolom itu diabaikan. Return [(label, jumlah_baris)]."""
+    out = []
+    if df is None or len(df) == 0:
+        return out
+    if "prioritas" in df.columns:
+        n = int(df["prioritas"].apply(is_truthy).sum())
+        if n:
+            out.append(("prioritas", n))
+    hour_cols = [c for c in HOURS_COLS if c in df.columns]
+    if hour_cols:
+        n = int(df[hour_cols].apply(lambda row: any(_parse_hhmm(v) is not None for v in row), axis=1).sum())
+        if n:
+            out.append(("jam operasional", n))
+    if "petugas" in df.columns:
+        n = int(df["petugas"].apply(lambda v: str(v).strip().lower() not in ("", "nan", "none")).sum())
+        if n:
+            out.append(("petugas", n))
+    return out
+
+
 def normalize_hhmm_text(val):
     """'8:00' / '08.00' / '8:00:00' -> '08:00'; kosong -> ''; format tidak valid -> None."""
     s_ = "" if val is None else str(val).strip()
@@ -2373,6 +2395,90 @@ def maps_part_labels(map_links, n_rows):
     return labels, tints
 
 
+def _work_sig(ss):
+    """Sidik jari data yang ikut tersimpan di file sesi (data Extractor + edit tabel)."""
+    raw = json.dumps([ss.get("extracted_data") or [], ss.get("data_edits") or {}], sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def unsaved_work_items(ss):
+    """Daftar kerja yang akan hilang kalau halaman di-refresh. File yang diupload tidak dihitung
+    (masih ada di komputer pengguna). Data Extractor + edit tabel dianggap aman setelah sesi disimpan,
+    hasil rute dianggap aman setelah Excel/PDF-nya diunduh."""
+    items = []
+    if ss.get("session_saved_sig") != _work_sig(ss):
+        n_ext = len(ss.get("extracted_data") or [])
+        edits = ss.get("data_edits") or {}
+        n_edit = len(edits.get("deleted", [])) + sum(len(c) for c in edits.get("changed", {}).values())
+        if n_ext:
+            items.append(f"{n_ext} data dari Maps Extractor")
+        if n_edit:
+            items.append(f"{n_edit} edit tabel")
+    res = ss.get("route_result")
+    if res and not res.get("saved"):
+        items.append("hasil rute")
+    return items
+
+
+def _mark_session_saved():
+    st.session_state.session_saved_sig = _work_sig(st.session_state)
+
+
+def _mark_routes_saved():
+    res = st.session_state.get("route_result")
+    if res:
+        res["saved"] = True
+
+
+def _leave_guard_js(active):
+    """Pasang/lepas konfirmasi bawaan browser saat halaman akan di-refresh atau ditutup.
+    Listener dipasang sekali; yang berubah hanya penanda __rpDirty."""
+    body = (
+        f"w.__rpDirty={'true' if active else 'false'};"
+        "if(!w.__rpGuard){w.__rpGuard=true;"
+        "w.addEventListener('beforeunload',function(e){if(w.__rpDirty){e.preventDefault();e.returnValue='';}});}"
+    )
+    try:
+        import inspect
+        if "unsafe_allow_javascript" in inspect.signature(st.html).parameters:
+            st.html(f"<script>try{{var w=window;{body}}}catch(e){{}}</script>", unsafe_allow_javascript=True)
+            return
+    except Exception:
+        pass
+    try:
+        import streamlit.components.v1 as components
+        components.html(f"<script>try{{var w=window.parent;{body}}}catch(e){{}}</script>", height=0)
+    except Exception:
+        pass
+
+
+def render_unsaved_notice(slot, is_pro):
+    """Banner 'belum tersimpan' + penjaga refresh. Dipanggil di awal dan akhir skrip memakai slot yang sama,
+    supaya hasil yang baru dibuat di run ini langsung ikut terhitung."""
+    ss = st.session_state
+    items = unsaved_work_items(ss)
+    if not items:
+        slot.empty()
+        if ss.get("_guard_on"):
+            with slot.container():
+                _leave_guard_js(False)
+            ss["_guard_on"] = False
+        return
+    tips = []
+    if "hasil rute" in items:
+        tips.append("unduh Excel" + (" / PDF" if is_pro else "") + " hasil rutenya")
+    if any(i != "hasil rute" for i in items):
+        tips.append("simpan lewat **💾 Simpan / Buka Sesi**" if is_pro
+                    else "unduh Excel datanya atau pilih **Pro** untuk Simpan / Buka Sesi")
+    with slot.container():
+        st.warning(
+            f"⚠️ **Belum tersimpan:** {', '.join(items)}. Kalau halaman di-refresh atau ditutup, semuanya hilang. "
+            f"Sebelum itu, {' dan '.join(tips)}."
+        )
+        _leave_guard_js(True)
+    ss["_guard_on"] = True
+
+
 def _move_stop(route_id, action):
     """Callback tombol ubah-urutan: up / down / top / bottom / reset."""
     res = st.session_state.get("route_result")
@@ -2411,6 +2517,7 @@ def _move_stop(route_id, action):
     r["order"] = new_order
     r["manual"] = new_order != r["optimal_order"]
     res["excel_bytes"] = build_excel_bytes(res["route_summaries"])
+    res["saved"] = False   # urutan berubah — Excel/PDF yang sudah diunduh tidak lagi sama
 
 
 def _row_sig(name, lat, lon):
@@ -3240,6 +3347,7 @@ if not st.session_state.get("auth_ok"):
 if not st.session_state.get("auth_ok"):
     if st.session_state.pop("clear_cookie", False):
         _cookie_js(None)
+        _leave_guard_js(False)   # logout: lepas konfirmasi refresh supaya tidak muncul di halaman login
     render_login_page()
     render_footer()
     st.stop()
@@ -3770,6 +3878,7 @@ def render_session_panel(prefix):
             file_name=f"sesi-rute-{datetime.datetime.now():%Y%m%d-%H%M}.json",
             mime="application/json",
             key=f"{prefix}_session_dl",
+            on_click=_mark_session_saved,
             width='stretch',
             disabled=not (ss.uploaded_store or ss.extracted_data),
         )
@@ -3972,6 +4081,10 @@ else:
         render_user_bar("side")
 
 
+_notice_slot = st.empty()
+render_unsaved_notice(_notice_slot, IS_PRO)
+
+
 # ================================================================
 # HALAMAN 1: ROUTING PIPELINE OPTIMIZER
 # ================================================================
@@ -4127,6 +4240,7 @@ if st.session_state.page == "Routing":
                     st.rerun()
             st.stop()
         _edited_full = df.copy()  # data setelah edit tabel, sebelum pencarian koordinat/dedupe (untuk download)
+        _pro_ignored = [] if IS_PRO else pro_columns_with_data(df)   # untuk info di bawah (kolom di-drop sebentar lagi)
         if not IS_PRO:
             # Prioritas & jam operasional khusus Mode Pro: di Basic kolomnya diabaikan (tidak tampil, tidak dicek,
             # tidak dioptimasi). Isinya tidak hilang — tetap ada di file download dan muncul lagi di Pro.
@@ -4159,6 +4273,14 @@ if st.session_state.page == "Routing":
             if remove_dups:
                 df = df[~_dup_mask].copy().reset_index(drop=True)
 
+        if _pro_ignored:
+            _ign_txt = ", ".join(f"{_lbl} ({_n} baris)" for _lbl, _n in _pro_ignored)
+            st.info(
+                f"🛠️ File ini punya kolom khusus Pro yang berisi data: **{_ign_txt}**. Di Mode Basic kolom itu "
+                "**tidak dipakai** untuk membuat rute. Datanya tidak hilang dan tetap ada di file download.",
+            )
+            st.button("🛠️ Pindah ke Mode Pro", key="_ignored_cols_to_pro", on_click=_set_app_mode, args=("Pro",))
+
         _edits = st.session_state.data_edits
         _n_edits = len(_edits["deleted"]) + sum(len(c) for c in _edits["changed"].values())
         with st.expander(
@@ -4190,10 +4312,15 @@ if st.session_state.page == "Routing":
                 elif _tc not in ("latitude", "longitude"):
                     _view[_tc] = _view[_tc].apply(lambda v: "" if pd.isna(v) else str(v))
             _view.insert(0, "hapus", False)
-            with st.form(f"data_edit_form_{st.session_state.data_edit_nonce}"):
+            _editor_nonce = st.session_state.data_edit_nonce
+
+            @st.fragment
+            def _data_edit_fragment():
+                # Fragment: mengetik di tabel hanya menjalankan ulang bagian ini (bukan seluruh halaman),
+                # jadi jumlah perubahan yang belum diterapkan bisa ditampilkan langsung.
                 _edited = st.data_editor(
                     _view,
-                    key=f"data_editor_{st.session_state.data_edit_nonce}",
+                    key=f"data_editor_{_editor_nonce}",
                     hide_index=True, num_rows="fixed", width="stretch",
                     disabled=["_row_key"] + _info_cols,
                     column_config={
@@ -4220,33 +4347,45 @@ if st.session_state.page == "Routing":
                     },
                     **TABLE_KW,
                 )
-                _apply_edits = st.form_submit_button("✅ Terapkan perubahan", type="primary")
-            if _apply_edits:
-                _del, _chg = diff_data_edits(_view, _edited, _edit_cols)
-                _chg, _bad = normalize_hours_changes(_chg)
-                _chg = normalize_priority_changes(_chg)
-                _bad_msg = ""
-                if _bad:
-                    _names = _view.set_index("_row_key")["merchant_name"]
-                    _bad_msg = (
-                        "⚠️ Jam berikut bukan format HH:MM (mis. 08:00) dan tidak disimpan: "
-                        + "; ".join(f"{_names.get(k, k)} → {c} = “{v}”" for k, c, v in _bad[:8])
-                        + (f" (+{len(_bad) - 8} lagi)" if len(_bad) > 8 else "")
+                _p_del, _p_chg = diff_data_edits(_view, _edited, _edit_cols)
+                _n_pending = len(_p_del) + sum(len(c) for c in _p_chg.values())
+                if _n_pending:
+                    st.warning(
+                        f"✏️ **{_n_pending} perubahan belum diterapkan.** Tekan **Terapkan perubahan** supaya "
+                        "tersimpan — kalau tidak, perubahan ini hilang saat halaman dimuat ulang."
                     )
-                if _del or _chg:
-                    _store = st.session_state.data_edits
-                    _store["deleted"] = sorted(set(_store["deleted"]) | set(_del))
-                    for _k, _cols in _chg.items():
-                        _store["changed"].setdefault(_k, {}).update(_cols)
-                    st.session_state.data_edit_nonce += 1
-                    st.session_state.table_panel_open = True  # tetap terbuka setelah diterapkan
-                    if _bad_msg:
-                        st.session_state.hours_flash = _bad_msg
-                    st.rerun()
-                elif _bad_msg:
-                    st.warning(_bad_msg)
-                else:
-                    st.info("Belum ada perubahan untuk diterapkan.")
+                _apply_edits = st.button(
+                    "✅ Terapkan perubahan" + (f" ({_n_pending})" if _n_pending else ""),
+                    key=f"data_edit_apply_{_editor_nonce}", type="primary",
+                )
+                if _apply_edits:
+                    _del, _chg = _p_del, _p_chg
+                    _chg, _bad = normalize_hours_changes(_chg)
+                    _chg = normalize_priority_changes(_chg)
+                    _bad_msg = ""
+                    if _bad:
+                        _names = _view.set_index("_row_key")["merchant_name"]
+                        _bad_msg = (
+                            "⚠️ Jam berikut bukan format HH:MM (mis. 08:00) dan tidak disimpan: "
+                            + "; ".join(f"{_names.get(k, k)} → {c} = “{v}”" for k, c, v in _bad[:8])
+                            + (f" (+{len(_bad) - 8} lagi)" if len(_bad) > 8 else "")
+                        )
+                    if _del or _chg:
+                        _store = st.session_state.data_edits
+                        _store["deleted"] = sorted(set(_store["deleted"]) | set(_del))
+                        for _k, _cols in _chg.items():
+                            _store["changed"].setdefault(_k, {}).update(_cols)
+                        st.session_state.data_edit_nonce += 1
+                        st.session_state.table_panel_open = True  # tetap terbuka setelah diterapkan
+                        if _bad_msg:
+                            st.session_state.hours_flash = _bad_msg
+                        st.rerun(scope="app")   # data berubah -> seluruh halaman dihitung ulang
+                    elif _bad_msg:
+                        st.warning(_bad_msg)
+                    else:
+                        st.info("Belum ada perubahan untuk diterapkan.")
+
+            _data_edit_fragment()
             if _n_edits:
                 _dl1, _dl2 = st.columns(2)
                 with _dl1:
@@ -5121,6 +5260,7 @@ if st.session_state.page == "Routing":
                         mime="application/vnd.ms-excel",
                         type="primary",
                         width='stretch',
+                        on_click=_mark_routes_saved,
                     )
                 if IS_PRO:
                     with dl2:
@@ -5135,6 +5275,7 @@ if st.session_state.page == "Routing":
                                 file_name="lembar_rute_semua.pdf",
                                 mime="application/pdf",
                                 width='stretch',
+                                on_click=_mark_routes_saved,
                             )
                         else:
                             st.caption("PDF belum tersedia: pustaka `reportlab` belum terpasang di server.")
@@ -5660,4 +5801,5 @@ elif st.session_state.page == "Extract":
         )
 
 
+render_unsaved_notice(_notice_slot, IS_PRO)   # hitung ulang: hasil/edit yang baru dibuat di run ini
 render_footer()
