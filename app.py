@@ -288,39 +288,27 @@ st.markdown(
     .stepper .step.done .dot {background: linear-gradient(135deg, #2563EB 0%, #0D9488 100%); border-color: transparent; color: #fff;}
     .stepper .bar {flex: 1 1 16px; height: 2px; background: rgba(128,128,128,0.3); min-width: 12px;}
 
-    /* ---------- Footer ---------- */
+    /* ---------- Footer (minimalis) ---------- */
     .app-footer {
-        margin-top: 56px; padding: 26px 0 8px 0; text-align: center;
-        border-top: 1px solid rgba(128,128,128,0.18);
+        margin-top: 48px; padding: 22px 0 6px 0; text-align: center; line-height: 1.5;
+        border-top: 1px solid rgba(128,128,128,0.16);
         position: relative;
     }
     .app-footer::before {
-        content: ""; position: absolute; top: -2px; left: 50%; transform: translateX(-50%);
-        width: 120px; height: 3px; border-radius: 3px;
-        background: linear-gradient(135deg, #2563EB 0%, #0D9488 100%);
+        content: ""; position: absolute; top: -1px; left: 50%; transform: translateX(-50%);
+        width: 48px; height: 2px; border-radius: 2px;
+        background: linear-gradient(90deg, #2563EB 0%, #0D9488 100%);
     }
-    .app-footer .f-brand {font-weight: 800; font-size: 1rem; letter-spacing: 0.01em;}
-    .app-footer .f-bolt {display: inline-block; animation: boltPulse 2.4s ease-in-out infinite;}
-    @keyframes boltPulse {
-        0%, 100% {transform: scale(1); filter: drop-shadow(0 0 0 rgba(14,165,233,0));}
-        50% {transform: scale(1.18); filter: drop-shadow(0 0 6px rgba(14,165,233,0.75));}
-    }
-    .app-footer .f-dev {font-size: 0.9rem; margin-top: 8px; opacity: 0.9;}
-    .app-footer .f-name {
-        font-weight: 800; color: inherit; padding-bottom: 2px;
-        background: linear-gradient(135deg, #2563EB 0%, #0D9488 100%) no-repeat 0 100% / 100% 3px;
-    }
-    .app-footer .f-heart {color: #ef4444; display: inline-block; animation: heartBeat 1.8s ease-in-out infinite;}
-    @keyframes heartBeat {0%, 100% {transform: scale(1);} 50% {transform: scale(1.25);}}
+    .app-footer .f-brand {font-weight: 700; font-size: 0.95rem; letter-spacing: 0.02em;}
+    .app-footer .f-dev {font-size: 0.82rem; margin-top: 4px; opacity: 0.85;}
+    .app-footer .f-name {font-weight: 600;}
+    .app-footer .f-heart {color: #ef4444; display: inline-block; animation: heartBeat 2.4s ease-in-out infinite;}
+    @keyframes heartBeat {0%, 100% {transform: scale(1);} 50% {transform: scale(1.15);}}
     .app-footer .f-tech {
-        display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin-top: 12px;
+        display: flex; flex-wrap: wrap; justify-content: center; margin-top: 10px;
+        font-size: 0.76rem; letter-spacing: 0.04em; opacity: 0.8;
     }
-    .app-footer .f-chip {
-        font-size: 0.75rem; font-weight: 600; padding: 3px 10px; border-radius: 999px;
-        background: rgba(128,128,128,0.10); border: 1px solid rgba(128,128,128,0.2);
-        opacity: 0.9;
-    }
-    .app-footer .f-copy {font-size: 0.78rem; opacity: 0.9; margin-top: 12px;}
+    .app-footer .f-tech span + span::before {content: "·"; margin: 0 0.7em; opacity: 0.6;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -429,15 +417,14 @@ DEV_BADGE_HTML = (
 
 def render_footer():
     year = datetime.date.today().year
-    chips = ["Streamlit", "scikit-learn", "OR-Tools", "OSRM", "OpenStreetMap"]
-    chips_html = "".join(f'<span class="f-chip">{c}</span>' for c in chips)
+    techs = ["Streamlit", "scikit-learn", "OR-Tools", "OSRM", "OpenStreetMap"]
+    techs_html = "".join(f"<span>{t}</span>" for t in techs)
     st.markdown(
         f"""
         <div class="app-footer">
-            <div class="f-brand"><span class="f-bolt">⚡</span> Routing &amp; Extractor</div>
-            <div class="f-dev">Developed with <span class="f-heart">♥</span> by <span class="f-name">Abdillah</span></div>
-            <div class="f-tech">{chips_html}</div>
-            <div class="f-copy">© {year} Abdillah · All rights reserved</div>
+            <div class="f-brand">⚡ Routing &amp; Extractor</div>
+            <div class="f-dev">Developed with <span class="f-heart">♥</span> by <span class="f-name">Abdillah</span> · © {year}</div>
+            <div class="f-tech">{techs_html}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -4188,7 +4175,7 @@ if st.session_state.page == "Routing":
         """
         <div class="hero-header">
             <h1>🛣️ Routing Pipeline Optimizer</h1>
-            <p>Optimalkan rute kunjungan dengan clustering (KMeans) dan penentuan urutan kunjungan (TSP).</p>
+            <p>Optimalkan rute kunjungan dengan clustering (KMeans) dan penentuan urutan kunjungan (TSP) yang diselesaikan dengan Google OR-Tools.</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -5409,7 +5396,7 @@ if st.session_state.page == "Routing":
                     _pnames = list(dict.fromkeys(r["petugas"] for r in route_summaries))
                     _pf = st.selectbox("Tampilkan petugas", ["Semua"] + _pnames, key="_dp_filter")
                 _rq, _only_check = "", False
-                if len(route_summaries) >= 5:   # banyak rute: beri jalan pintas untuk menemukan merchant / rute tertentu
+                if len(route_summaries) >= 2:   # lebih dari 1 rute: beri jalan pintas untuk menemukan merchant / rute tertentu
                     _fc1, _fc2 = st.columns([3, 2])
                     with _fc1:
                         _rq = st.text_input(
