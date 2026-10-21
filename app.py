@@ -290,25 +290,62 @@ st.markdown(
 
     /* ---------- Footer (minimalis) ---------- */
     .app-footer {
-        margin-top: 48px; padding: 22px 0 6px 0; text-align: center; line-height: 1.5;
+        margin-top: 48px; padding: 18px 0 4px 0; text-align: center; line-height: 1.5;
         border-top: 1px solid rgba(128,128,128,0.16);
-        position: relative;
     }
-    .app-footer::before {
-        content: ""; position: absolute; top: -1px; left: 50%; transform: translateX(-50%);
-        width: 48px; height: 2px; border-radius: 2px;
-        background: linear-gradient(90deg, #2563EB 0%, #0D9488 100%);
-    }
-    .app-footer .f-brand {font-weight: 700; font-size: 0.95rem; letter-spacing: 0.02em;}
-    .app-footer .f-dev {font-size: 0.82rem; margin-top: 4px; opacity: 0.85;}
+    .app-footer .f-brand {font-weight: 700; font-size: 0.92rem; letter-spacing: 0.02em;}
+    .app-footer .f-dev {font-size: 0.8rem; margin-top: 3px; opacity: 0.85;}
     .app-footer .f-name {font-weight: 600;}
-    .app-footer .f-heart {color: #ef4444; display: inline-block; animation: heartBeat 2.4s ease-in-out infinite;}
-    @keyframes heartBeat {0%, 100% {transform: scale(1);} 50% {transform: scale(1.15);}}
-    .app-footer .f-tech {
-        display: flex; flex-wrap: wrap; justify-content: center; margin-top: 10px;
-        font-size: 0.76rem; letter-spacing: 0.04em; opacity: 0.8;
+    .app-footer .f-heart {color: #ef4444;}
+
+    /* ---------- Tema minimalis ----------
+       Satu blok yang menimpa gaya dekoratif di atas: tanpa gradien, bayangan, dan animasi hias.
+       Hapus blok ini (sampai akhir CSS) untuk kembali ke tampilan sebelumnya. */
+    .hero-header {
+        background: none; box-shadow: none; border-radius: 0;
+        padding: 2px 0 14px 0; margin-bottom: 14px; border-bottom: 1px solid rgba(128,128,128,0.18);
     }
-    .app-footer .f-tech span + span::before {content: "·"; margin: 0 0.7em; opacity: 0.6;}
+    .hero-header h1 {color: inherit !important; font-size: 1.45rem; font-weight: 700;}
+    .hero-header p {color: inherit !important; opacity: 0.85; font-size: 0.9rem;}
+
+    .stButton > button[kind="primary"], .stButton > button[data-testid="stBaseButton-primary"],
+    .stDownloadButton > button[kind="primary"], .stDownloadButton > button[data-testid="stBaseButton-primary"] {
+        background: #2563EB !important; box-shadow: none !important;
+    }
+    .stButton > button:not([kind="primary"]):not([data-testid="stBaseButton-primary"]),
+    .stDownloadButton > button:not([kind="primary"]):not([data-testid="stBaseButton-primary"]),
+    .stLinkButton > a:not([data-testid="stBaseLinkButton-primary"]) {
+        border: 1px solid rgba(128,128,128,0.45) !important;
+        border: 1px solid color-mix(in srgb, currentColor 30%, transparent) !important;
+        background: transparent !important;
+    }
+
+    .stepper .step.active .dot, .stepper .step.done .dot {background: #2563EB; box-shadow: none;}
+
+    .metric-card {background: transparent; border: 1px solid rgba(128,128,128,0.2); border-radius: 10px; padding: 12px 14px;}
+    .metric-card .metric-icon {display: none;}
+    .metric-card .metric-label {margin-top: 0; text-transform: none; letter-spacing: 0; font-weight: 500;}
+    .metric-card .metric-value {font-size: 1.35rem; font-weight: 700;}
+
+    .section-header {margin: 26px 0 12px 0; padding-bottom: 8px; border-bottom-width: 1px;}
+    .section-header .badge {display: none;}
+    .section-header .title {font-weight: 700;}
+
+    .empty-state {border: 1px solid rgba(128,128,128,0.2); background: transparent; border-radius: 12px; padding: 26px 20px;}
+    .empty-state .emoji {display: none;}
+    .empty-state .title {margin-top: 0;}
+
+    div[data-testid="stExpander"] {border-radius: 10px !important; margin-bottom: 10px;}
+
+    .dev-badge {background: none; padding: 0; margin: 0 0 10px 0; gap: 6px;}
+    .dev-badge::before, .dev-badge .dev-dot {display: none;}
+    .dev-badge .dev-label {font-size: 0.78rem; font-weight: 500; letter-spacing: 0.04em; text-transform: none;}
+    .dev-badge .dev-name {font-size: 0.85rem; font-weight: 600; background: none; animation: none;}
+
+    .rp-loader {background: transparent; box-shadow: none; border-radius: 12px; border-color: rgba(128,128,128,0.25); padding: 1rem;}
+    .rp-track {display: none;}
+    .rp-bar i {background: #2563EB; animation: none;}
+    .rp-indet i {animation: rp-slide 1.5s ease-in-out infinite;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -417,14 +454,11 @@ DEV_BADGE_HTML = (
 
 def render_footer():
     year = datetime.date.today().year
-    techs = ["Streamlit", "scikit-learn", "OR-Tools", "OSRM", "OpenStreetMap"]
-    techs_html = "".join(f"<span>{t}</span>" for t in techs)
     st.markdown(
         f"""
         <div class="app-footer">
             <div class="f-brand">⚡ Routing &amp; Extractor</div>
             <div class="f-dev">Developed with <span class="f-heart">♥</span> by <span class="f-name">Abdillah</span> · © {year}</div>
-            <div class="f-tech">{techs_html}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -4148,18 +4182,15 @@ else:
         )
         st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
         render_nav("side")
-        st.markdown("---")
+        st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
         st.caption("Mode fitur")
         render_app_mode_toggle("side")
         render_mode_desc()
-        st.markdown("---")
         render_howto()
         if IS_PRO:
             render_session_panel("side")
-        st.markdown("---")
-        st.caption("Tampilan layar")
-        render_mode_toggle("side")
-        st.markdown("---")
+        with st.expander("⚙️ Tampilan layar", expanded=False):
+            render_mode_toggle("side")
         render_user_bar("side")
 
 
@@ -4174,7 +4205,7 @@ if st.session_state.page == "Routing":
     st.markdown(
         """
         <div class="hero-header">
-            <h1>🛣️ Routing Pipeline Optimizer</h1>
+            <h1>Routing Pipeline Optimizer</h1>
             <p>Optimalkan rute kunjungan dengan clustering (KMeans) dan penentuan urutan kunjungan (TSP) yang diselesaikan dengan Google OR-Tools.</p>
         </div>
         """,
@@ -5678,7 +5709,7 @@ elif st.session_state.page == "Extract":
     st.markdown(
         """
         <div class="hero-header">
-            <h1>📍 Google Maps Extractor</h1>
+            <h1>Google Maps Extractor</h1>
             <p>Ubah link Google Maps, pencarian nama merchant, atau input manual jadi tabel (merchant_name, latitude, longitude) siap pakai.</p>
         </div>
         """,
