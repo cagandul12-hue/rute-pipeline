@@ -83,7 +83,7 @@ st.markdown(
     }
     .rp-van span {display: inline-block; transform: scaleX(-1);}
     .rp-title {font-weight: 700; font-size: 1.02rem;}
-    .rp-sub {opacity: 0.78; font-size: 0.88rem; margin-top: -0.35rem;}
+    .rp-sub {opacity: 0.9; font-size: 0.9rem; margin-top: -0.35rem;}
     .rp-dots b {display: inline-block; opacity: 0.2; animation: rp-blink 1.2s infinite;}
     .rp-dots b:nth-child(2) {animation-delay: 0.2s;}
     .rp-dots b:nth-child(3) {animation-delay: 0.4s;}
@@ -94,7 +94,7 @@ st.markdown(
         animation: rp-shimmer 1.6s linear infinite;
     }
     .rp-indet i {width: 40%; animation: rp-shimmer 1.6s linear infinite, rp-slide 1.5s ease-in-out infinite;}
-    .rp-pct {font-size: 0.8rem; opacity: 0.75; font-variant-numeric: tabular-nums;}
+    .rp-pct {font-size: 0.85rem; opacity: 0.9; font-variant-numeric: tabular-nums;}
     @keyframes rp-drive {0% {left: 0;} 100% {left: calc(100% - 28px);}}
     @keyframes rp-dash {to {background-position: 15px 0;}}
     @keyframes rp-stop {
@@ -105,7 +105,15 @@ st.markdown(
     @keyframes rp-blink {0%, 80%, 100% {opacity: 0.2;} 40% {opacity: 1;}}
     @keyframes rp-shimmer {to {background-position: -200% 0;}}
     @keyframes rp-slide {0% {margin-left: -40%;} 100% {margin-left: 100%;}}
-    @media (prefers-reduced-motion: reduce) {.rp-loader *, .rp-loader *::after {animation: none !important;}}
+    @media (prefers-reduced-motion: reduce) {
+        .rp-loader *, .rp-loader *::after, .dev-badge, .dev-badge *, .app-footer *, .app-footer *::before {animation: none !important;}
+    }
+    /* Fokus keyboard yang jelas + teks khusus pembaca layar */
+    button:focus-visible, a:focus-visible, summary:focus-visible, [role="tab"]:focus-visible, input:focus-visible {
+        outline: 3px solid #2563EB !important; outline-offset: 2px;
+    }
+    .sr-only {position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;}
 
     /* ---------- Hero header ---------- */
     .hero-header {
@@ -141,7 +149,7 @@ st.markdown(
     }
     .metric-card .metric-icon {font-size: 1.4rem; line-height: 1;}
     .metric-card .metric-label {
-        font-size: 0.78rem; opacity: 0.82; margin-top: 8px; font-weight: 600;
+        font-size: 0.8rem; opacity: 0.9; margin-top: 8px; font-weight: 600;
         text-transform: uppercase; letter-spacing: 0.03em;
     }
     .metric-card .metric-value {font-size: 1.5rem; font-weight: 800; margin-top: 2px;}
@@ -150,7 +158,7 @@ st.markdown(
     .sidebar-brand {display: flex; align-items: center; gap: 10px;}
     .sidebar-brand .emoji {font-size: 1.9rem; line-height: 1;}
     .sidebar-brand .title {font-weight: 800; font-size: 1.08rem; line-height: 1.2;}
-    .sidebar-brand .subtitle {font-size: 0.78rem; opacity: 0.82;}
+    .sidebar-brand .subtitle {font-size: 0.82rem; opacity: 0.9;}
 
     /* ---------- Lencana "Developed by" (di atas nama aplikasi) ---------- */
     .dev-badge {
@@ -174,8 +182,8 @@ st.markdown(
         60% {box-shadow: 0 0 0 7px rgba(13,148,136,0);}
     }
     .dev-badge .dev-label {
-        font-size: 0.62rem; font-weight: 700; letter-spacing: 0.18em; text-transform: uppercase;
-        opacity: 0.8; white-space: nowrap;
+        font-size: 0.72rem; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
+        opacity: 0.9; white-space: nowrap;
     }
     .dev-badge .dev-name {
         font-size: 0.98rem; font-weight: 800; letter-spacing: 0.02em; padding-bottom: 1px; white-space: nowrap;
@@ -248,7 +256,7 @@ st.markdown(
         font-size: 1.05rem;
     }
     .section-header .title {font-weight: 800; font-size: 1.08rem; line-height: 1.3;}
-    .section-header .subtitle {font-size: 0.82rem; opacity: 0.82; margin-top: 1px;}
+    .section-header .subtitle {font-size: 0.85rem; opacity: 0.9; margin-top: 1px;}
 
     /* ---------- Empty state ---------- */
     .empty-state {
@@ -262,7 +270,7 @@ st.markdown(
     .empty-state .emoji {font-size: 2.3rem;}
     .empty-state .title {font-weight: 700; font-size: 1.05rem; margin-top: 12px;}
     .empty-state .desc {
-        font-size: 0.86rem; opacity: 0.82; margin-top: 4px;
+        font-size: 0.9rem; opacity: 0.9; margin-top: 4px;
         max-width: 440px; margin-left: auto; margin-right: auto; line-height: 1.5;
     }
 
@@ -270,7 +278,7 @@ st.markdown(
 
     /* ---------- Penanda langkah ---------- */
     .stepper {display: flex; align-items: center; gap: 8px; margin: 4px 0 18px 0;}
-    .stepper .step {display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 0.9rem; opacity: 0.75;}
+    .stepper .step {display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 0.9rem; opacity: 0.85;}
     .stepper .step .dot {
         width: 26px; height: 26px; border-radius: 50%; display: inline-flex; align-items: center;
         justify-content: center; font-size: 0.8rem; border: 2px solid rgba(128,128,128,0.5);
@@ -297,7 +305,7 @@ st.markdown(
         0%, 100% {transform: scale(1); filter: drop-shadow(0 0 0 rgba(14,165,233,0));}
         50% {transform: scale(1.18); filter: drop-shadow(0 0 6px rgba(14,165,233,0.75));}
     }
-    .app-footer .f-dev {font-size: 0.88rem; margin-top: 8px; opacity: 0.85;}
+    .app-footer .f-dev {font-size: 0.9rem; margin-top: 8px; opacity: 0.9;}
     .app-footer .f-name {
         font-weight: 800; color: inherit; padding-bottom: 2px;
         background: linear-gradient(135deg, #2563EB 0%, #0D9488 100%) no-repeat 0 100% / 100% 3px;
@@ -308,11 +316,11 @@ st.markdown(
         display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin-top: 12px;
     }
     .app-footer .f-chip {
-        font-size: 0.7rem; font-weight: 600; padding: 3px 10px; border-radius: 999px;
+        font-size: 0.75rem; font-weight: 600; padding: 3px 10px; border-radius: 999px;
         background: rgba(128,128,128,0.10); border: 1px solid rgba(128,128,128,0.2);
-        opacity: 0.85;
+        opacity: 0.9;
     }
-    .app-footer .f-copy {font-size: 0.72rem; opacity: 0.75; margin-top: 12px;}
+    .app-footer .f-copy {font-size: 0.78rem; opacity: 0.9; margin-top: 12px;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -375,7 +383,7 @@ def metric_card(icon, label, value):
     st.markdown(
         f"""
         <div class="metric-card">
-            <div class="metric-icon">{icon}</div>
+            <div class="metric-icon" aria-hidden="true">{icon}</div>
             <div class="metric-value">{value}</div>
             <div class="metric-label">{label}</div>
         </div>
@@ -389,9 +397,9 @@ def section_header(icon, title, subtitle=None):
     st.markdown(
         f"""
         <div class="section-header">
-            <div class="badge">{icon}</div>
+            <div class="badge" aria-hidden="true">{icon}</div>
             <div>
-                <div class="title">{title}</div>
+                <div class="title" role="heading" aria-level="2">{title}</div>
                 {subtitle_html}
             </div>
         </div>
@@ -404,7 +412,7 @@ def empty_state(icon, title, desc):
     st.markdown(
         f"""
         <div class="empty-state">
-            <div class="emoji">{icon}</div>
+            <div class="emoji" aria-hidden="true">{icon}</div>
             <div class="title">{title}</div>
             <div class="desc">{desc}</div>
         </div>
@@ -634,9 +642,96 @@ def render_stepper(slot, done):
     for i, label in enumerate(STEP_LABELS):
         state = "done" if i < done else ("active" if i == done else "todo")
         mark = "✓" if state == "done" else str(i + 1)
-        items.append(f'<div class="step {state}"><span class="dot">{mark}</span><span class="lbl">{label}</span></div>')
-    bar = '<div class="bar"></div>'
-    slot.markdown('<div class="stepper">' + bar.join(items) + '</div>', unsafe_allow_html=True)
+        sr = {"done": " (selesai)", "active": " (langkah saat ini)", "todo": ""}[state]
+        cur = ' aria-current="step"' if state == "active" else ""
+        items.append(
+            f'<div class="step {state}" role="listitem"{cur}><span class="dot" aria-hidden="true">{mark}</span>'
+            f'<span class="lbl">{label}</span><span class="sr-only">{sr}</span></div>'
+        )
+    bar = '<div class="bar" aria-hidden="true"></div>'
+    slot.markdown('<div class="stepper" role="list" aria-label="Langkah">' + bar.join(items) + '</div>', unsafe_allow_html=True)
+
+
+def format_duration_short(seconds):
+    """Versi ringkas untuk judul rute: '45 mnt', '1 j 30 mnt'."""
+    if seconds is None:
+        return "–"
+    minutes = round(seconds / 60)
+    if minutes < 60:
+        return f"{minutes} mnt"
+    hours, rem = divmod(minutes, 60)
+    return f"{hours} j {rem} mnt" if rem else f"{hours} j"
+
+
+def route_title(r, emoji):
+    """Judul expander rute yang cukup pendek untuk layar HP. Keterangan penuh (estimasi, urutan manual, dst.)
+    ada di dalam rute — di judul hanya penanda singkatnya."""
+    total = r["duration_sec"] + r.get("visit_sec", 0) + r.get("wait_sec", 0)
+    head = f"{emoji} Rute {r['route_id'] + 1}"
+    if r.get("tanggal"):
+        petugas = str(r.get("petugas") or "")
+        if len(petugas) > 14:
+            petugas = petugas[:13] + "…"
+        head += f" · {fmt_day_label(datetime.date.fromisoformat(r['tanggal']))} · {petugas}"
+    title = f"{head} · {len(r['df'])} titik · {r['distance_km']:.1f} km · {format_duration_short(total)}"
+    if not r.get("real_roads", True):
+        title += " ⚠️"
+    if r.get("manual"):
+        title += " ✏️"
+    return title
+
+
+def route_needs_check(r):
+    """Rute yang sebaiknya dicek: memakai estimasi garis lurus, atau ada kunjungan di luar jam operasional."""
+    return (not r.get("real_roads", True)) or bool(r.get("n_outside_hours"))
+
+
+def route_matches(r, q):
+    """Cocok dengan pencarian: nomor rute ('3' / 'rute 3'), nama petugas, atau nama merchant di rute itu. Kosong = semua."""
+    q = (q or "").strip().casefold()
+    if not q:
+        return True
+    q_num = re.sub(r"^rute\s*", "", q)
+    if q_num.isdigit() and int(q_num) == r["route_id"] + 1:
+        return True
+    if q in str(r.get("petugas") or "").casefold() or q in str(r.get("driver") or "").casefold():
+        return True
+    return bool(r["df"]["merchant_name"].astype(str).str.casefold().str.contains(q, regex=False).any())
+
+
+def search_routes(routes, q):
+    """Saring rute menurut pencarian. Angka (atau 'rute 3') dibaca sebagai nomor rute selama rute itu ada;
+    kalau tidak ada rute bernomor itu, dicari sebagai teks (nama merchant/petugas).
+    Return (daftar_rute, dicari_lewat_nomor)."""
+    q = (q or "").strip().casefold()
+    if not q:
+        return list(routes), False
+    q_num = re.sub(r"^rute\s*", "", q)
+    if q_num.isdigit():
+        by_no = [r for r in routes if r["route_id"] + 1 == int(q_num)]
+        if by_no:
+            return by_no, True
+    return [r for r in routes if route_matches(r, q)], False
+
+
+def _md_escape(text):
+    """Escape karakter markdown pada teks dari data pengguna (nama merchant) sebelum masuk st.caption/st.markdown."""
+    return re.sub(r"([\\`*_{}\[\]()#+\-.!|<>~$])", r"\\\1", str(text))
+
+
+def find_merchant_hits(route_summaries, q, limit=8):
+    """Merchant yang namanya memuat q -> ([(nama, nomor_rute, urutan), ...][:limit], total_cocok)."""
+    q = (q or "").strip().casefold()
+    hits = []
+    if not q:
+        return hits, 0
+    for r in route_summaries:
+        df = r["df"]
+        mask = df["merchant_name"].astype(str).str.casefold().str.contains(q, regex=False)
+        for _, row in df[mask].iterrows():
+            seq = int(row["sequence"]) if "sequence" in df.columns and pd.notna(row["sequence"]) else None
+            hits.append((str(row["merchant_name"]), r["route_id"] + 1, seq))
+    return hits[:limit], len(hits)
 
 
 def format_duration(seconds):
@@ -3234,7 +3329,7 @@ LOGIN_CSS = """
     box-shadow: 0 10px 28px rgba(37,99,235,.35);
 }
 .login-title {font-size: 1.6rem; font-weight: 800; letter-spacing: -0.01em;}
-.login-sub {opacity: .82; font-size: .95rem; margin-top: .25rem;}
+.login-sub {opacity: .9; font-size: .95rem; margin-top: .25rem;}
 .st-key-login_card {
     border: 1px solid rgba(128,128,128,.28); border-radius: 18px;
     padding: 1.2rem 1.2rem .6rem; background: rgba(128,128,128,.07);
@@ -5309,31 +5404,65 @@ if st.session_state.page == "Routing":
                 st.session_state["_result_view"] = _views[0]
             _view = st.radio("Tampilan hasil", _views, key="_result_view", horizontal=True, label_visibility="collapsed")
             if _view == _views[0]:
-                first_route_id = route_summaries[0]["route_id"]
                 _pf = "Semua"
                 if any(r.get("tanggal") for r in route_summaries):
                     _pnames = list(dict.fromkeys(r["petugas"] for r in route_summaries))
                     _pf = st.selectbox("Tampilkan petugas", ["Semua"] + _pnames, key="_dp_filter")
-                for r in route_summaries:
-                    if _pf != "Semua" and r.get("petugas") != _pf:
-                        continue
+                _rq, _only_check = "", False
+                if len(route_summaries) >= 5:   # banyak rute: beri jalan pintas untuk menemukan merchant / rute tertentu
+                    _fc1, _fc2 = st.columns([3, 2])
+                    with _fc1:
+                        _rq = st.text_input(
+                            "🔎 Cari merchant, petugas, atau nomor rute", key="_route_q",
+                            placeholder="mis. Toko Maju, Budi, atau 3",
+                        )
+                    with _fc2:
+                        if any(route_needs_check(x) for x in route_summaries):
+                            _only_check = st.checkbox(
+                                "Hanya rute yang perlu dicek", key="_route_only_check",
+                                help="Rute yang memakai estimasi garis lurus (⚠️) atau punya kunjungan di luar jam operasional.",
+                            )
+                _by_text, _by_number = search_routes(route_summaries, _rq)
+                _visible = [
+                    x for x in _by_text
+                    if (_pf == "Semua" or x.get("petugas") == _pf)
+                    and (not _only_check or route_needs_check(x))
+                ]
+                if len(_visible) < len(route_summaries):
+                    st.caption(f"Menampilkan {len(_visible)} dari {len(route_summaries)} rute.")
+                if _rq.strip() and not _by_number:
+                    _hits, _n_hits = find_merchant_hits(route_summaries, _rq)
+                    if _hits:
+                        st.caption(
+                            "📍 " + " · ".join(
+                                f"{_md_escape(_nm)} → Rute {_rn}" + (f" (urutan {_sq})" if _sq else "")
+                                for _nm, _rn, _sq in _hits
+                            ) + (f" · +{_n_hits - len(_hits)} lagi" if _n_hits > len(_hits) else "")
+                        )
+                if not _visible:
+                    st.info("Tidak ada rute yang cocok dengan pencarian atau filter ini.")
+                # Buka otomatis: hasil pencarian yang sedikit (≤3), selain itu rute pertama yang tampil.
+                if _rq.strip() and 0 < len(_visible) <= 3:
+                    _open_ids = {x["route_id"] for x in _visible}
+                else:
+                    _open_ids = {_visible[0]["route_id"]} if _visible else set()
+                for r in _visible:
                     route_id = r["route_id"]
                     optimized_df = r["df"]
                     color = ROUTE_COLORS[route_id % len(ROUTE_COLORS)]
                     emoji = ROUTE_EMOJIS[route_id % len(ROUTE_EMOJIS)]
 
                     route_total_sec = r["duration_sec"] + r.get("visit_sec", 0) + r.get("wait_sec", 0)
-                    warn_mark = "" if r.get("real_roads", True) else " ⚠️ estimasi"
-                    manual_mark = " ✏️ manual" if r.get("manual") else ""
                     with st.expander(
-                        f"{emoji} Rute {route_id + 1}"
-                        + (f" · {fmt_day_label(datetime.date.fromisoformat(r['tanggal']))} · {r['petugas']}" if r.get("tanggal") else "")
-                        + f" — {len(optimized_df)} titik — "
-                        f"~{r['distance_km']:.1f} km — ~{format_duration(route_total_sec)}{warn_mark}{manual_mark}",
+                        route_title(r, emoji),
                         # tetap terbuka saat sedang diedit (judulnya berubah tiap urutan digeser)
-                        expanded=(route_id == first_route_id) or bool(st.session_state.get(f"edit_{route_id}", False)),
+                        expanded=(route_id in _open_ids) or bool(st.session_state.get(f"edit_{route_id}", False)),
                     ):
                         parts = [f"🚗 Perjalanan {format_duration(r['duration_sec'])}"]
+                        if not r.get("real_roads", True):
+                            parts.append("⚠️ Estimasi garis lurus (bukan jalan sebenarnya)")
+                        if r.get("manual"):
+                            parts.append("✏️ Urutan diubah manual")
                         if r.get("visit_sec"):
                             parts.append(f"🏪 Kunjungan {format_duration(r['visit_sec'])}")
                         if r.get("wait_sec", 0) >= 60:
@@ -5372,7 +5501,7 @@ if st.session_state.page == "Routing":
                             _display_cols += [c for c in ("jam_tiba", "jam_selesai") if c in optimized_df.columns]
                             _show_df = optimized_df[_display_cols + ["latitude", "longitude"]].copy()
                             if "prioritas_flag" in optimized_df.columns:
-                                _show_df.insert(2, "⭐ Prioritas", optimized_df["prioritas_flag"].map({True: "⭐", False: ""}))
+                                _show_df.insert(2, "⭐ Prioritas", optimized_df["prioritas_flag"].map({True: "⭐ Ya", False: ""}))
                             if "jadwal_status" in optimized_df.columns:
                                 _show_df["Status Jam"] = optimized_df["jadwal_status"]
 
