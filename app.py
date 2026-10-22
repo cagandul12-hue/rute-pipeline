@@ -1716,7 +1716,7 @@ def _plan_control(df, plan_mode):
         k = st.number_input(
             "Jumlah rute",
             min_value=1, max_value=k_max, value=k_val, step=1,
-            key="_target_widget", on_change=_sync_target,
+            key=_wk("_target_widget"), on_change=_sync_target,
             help="Misalnya 5 sales = 5 rute. Merchant dibagi merata menurut area lokasi.",
         )
         return math.ceil(n / int(k)), int(k)
@@ -1922,7 +1922,7 @@ def handle_missing_coordinates(df):
         st.text_input(
             "Kota/wilayah (opsional — bikin pencarian lebih akurat)",
             value=st.session_state.geocode_city,
-            key="_geo_city_widget",
+            key=_wk("_geo_city_widget"),
             on_change=_sync_geo_city,
             placeholder="contoh: Surakarta",
         )
@@ -3297,6 +3297,15 @@ if "presets" not in st.session_state:
     st.session_state.presets = {}  # {nama_preset: {pengaturan}} — khusus Mode Pro
 if "preset_flash" not in st.session_state:
     st.session_state.preset_flash = None
+if "widget_nonce" not in st.session_state:
+    st.session_state.widget_nonce = 0
+
+
+def _wk(name):
+    """Kunci widget pengaturan, ditambah nomor versi. Nomor naik saat preset diterapkan atau sesi dibuka.
+    Kunci baru = widget baru di browser yang langsung memakai nilai terbaru. Cukup menghapus kunci lama di server
+    tidak memadai: Streamlit mengenali widget dari kuncinya, jadi browser tetap menampilkan nilai lamanya."""
+    return f"{name}__{st.session_state.widget_nonce}"
 
 
 def _detect_default_mode():
@@ -3699,7 +3708,7 @@ if "split_mode_flag" not in st.session_state:
 
 
 def _sync_split():
-    st.session_state.split_mode_flag = st.session_state._split_widget
+    st.session_state.split_mode_flag = st.session_state.get(_wk(_wk("_split_widget")), st.session_state.split_mode_flag)
 
 
 def _fmt_sizes(sizes):
@@ -3715,31 +3724,31 @@ if "dedupe_flag" not in st.session_state:
 
 def _sync_round_trip():
     # .get() with a fallback — not direct attribute access — because
-    # "Buka Sesi" deliberately pops these widget keys to force a refresh,
+    # "Buka Sesi" / preset deliberately bump the widget key version to force a refresh,
     # and if that happens to land in the same batch as this callback
     # (e.g. the user edits a field then immediately clicks "Buka Sesi"
     # before it blurs), the key can be briefly missing. Attribute access
     # would crash the whole app in that case; .get() just no-ops safely.
     st.session_state.round_trip_flag = st.session_state.get(
-        "_round_trip_widget", st.session_state.round_trip_flag
+        _wk("_round_trip_widget"), st.session_state.round_trip_flag
     )
 
 
 def _sync_dedupe():
     st.session_state.dedupe_flag = st.session_state.get(
-        "_dedupe_widget", st.session_state.dedupe_flag
+        _wk("_dedupe_widget"), st.session_state.dedupe_flag
     )
 
 
 def _sync_use_extracted():
     st.session_state.use_extracted_flag = st.session_state.get(
-        "_use_extracted_widget", st.session_state.use_extracted_flag
+        _wk("_use_extracted_widget"), st.session_state.use_extracted_flag
     )
 
 
 def _sync_starting_link():
     st.session_state.starting_link_saved = st.session_state.get(
-        "_starting_link_widget", st.session_state.starting_link_saved
+        _wk("_starting_link_widget"), st.session_state.starting_link_saved
     )
 
 
@@ -3766,31 +3775,31 @@ def _map_delete_row(row_key):
 
 def _sync_exclude_outliers():
     st.session_state.exclude_outliers_flag = st.session_state.get(
-        "_exclude_outliers_widget", st.session_state.exclude_outliers_flag
+        _wk("_exclude_outliers_widget"), st.session_state.exclude_outliers_flag
     )
 
 
 def _sync_hours_opt():
     st.session_state.hours_opt_flag = st.session_state.get(
-        "_hours_opt_widget", st.session_state.hours_opt_flag
+        _wk("_hours_opt_widget"), st.session_state.hours_opt_flag
     )
 
 
 def _sync_balance_time():
     st.session_state.balance_time_flag = st.session_state.get(
-        "_balance_time_widget", st.session_state.balance_time_flag
+        _wk("_balance_time_widget"), st.session_state.balance_time_flag
     )
 
 
 def _sync_geo_city():
     st.session_state.geocode_city = st.session_state.get(
-        "_geo_city_widget", st.session_state.geocode_city
+        _wk("_geo_city_widget"), st.session_state.geocode_city
     )
 
 
 def _sync_use_multi_depot():
     st.session_state.use_multi_depot_flag = st.session_state.get(
-        "_use_multi_depot_widget", st.session_state.use_multi_depot_flag
+        _wk("_use_multi_depot_widget"), st.session_state.use_multi_depot_flag
     )
 
 
@@ -3809,41 +3818,30 @@ for _k, _v in {
 
 def _sync_plan():
     st.session_state.plan_mode_flag = st.session_state.get(
-        "_plan_widget", st.session_state.plan_mode_flag
+        _wk("_plan_widget"), st.session_state.plan_mode_flag
     )
 
 
 def _sync_target():
     st.session_state.target_routes_flag = int(
-        st.session_state.get("_target_widget", st.session_state.target_routes_flag)
+        st.session_state.get(_wk("_target_widget"), st.session_state.target_routes_flag)
     )
 
 
 def _sync_visit():
     st.session_state.visit_minutes_flag = int(
-        st.session_state.get("_visit_widget", st.session_state.visit_minutes_flag)
+        st.session_state.get(_wk("_visit_widget"), st.session_state.visit_minutes_flag)
     )
 
 
 def _sync_start_time():
     st.session_state.start_time_flag = st.session_state.get(
-        "_start_time_widget", st.session_state.start_time_flag
+        _wk("_start_time_widget"), st.session_state.start_time_flag
     )
 
 
 # ---------- Simpan / buka sesi ----------
 MAX_SESSION_BYTES = 40 * 1024 * 1024
-SESSION_WIDGET_KEYS = (
-    "_use_extracted_widget", "_starting_link_widget", "_round_trip_widget", "_dedupe_widget",
-    "_split_widget", "_plan_widget", "_target_widget", "_visit_widget", "_start_time_widget",
-    "_use_multi_depot_widget", "_geo_city_widget", "_balance_time_widget", "_exclude_outliers_widget",
-    "_hours_opt_widget", "extract_editor",
-)
-# Widget yang nilainya ditimpa saat preset diterapkan (khusus pengaturan, bukan data).
-PRESET_WIDGET_KEYS = (
-    "_plan_widget", "_target_widget", "_split_widget", "_start_time_widget", "_visit_widget",
-    "_round_trip_widget", "_starting_link_widget", "_use_multi_depot_widget", "_balance_time_widget",
-)
 PRESET_MAX = 20
 
 
@@ -4008,8 +4006,7 @@ def load_session_bytes(raw):
     ss.driver_names = driver_names
     for k, v in updates.items():
         ss[k] = v
-    for wk in SESSION_WIDGET_KEYS:  # supaya nilai baru dipakai oleh widget
-        ss.pop(wk, None)
+    ss.widget_nonce += 1  # kunci widget baru -> browser membuat widget baru yang langsung memakai nilai terbaru
     _set_depot_rows(depot_rows)
     ss.data_edits = clean_data_edits(data.get("data_edits"))
     ss.data_edit_nonce += 1
@@ -4122,8 +4119,7 @@ def _apply_preset():
     ss.balance_time_flag = preset["balance_time"]
     ss.starting_link_saved = preset["starting_link"]
     ss.use_multi_depot_flag = preset["use_multi_depot"]
-    for wk in PRESET_WIDGET_KEYS:  # supaya widget memakai nilai preset, bukan nilai lamanya
-        ss.pop(wk, None)
+    ss.widget_nonce += 1  # kunci widget baru -> browser membuat widget baru yang langsung memakai nilai preset
     _set_depot_rows([(d["name"], d["input"]) for d in preset["depot_rows"]])
     ss.preset_flash = ("success", f"Preset “{name}” diterapkan.")
 
@@ -4448,7 +4444,7 @@ if st.session_state.page == "Routing":
         use_extracted = st.checkbox(
             f"📋 Pakai {len(st.session_state.extracted_data)} data dari Maps Extractor",
             value=st.session_state.use_extracted_flag,
-            key="_use_extracted_widget",
+            key=_wk("_use_extracted_widget"),
             on_change=_sync_use_extracted,
             help="Bisa dicentang bersamaan dengan upload Excel di atas — keduanya akan digabung otomatis.",
         )
@@ -4569,7 +4565,7 @@ if st.session_state.page == "Routing":
             remove_dups = st.checkbox(
                 f"🧹 Hapus {n_dup} baris duplikat (nama & koordinat sama)",
                 value=st.session_state.dedupe_flag,
-                key="_dedupe_widget",
+                key=_wk("_dedupe_widget"),
                 on_change=_sync_dedupe,
                 help="Baris pertama dipertahankan. Matikan kalau memang ada merchant kembar yang sengaja dimasukkan dua kali.",
             )
@@ -4730,7 +4726,7 @@ if st.session_state.page == "Routing":
             _exclude_outliers = st.checkbox(
                 "🚫 Jangan ikutkan titik janggal ini saat membuat rute",
                 value=st.session_state.exclude_outliers_flag,
-                key="_exclude_outliers_widget",
+                key=_wk("_exclude_outliers_widget"),
                 on_change=_sync_exclude_outliers,
             )
         else:
@@ -4895,7 +4891,7 @@ if st.session_state.page == "Routing":
                     dp_balance = st.checkbox(
                         "⏱️ Seimbangkan beban waktu antar rute",
                         value=st.session_state.balance_time_flag,
-                        key="_balance_time_widget",
+                        key=_wk("_balance_time_widget"),
                         on_change=_sync_balance_time,
                         help=(
                             "Tanpa ini, satu hari kerja bisa 2 jam sementara hari lain 5 jam. Dengan ini, merchant di "
@@ -4956,7 +4952,7 @@ if st.session_state.page == "Routing":
                     "Cara menentukan jumlah rute",
                     [PLAN_MAX, PLAN_COUNT],
                     index=0 if st.session_state.plan_mode_flag == PLAN_MAX else 1,
-                    key="_plan_widget",
+                    key=_wk("_plan_widget"),
                     on_change=_sync_plan,
                     horizontal=not IS_MOBILE,
                 )
@@ -4975,7 +4971,7 @@ if st.session_state.page == "Routing":
                         "Cara membagi rute",
                         [SPLIT_AUTO, SPLIT_FULL],
                         index=0 if st.session_state.split_mode_flag == SPLIT_AUTO else 1,
-                        key="_split_widget",
+                        key=_wk("_split_widget"),
                         on_change=_sync_split,
                         horizontal=not IS_MOBILE,
                         help=(
@@ -5008,7 +5004,7 @@ if st.session_state.page == "Routing":
                     balance_time = st.checkbox(
                         "⏱️ Seimbangkan beban waktu antar rute",
                         value=st.session_state.balance_time_flag,
-                        key="_balance_time_widget",
+                        key=_wk("_balance_time_widget"),
                         on_change=_sync_balance_time,
                         help=(
                             "Tanpa ini, rute dibagi berdasarkan area dan jumlah merchant, jadi satu rute bisa 2 jam "
@@ -5028,7 +5024,7 @@ if st.session_state.page == "Routing":
             starting_link = st.text_input(
                 "📍 Titik Awal (opsional)",
                 value=st.session_state.starting_link_saved,
-                key="_starting_link_widget",
+                key=_wk("_starting_link_widget"),
                 on_change=_sync_starting_link,
                 disabled=dp_on,
                 placeholder="Link Google Maps atau koordinat (-7.5665, 110.8167)",
@@ -5054,7 +5050,7 @@ if st.session_state.page == "Routing":
                 use_multi_depot = st.checkbox(
                     "🏭 Pakai banyak titik awal (multi-depot)",
                     value=st.session_state.use_multi_depot_flag,
-                    key="_use_multi_depot_widget",
+                    key=_wk("_use_multi_depot_widget"),
                     on_change=_sync_use_multi_depot,
                     help=(
                         "Aktifkan kalau tiap rute berangkat dari titik berbeda (gudang/toko/rumah petugas). Jumlah rute diatur "
@@ -5134,7 +5130,7 @@ if st.session_state.page == "Routing":
                     start_time = st.time_input(
                         "⏰ Jam mulai",
                         value=st.session_state.start_time_flag,
-                        key="_start_time_widget",
+                        key=_wk("_start_time_widget"),
                         on_change=_sync_start_time,
                         step=300,
                         help="Dipakai untuk menghitung perkiraan jam tiba di tiap merchant.",
@@ -5143,7 +5139,7 @@ if st.session_state.page == "Routing":
                     visit_minutes = st.number_input(
                         "🏪 Durasi kunjungan per toko (menit)",
                         min_value=0, max_value=480, value=int(st.session_state.visit_minutes_flag), step=1,
-                        key="_visit_widget",
+                        key=_wk("_visit_widget"),
                         on_change=_sync_visit,
                         help="Waktu yang dihabiskan di tiap merchant. 0 = hanya hitung waktu perjalanan.",
                     )
@@ -5151,7 +5147,7 @@ if st.session_state.page == "Routing":
                 round_trip = st.checkbox(
                     "🔁 Kembali ke titik awal setelah rute selesai",
                     value=st.session_state.round_trip_flag,
-                    key="_round_trip_widget",
+                    key=_wk("_round_trip_widget"),
                     on_change=_sync_round_trip,
                     help=(
                         "Aktif: rute melingkar dan jarak/waktu sudah termasuk perjalanan pulang. "
@@ -5176,7 +5172,7 @@ if st.session_state.page == "Routing":
                     hours_opt = st.checkbox(
                         "🕒 Optimalkan rute berdasarkan jam operasional merchant",
                         value=bool(st.session_state.hours_opt_flag and _n_hours),
-                        key="_hours_opt_widget",
+                        key=_wk("_hours_opt_widget"),
                         on_change=_sync_hours_opt,
                         disabled=_n_hours == 0,
                         help="Urutkan kunjungan supaya merchant didatangi saat sedang buka. Detail cara kerjanya ada di bawah.",
@@ -6119,7 +6115,7 @@ elif st.session_state.page == "Extract":
             width='stretch',
             num_rows="dynamic",
             **TABLE_KW,
-            key="extract_editor",
+            key=_wk("extract_editor"),
             column_config={
                 "latitude": st.column_config.NumberColumn(format="%.6f"),
                 "longitude": st.column_config.NumberColumn(format="%.6f"),
