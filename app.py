@@ -427,9 +427,25 @@ st.markdown(
     .cmp-bars {flex: 1 1 auto; min-width: 0; display: grid; gap: 16px;}
     .cmp-row {display: grid; grid-template-columns: 128px minmax(0, 1fr) auto; align-items: center; gap: 14px;}
     .cmp-lbl {font-size: 0.85rem; font-weight: 600; opacity: 0.9;}
-    .cmp-track {height: 12px; border-radius: 99px; background: rgba(128,128,128,0.16); overflow: hidden;}
-    .cmp-track i {display: block; height: 100%; border-radius: 99px; background: rgba(128,128,128,0.55); transform-origin: left center; animation: cmpGrow 0.9s cubic-bezier(0.22, 1, 0.36, 1) both;}
+    .cmp-track {position: relative; height: 18px; border-radius: 99px; background: rgba(128,128,128,0.14); overflow: hidden;}
+    .cmp-track i {
+        position: absolute; left: 0; top: 0; bottom: 0; border-radius: 99px; transform-origin: left center;
+        animation: cmpGrow 0.9s cubic-bezier(0.22, 1, 0.36, 1) both;
+    }
+    .cmp-row.base .cmp-track i {background: linear-gradient(90deg, #F59E0B, #F97316);}
     .cmp-row.opt .cmp-track i {background: linear-gradient(90deg, #2563EB, #0D9488); animation-delay: 0.15s;}
+    .cmp-row.has-saved .cmp-track i.fill {border-radius: 99px 0 0 99px;}
+    .cmp-track i.saved {   /* bagian berarsir = jarak yang berhasil dihemat */
+        box-sizing: border-box; border-radius: 0 99px 99px 0; border: 1.5px dashed rgba(13,148,136,0.75); border-left: 0;
+        background: repeating-linear-gradient(135deg, rgba(13,148,136,0.38) 0 5px, rgba(13,148,136,0.12) 5px 10px);
+        animation: cmpFade 0.7s ease 0.9s both;
+    }
+    @keyframes cmpFade {from {opacity: 0;} to {opacity: 1;}}
+    .cmp-legend {display: flex; align-items: center; gap: 8px; font-size: 0.8rem; opacity: 0.9;}
+    .cmp-legend .sw {
+        flex: none; width: 22px; height: 10px; border-radius: 3px; border: 1.5px dashed rgba(13,148,136,0.75);
+        background: repeating-linear-gradient(135deg, rgba(13,148,136,0.38) 0 4px, rgba(13,148,136,0.12) 4px 8px);
+    }
     .cmp-val {min-width: 76px; text-align: right; font-weight: 700; font-variant-numeric: tabular-nums;}
     .cmp-save {flex: none; display: flex; align-items: center; gap: 16px; padding-left: 28px; border-left: 1px solid rgba(128,128,128,0.2);}
     .cmp-ring {position: relative; width: 84px; height: 84px; flex: none;}
@@ -571,6 +587,10 @@ def compare_panel(naive_km, opt_km, delta_km, saving_pct):
     """Perbandingan jarak sebelum vs sesudah optimasi: dua bilah sebanding + cincin persen penghematan."""
     top = max(naive_km, opt_km, 0.001)
     w_naive, w_opt = naive_km / top * 100, opt_km / top * 100
+    saved_w = max(0.0, w_naive - w_opt) if delta_km > 0.05 else 0.0   # bagian bilah yang "hilang" berkat optimasi
+    saved_html = f'<i class="saved" style="left:{w_opt:.1f}%;width:{saved_w:.1f}%"></i>' if saved_w > 0 else ""
+    legend = (f'<div class="cmp-legend"><span class="sw"></span>Bagian berarsir = jarak yang dihemat ({delta_km:.1f} km)</div>'
+              if saved_w > 0 else "")
     if delta_km > 0.05:
         pct = max(0, min(100, saving_pct))
         side = (
@@ -591,9 +611,9 @@ def compare_panel(naive_km, opt_km, delta_km, saving_pct):
     st.markdown(
         '<div class="cmp">'
         '<div class="cmp-bars">'
-        f'<div class="cmp-row"><span class="cmp-lbl">Urutan di file</span><div class="cmp-track" aria-hidden="true"><i style="width:{w_naive:.1f}%"></i></div><span class="cmp-val">{naive_km:.1f} km</span></div>'
-        f'<div class="cmp-row opt"><span class="cmp-lbl">Setelah optimasi</span><div class="cmp-track" aria-hidden="true"><i style="width:{w_opt:.1f}%"></i></div><span class="cmp-val">{opt_km:.1f} km</span></div>'
-        f'</div>{side}</div>',
+        f'<div class="cmp-row base"><span class="cmp-lbl">Urutan di file</span><div class="cmp-track" aria-hidden="true"><i class="fill" style="width:{w_naive:.1f}%"></i></div><span class="cmp-val">{naive_km:.1f} km</span></div>'
+        f'<div class="cmp-row opt{" has-saved" if saved_w > 0 else ""}"><span class="cmp-lbl">Setelah optimasi</span><div class="cmp-track" aria-hidden="true"><i class="fill" style="width:{w_opt:.1f}%"></i>{saved_html}</div><span class="cmp-val">{opt_km:.1f} km</span></div>'
+        f'{legend}</div>{side}</div>',
         unsafe_allow_html=True,
     )
 
@@ -2210,6 +2230,14 @@ HOURS_COLS = ("jam_buka", "jam_tutup")
 PRO_ONLY_COLS = HOURS_COLS + ("prioritas", "petugas")   # kolom data yang hanya dipakai di Mode Pro
 
 
+def count_merchants_with_hours(df):
+    """Jumlah merchant yang punya jam_buka dan/atau jam_tutup yang valid (HH:MM)."""
+    cols = [c for c in HOURS_COLS if c in df.columns]
+    if not cols or len(df) == 0:
+        return 0
+    return int(df[cols].apply(lambda row: any(_parse_hhmm(v) is not None for v in row), axis=1).sum())
+
+
 def pro_columns_with_data(df):
     """Kolom khusus Pro (prioritas, jam operasional, petugas) yang benar-benar ada isinya di data.
     Dipakai Mode Basic untuk memberi tahu bahwa kolom itu diabaikan. Return [(label, jumlah_baris)]."""
@@ -3299,6 +3327,8 @@ if "preset_flash" not in st.session_state:
     st.session_state.preset_flash = None
 if "widget_nonce" not in st.session_state:
     st.session_state.widget_nonce = 0
+if "preset_panel_open" not in st.session_state:
+    st.session_state.preset_panel_open = False   # tetap terbuka setelah pengguna memilih/menerapkan preset
 
 
 def _wk(name):
@@ -3783,6 +3813,7 @@ def _sync_hours_opt():
     st.session_state.hours_opt_flag = st.session_state.get(
         _wk("_hours_opt_widget"), st.session_state.hours_opt_flag
     )
+    st.session_state.table_panel_open = True   # kotak centangnya ada di panel data; jangan menutupnya
 
 
 def _sync_balance_time():
@@ -4098,6 +4129,7 @@ def _save_preset():
         return
     existed = name in ss.presets
     ss.presets[name] = _current_settings_snapshot()
+    ss.preset_panel_open = True
     ss["_preset_name"] = ""
     ss["_preset_select"] = name
     ss.preset_flash = ("success", f"Preset “{name}” {'diperbarui' if existed else 'disimpan'}.")
@@ -4120,6 +4152,7 @@ def _apply_preset():
     ss.starting_link_saved = preset["starting_link"]
     ss.use_multi_depot_flag = preset["use_multi_depot"]
     ss.widget_nonce += 1  # kunci widget baru -> browser membuat widget baru yang langsung memakai nilai preset
+    ss.preset_panel_open = True
     _set_depot_rows([(d["name"], d["input"]) for d in preset["depot_rows"]])
     ss.preset_flash = ("success", f"Preset “{name}” diterapkan.")
 
@@ -4130,7 +4163,12 @@ def _delete_preset():
     if name in ss.presets:
         del ss.presets[name]
         ss.pop("_preset_select", None)
+        ss.preset_panel_open = True
         ss.preset_flash = ("success", f"Preset “{name}” dihapus.")
+
+
+def _keep_preset_panel_open():
+    st.session_state.preset_panel_open = True
 
 
 def render_preset_panel():
@@ -4138,7 +4176,7 @@ def render_preset_panel():
     ss = st.session_state
     flash = ss.preset_flash
     ss.preset_flash = None
-    with st.expander(f"💾 Preset Pengaturan ({len(ss.presets)})", expanded=flash is not None):
+    with st.expander(f"💾 Preset Pengaturan ({len(ss.presets)})", expanded=(flash is not None) or ss.preset_panel_open):
         if flash:
             {"error": st.error, "success": st.success}.get(flash[0], st.info)(flash[1])
         st.caption(
@@ -4151,7 +4189,7 @@ def render_preset_panel():
         if names:
             if ss.get("_preset_select") not in names:
                 ss.pop("_preset_select", None)
-            st.selectbox("Pilih preset", names, key="_preset_select")
+            st.selectbox("Pilih preset", names, key="_preset_select", on_change=_keep_preset_panel_open)
             chosen = _clean_preset(ss.presets.get(ss.get("_preset_select")))
             if chosen:
                 st.caption(describe_preset(chosen))
@@ -4582,6 +4620,8 @@ if st.session_state.page == "Routing":
 
         _edits = st.session_state.data_edits
         _n_edits = len(_edits["deleted"]) + sum(len(c) for c in _edits["changed"].values())
+        _n_hours = count_merchants_with_hours(df) if IS_PRO else 0
+        _hours_opt_choice = False
         with st.expander(
             f"📄 Lihat & Edit Data Awal ({len(df)} baris)" + (f" · {_n_edits} edit" if _n_edits else ""),
             expanded=st.session_state.table_panel_open,
@@ -4594,7 +4634,7 @@ if st.session_state.page == "Routing":
                 + ("\n\n"
                    "🕒 Isi **jam_buka** & **jam_tutup** (format HH:MM, mis. 08:00 dan 21:00) untuk merchant yang punya "
                    "jam operasional. Dipakai untuk menandai ⚠️ kalau perkiraan jam tiba di luar jam buka, dan untuk "
-                   "ceklis **Optimalkan rute berdasarkan jam operasional** di Langkah 2. Kosongkan kalau tidak diketahui."
+                   "ceklis **Optimalkan rute berdasarkan jam operasional** yang muncul di bawah ini. Kosongkan kalau tidak diketahui."
                    if IS_PRO else "")
                 + ("\n\n⭐ Centang **prioritas** untuk merchant yang harus dikunjungi lebih dulu di rutenya."
                    if IS_PRO else "")
@@ -4602,6 +4642,24 @@ if st.session_state.page == "Routing":
             _flash_h = st.session_state.pop("hours_flash", None)
             if _flash_h:
                 st.warning(_flash_h)
+            if IS_PRO and _n_hours:
+                _hours_opt_choice = st.checkbox(
+                    "🕒 Optimalkan rute berdasarkan jam operasional merchant",
+                    value=bool(st.session_state.hours_opt_flag),
+                    key=_wk("_hours_opt_widget"),
+                    on_change=_sync_hours_opt,
+                    help=(
+                        "Urutan kunjungan di dalam tiap rute diatur supaya merchant didatangi saat sedang buka.\n\n"
+                        "- Yang **tutup lebih awal** dikunjungi lebih dulu; yang **baru buka siang** belakangan.\n"
+                        "- Kalau merchant **belum buka** saat rute dimulai, merchant lain dikunjungi dulu; kalau tidak "
+                        "ada lagi, petugas menunggu sampai buka (ditandai ⏳).\n"
+                        "- Merchant **tanpa jam** tidak dibatasi; rute tanpa jam sama sekali memakai KMeans + TSP biasa.\n"
+                        "- Pembagian merchant ke rute tetap mengikuti area. Kalau semua jam tak mungkin dipenuhi, "
+                        "dipilih urutan dengan pelanggaran paling sedikit.\n"
+                        "- Pengaturan prioritas tidak dipakai di rute yang punya jam."
+                    ),
+                )
+                st.caption(f"🕒 {_n_hours} dari {len(df)} merchant punya jam operasional.")
             _edit_cols = [c for c in EDITABLE_COLS if c in df.columns or (IS_PRO and c in PRO_ONLY_COLS)]
             _info_cols = [c for c in ("source_file", "koordinat_dari") if c in df.columns]
             _view = df.reindex(columns=["_row_key"] + _edit_cols + _info_cols).copy()
@@ -5157,45 +5215,7 @@ if st.session_state.page == "Routing":
                 )
 
 
-        hours_opt = False
-        if IS_PRO:
-            with st.container(border=True):
-                st.markdown("**🕒 Jam operasional**")
-                hours_opt = False
-                if IS_PRO:
-                    # Optimasi berdasarkan jam operasional merchant (kolom jam_buka / jam_tutup)
-                    _n_hours = int(sum(
-                        1 for _i in range(len(df))
-                        if _parse_hhmm(df["jam_buka"].iloc[_i] if "jam_buka" in df.columns else None) is not None
-                        or _parse_hhmm(df["jam_tutup"].iloc[_i] if "jam_tutup" in df.columns else None) is not None
-                    ))
-                    hours_opt = st.checkbox(
-                        "🕒 Optimalkan rute berdasarkan jam operasional merchant",
-                        value=bool(st.session_state.hours_opt_flag and _n_hours),
-                        key=_wk("_hours_opt_widget"),
-                        on_change=_sync_hours_opt,
-                        disabled=_n_hours == 0,
-                        help="Urutkan kunjungan supaya merchant didatangi saat sedang buka. Detail cara kerjanya ada di bawah.",
-                    )
-                    if _n_hours == 0:
-                        st.caption(
-                            "🕒 Belum ada jam operasional. Isi kolom **jam_buka** & **jam_tutup** di **Lihat & Edit Data Awal** "
-                            "(atau lewat Excel/CSV), lalu ceklis ini bisa dipakai."
-                        )
-                    else:
-                        st.caption(f"🕒 {_n_hours} dari {len(df)} merchant punya jam operasional.")
-                    with st.expander("Bagaimana cara kerjanya?", expanded=False):
-                        st.markdown(
-                            "Urutan kunjungan di dalam tiap rute diatur supaya merchant didatangi saat sedang buka.\n\n"
-                            "- Yang **tutup lebih awal** dikunjungi lebih dulu; yang **baru buka siang** belakangan.\n"
-                            "- Kalau merchant **belum buka** saat rute dimulai, merchant lain dikunjungi dulu; kalau tidak ada lagi, "
-                            "petugas menunggu sampai buka (ditandai ⏳).\n"
-                            "- Merchant **tanpa jam** tidak dibatasi; rute tanpa jam sama sekali memakai KMeans + TSP biasa.\n"
-                            "- Pembagian merchant ke rute tetap mengikuti area. Kalau semua jam tak mungkin dipenuhi, dipilih "
-                            "urutan dengan pelanggaran paling sedikit.\n"
-                            "- Pengaturan prioritas tidak dipakai di rute yang punya jam."
-                        )
-                    hours_opt = bool(hours_opt and _n_hours)
+        hours_opt = bool(IS_PRO and _hours_opt_choice and _n_hours)   # ceklisnya ada di Lihat & Edit Data Awal
 
 
         _plan_txt = (
@@ -5209,7 +5229,8 @@ if st.session_state.page == "Routing":
             f"**Ringkasan:** {len(df)} merchant → {_plan_txt} · mulai {start_time:%H:%M} · "
             + (f"{int(visit_minutes)} menit/toko" if visit_minutes else "tanpa durasi kunjungan")
             + " · " + ("pulang-pergi" if round_trip else "satu arah")
-            + " · titik awal: " + ("per petugas" if dp_on else ("sesuai isian" if starting_link else "otomatis (paling efisien)")),
+            + " · titik awal: " + ("per petugas" if dp_on else ("sesuai isian" if starting_link else "otomatis (paling efisien)"))
+            + (" · urut sesuai jam buka/tutup" if hours_opt else ""),
             icon="🧾",
         )
 
