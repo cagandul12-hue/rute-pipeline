@@ -189,33 +189,56 @@ st.markdown(
     .sidebar-brand .title {font-weight: 800; font-size: 1.08rem; line-height: 1.2;}
     .sidebar-brand .subtitle {font-size: 0.82rem; opacity: 0.9;}
 
-    /* ---------- Lencana "Developed by" (di atas nama aplikasi) ---------- */
-    @property --dev-angle {syntax: "<angle>"; initial-value: 0deg; inherits: false;}
+    /* ---------- Lencana "Developed by": jalur rute mini, titik bergerak melewati tiga pemberhentian ---------- */
     .dev-badge {
-        position: relative; display: inline-flex; align-items: center; gap: 11px;
-        padding: 7px 20px 7px 8px; margin: 0 0 14px 0; border-radius: 999px;
+        position: relative; display: block; width: 100%; max-width: 300px; box-sizing: border-box;
+        padding: 11px 16px 12px 11px; margin: 0 0 14px 0; border-radius: 16px;
         background: rgba(128,128,128,0.07);
     }
-    .dev-badge::before {   /* garis tepi gradien yang berputar pelan */
-        content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 1.5px;
-        background: conic-gradient(from var(--dev-angle), #2563EB, #0D9488, #38BDF8, #2563EB);
+    .dev-badge::before {   /* garis tepi gradien tipis */
+        content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 1.5px; opacity: 0.8;
+        background: linear-gradient(135deg, #2563EB, #0D9488);
         -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
         -webkit-mask-composite: xor; mask-composite: exclude; pointer-events: none;
-        animation: devSpin 6s linear infinite;
     }
-    @keyframes devSpin {to {--dev-angle: 360deg;}}
-    .dev-badge .dev-avatar {
+    .dev-top {display: flex; align-items: center; gap: 11px;}
+    .dev-avatar {
         flex: none; width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center;
         font-weight: 800; font-size: 1rem; color: #ffffff;
         background: linear-gradient(135deg, #2563EB 0%, #0D9488 100%);
         box-shadow: 0 3px 12px rgba(13,148,136,0.38);
     }
-    .dev-badge .dev-text {display: flex; flex-direction: column; line-height: 1.2;}
-    .dev-badge .dev-label {font-size: 0.72rem; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; opacity: 0.9; white-space: nowrap;}
-    .dev-badge .dev-name {
-        font-size: 1.02rem; font-weight: 800; letter-spacing: 0.02em; white-space: nowrap; width: fit-content;
+    .dev-text {display: flex; flex-direction: column; line-height: 1.2; min-width: 0;}
+    .dev-label {font-size: 0.72rem; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; opacity: 0.9; white-space: nowrap;}
+    .dev-name {
+        font-size: 1.05rem; font-weight: 800; letter-spacing: 0.02em; white-space: nowrap; width: fit-content;
         background: linear-gradient(90deg, #2563EB, #0D9488); -webkit-background-clip: text; background-clip: text;
         color: transparent; -webkit-text-fill-color: transparent;
+    }
+    .dev-route {position: relative; display: block; height: 14px; margin: 11px 7px 0 7px;}
+    .dev-route::before {   /* jalan putus-putus */
+        content: ""; position: absolute; left: 0; right: 0; top: 6px; height: 2px; border-radius: 2px;
+        background: repeating-linear-gradient(90deg, rgba(128,128,128,0.6) 0 5px, transparent 5px 10px);
+    }
+    .dev-route .n {   /* titik pemberhentian: menyala saat dilewati */
+        position: absolute; top: 2px; width: 10px; height: 10px; margin-left: -5px; box-sizing: border-box;
+        border-radius: 50%; background: #ffffff; border: 2px solid #2563EB; animation: devNode 4s ease-in-out infinite;
+    }
+    .dev-route .n1 {left: 0;}
+    .dev-route .n2 {left: 50%; animation-delay: 1.75s;}
+    .dev-route .n3 {left: 100%; animation-delay: 3.5s;}
+    .dev-pulse {   /* titik yang berjalan menyusuri rute */
+        position: absolute; top: 1px; left: 0; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%;
+        background: linear-gradient(135deg, #2563EB, #0D9488);
+        box-shadow: 0 0 0 4px rgba(13,148,136,0.18), 0 0 12px rgba(13,148,136,0.65);
+        animation: devTravel 4s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+    }
+    @keyframes devTravel {0% {left: 0; opacity: 0;} 8% {opacity: 1;} 92% {opacity: 1;} 100% {left: 100%; opacity: 0;}}
+    @keyframes devNode {
+        0% {background: #0D9488; border-color: #0D9488; box-shadow: 0 0 0 0 rgba(13,148,136,0);}
+        8% {box-shadow: 0 0 0 6px rgba(13,148,136,0.25);}
+        22% {background: #0D9488; border-color: #0D9488; box-shadow: 0 0 0 0 rgba(13,148,136,0);}
+        34%, 100% {background: #ffffff; border-color: #2563EB; box-shadow: none;}
     }
     section[data-testid="stSidebar"] button {border-radius: 10px !important;}
 
@@ -428,7 +451,7 @@ st.markdown(
     }
 
     @media (prefers-reduced-motion: reduce) {
-        .hero-route, .dev-badge::before, .stat, .cmp-track i {animation: none !important;}
+        .hero-route, .dev-pulse, .dev-route .n, .stat, .cmp-track i {animation: none !important;}
     }
     </style>
     """,
@@ -605,8 +628,11 @@ def empty_state(icon, title, desc):
 
 
 DEV_BADGE_HTML = (
-    '<div class="dev-badge"><span class="dev-avatar" aria-hidden="true">A</span>'
+    '<div class="dev-badge">'
+    '<div class="dev-top"><span class="dev-avatar" aria-hidden="true">A</span>'
     '<span class="dev-text"><span class="dev-label">Developed by</span><span class="dev-name">Abdillah</span></span></div>'
+    '<div class="dev-route" aria-hidden="true"><i class="n n1"></i><i class="n n2"></i><i class="n n3"></i><b class="dev-pulse"></b></div>'
+    '</div>'
 )
 
 
@@ -3537,12 +3563,14 @@ LOGIN_CSS = """
 
 LOGIN_BRAND_HTML = """
 <div class="login-brand">
-    <div style="text-align:center"><div class="dev-badge"><span class="dev-dot"></span><span class="dev-label">Developed by</span><span class="dev-name">Abdillah</span></div></div>
+    <div style="max-width:300px;margin:0 auto"><!--DEV_BADGE--></div>
     <div class="login-logo">⚡</div>
     <div class="login-title">Routing &amp; Extractor</div>
     <div class="login-sub">Masuk untuk melanjutkan ke Routing Optimizer dan Maps Extractor</div>
 </div>
 """
+LOGIN_BRAND_HTML = LOGIN_BRAND_HTML.replace("<!--DEV_BADGE-->", DEV_BADGE_HTML)
+
 
 
 def render_login_page():
@@ -5899,12 +5927,12 @@ if st.session_state.page == "Routing":
         )
 
 # ================================================================
-# HALAMAN 2: GOOGLE MAPS EXTRACTOR
+# HALAMAN 2: MAPS EXTRACTOR
 # ================================================================
 elif st.session_state.page == "Extract":
     render_hero(
-        "Ekstraksi lokasi", "Google Maps", "Extractor",
-        "Ubah link Google Maps, pencarian nama merchant, atau input manual jadi tabel (merchant_name, latitude, longitude) siap pakai.",
+        "Ekstraksi lokasi", "Maps", "Extractor",
+        "Ubah link Google Maps, pencarian nama merchant (lewat OpenStreetMap), atau input manual jadi tabel (merchant_name, latitude, longitude) siap pakai.",
     )
 
     tab_link, tab_search, tab_manual = st.tabs(
