@@ -77,11 +77,22 @@ st.markdown(
     .rp-stop.s2 {left: 36%; animation-delay: 1.0s;}
     .rp-stop.s3 {left: 68%; animation-delay: 1.45s;}
     .rp-stop.s4 {left: 96%; animation-delay: 2.3s;}
-    .rp-van {
-        position: absolute; top: 0; left: 0; font-size: 26px; line-height: 1;
-        animation: rp-drive 2.6s cubic-bezier(0.45, 0, 0.55, 1) infinite; filter: drop-shadow(0 3px 3px rgba(0,0,0,0.25));
+    .rp-rocket {
+        position: absolute; top: 3px; left: 0; width: 28px; height: 28px;
+        animation: rp-drive 2.6s cubic-bezier(0.45, 0, 0.55, 1) infinite;
     }
-    .rp-van span {display: inline-block; transform: scaleX(-1);}
+    .rp-rocket span {   /* emoji roket menghadap kanan-atas; diputar 45° supaya melaju ke kanan */
+        position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+        font-size: 24px; line-height: 1; transform: rotate(45deg);
+        filter: drop-shadow(0 2px 3px rgba(0,0,0,0.22)); animation: rp-bob 0.45s ease-in-out infinite alternate;
+    }
+    .rp-flame {   /* jejak api di belakang roket */
+        position: absolute; right: 70%; top: 50%; width: 38px; height: 5px; margin-top: -2px; border-radius: 6px;
+        background: linear-gradient(90deg, rgba(251,146,60,0), rgba(251,146,60,0.85) 65%, rgba(250,204,21,0.95));
+        transform-origin: right center; animation: rp-flame 0.16s ease-in-out infinite alternate;
+    }
+    @keyframes rp-bob {to {transform: rotate(45deg) translate(1px, -1px);}}
+    @keyframes rp-flame {from {transform: scaleX(0.7); opacity: 0.7;} to {transform: scaleX(1.1); opacity: 1;}}
     .rp-title {font-weight: 700; font-size: 1.02rem;}
     .rp-sub {opacity: 0.9; font-size: 0.9rem; margin-top: -0.35rem;}
     .rp-dots b {display: inline-block; opacity: 0.2; animation: rp-blink 1.2s infinite;}
@@ -115,27 +126,45 @@ st.markdown(
     .sr-only {position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden;
         clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;}
 
-    /* ---------- Hero header ---------- */
+    /* ---------- Hero header (banner judul halaman) ---------- */
     .hero-header {
+        position: relative; display: flex; align-items: center; justify-content: space-between; gap: 24px;
+        overflow: hidden; margin-bottom: 18px; padding: 24px 30px; border-radius: 20px;
+        border: 1px solid rgba(37,99,235,0.22);
         background:
-            radial-gradient(circle at 15% -20%, rgba(255,255,255,0.18) 0%, rgba(255,255,255,0) 55%),
-            linear-gradient(135deg, #2563EB 0%, #0D9488 100%);
-        border-radius: 18px;
-        padding: 26px 32px;
-        margin-bottom: 22px;
-        box-shadow: 0 10px 28px rgba(37,99,235,0.28);
+            radial-gradient(120% 150% at 0% 0%, rgba(37,99,235,0.15) 0%, rgba(37,99,235,0) 58%),
+            radial-gradient(90% 130% at 100% 100%, rgba(13,148,136,0.15) 0%, rgba(13,148,136,0) 55%),
+            rgba(128,128,128,0.04);
     }
+    .hero-header::before {
+        content: ""; position: absolute; left: 0; top: 20%; bottom: 20%; width: 3px; border-radius: 0 3px 3px 0;
+        background: linear-gradient(180deg, #2563EB, #0D9488);
+    }
+    .hero-text {min-width: 0; position: relative;}
+    .hero-eyebrow {
+        display: flex; align-items: center; gap: 10px; margin-bottom: 8px;
+        font-size: 0.72rem; font-weight: 700; letter-spacing: 0.18em; text-transform: uppercase; opacity: 0.85;
+    }
+    .hero-eyebrow::before {content: ""; width: 22px; height: 2px; border-radius: 2px; background: linear-gradient(90deg, #2563EB, #0D9488);}
     .hero-header h1 {
-        color: #ffffff !important;
-        margin: 0 !important;
-        font-size: 1.7rem;
-        font-weight: 800;
-        line-height: 1.3;
+        margin: 0 !important; padding: 0 !important; color: inherit !important;
+        font-size: 1.75rem; font-weight: 800; line-height: 1.25; letter-spacing: -0.01em;
+    }
+    .hero-header h1 .grad {
+        background: linear-gradient(90deg, #2563EB, #0D9488); -webkit-background-clip: text; background-clip: text;
+        color: transparent !important; -webkit-text-fill-color: transparent;
     }
     .hero-header p {
-        color: #ffffff !important;
-        margin: 6px 0 0 0 !important;
-        font-size: 0.95rem;
+        margin: 8px 0 0 0 !important; max-width: 620px; font-size: 0.92rem; line-height: 1.55;
+        color: inherit !important; opacity: 0.85;
+    }
+    .hero-art {flex: none; width: 210px; height: 84px;}
+    .hero-route {stroke-dasharray: 2 9; animation: heroDash 2.4s linear infinite;}
+    @keyframes heroDash {to {stroke-dashoffset: -22;}}
+    @media (max-width: 720px) {
+        .hero-art {display: none;}
+        .hero-header {padding: 18px 20px;}
+        .hero-header h1 {font-size: 1.4rem;}
     }
 
     /* ---------- Metric cards ---------- */
@@ -161,38 +190,32 @@ st.markdown(
     .sidebar-brand .subtitle {font-size: 0.82rem; opacity: 0.9;}
 
     /* ---------- Lencana "Developed by" (di atas nama aplikasi) ---------- */
+    @property --dev-angle {syntax: "<angle>"; initial-value: 0deg; inherits: false;}
     .dev-badge {
-        position: relative; display: inline-flex; align-items: center; gap: 9px;
-        padding: 6px 16px 6px 13px; margin: 0 0 12px 0; border-radius: 999px;
-        background: rgba(128,128,128,0.08);
+        position: relative; display: inline-flex; align-items: center; gap: 11px;
+        padding: 7px 20px 7px 8px; margin: 0 0 14px 0; border-radius: 999px;
+        background: rgba(128,128,128,0.07);
     }
-    .dev-badge::before {   /* garis tepi gradien */
+    .dev-badge::before {   /* garis tepi gradien yang berputar pelan */
         content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 1.5px;
-        background: linear-gradient(135deg, #2563EB 0%, #0D9488 100%);
+        background: conic-gradient(from var(--dev-angle), #2563EB, #0D9488, #38BDF8, #2563EB);
         -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
         -webkit-mask-composite: xor; mask-composite: exclude; pointer-events: none;
+        animation: devSpin 6s linear infinite;
     }
-    .dev-badge .dev-dot {
-        width: 8px; height: 8px; border-radius: 50%; flex: none;
+    @keyframes devSpin {to {--dev-angle: 360deg;}}
+    .dev-badge .dev-avatar {
+        flex: none; width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center;
+        font-weight: 800; font-size: 1rem; color: #ffffff;
         background: linear-gradient(135deg, #2563EB 0%, #0D9488 100%);
-        animation: devPulse 2.2s ease-in-out infinite;
+        box-shadow: 0 3px 12px rgba(13,148,136,0.38);
     }
-    @keyframes devPulse {
-        0%, 100% {box-shadow: 0 0 0 0 rgba(13,148,136,0.55);}
-        60% {box-shadow: 0 0 0 7px rgba(13,148,136,0);}
-    }
-    .dev-badge .dev-label {
-        font-size: 0.72rem; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
-        opacity: 0.9; white-space: nowrap;
-    }
+    .dev-badge .dev-text {display: flex; flex-direction: column; line-height: 1.2;}
+    .dev-badge .dev-label {font-size: 0.72rem; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; opacity: 0.9; white-space: nowrap;}
     .dev-badge .dev-name {
-        font-size: 0.98rem; font-weight: 800; letter-spacing: 0.02em; padding-bottom: 1px; white-space: nowrap;
-        background: linear-gradient(90deg, #2563EB, #0D9488, #2563EB) no-repeat 0 100% / 200% 2.5px;
-        animation: devSlide 4s linear infinite;
-    }
-    @keyframes devSlide {to {background-position: -200% 100%;}}
-    @media (prefers-reduced-motion: reduce) {
-        .dev-badge .dev-dot, .dev-badge .dev-name {animation: none;}
+        font-size: 1.02rem; font-weight: 800; letter-spacing: 0.02em; white-space: nowrap; width: fit-content;
+        background: linear-gradient(90deg, #2563EB, #0D9488); -webkit-background-clip: text; background-clip: text;
+        color: transparent; -webkit-text-fill-color: transparent;
     }
     section[data-testid="stSidebar"] button {border-radius: 10px !important;}
 
@@ -301,13 +324,6 @@ st.markdown(
     /* ---------- Tema minimalis ----------
        Satu blok yang menimpa gaya dekoratif di atas: tanpa gradien, bayangan, dan animasi hias.
        Hapus blok ini (sampai akhir CSS) untuk kembali ke tampilan sebelumnya. */
-    .hero-header {
-        background: none; box-shadow: none; border-radius: 0;
-        padding: 2px 0 14px 0; margin-bottom: 14px; border-bottom: 1px solid rgba(128,128,128,0.18);
-    }
-    .hero-header h1 {color: inherit !important; font-size: 1.45rem; font-weight: 700;}
-    .hero-header p {color: inherit !important; opacity: 0.85; font-size: 0.9rem;}
-
     .stButton > button[kind="primary"], .stButton > button[data-testid="stBaseButton-primary"],
     .stDownloadButton > button[kind="primary"], .stDownloadButton > button[data-testid="stBaseButton-primary"] {
         background: #2563EB !important; box-shadow: none !important;
@@ -337,15 +353,83 @@ st.markdown(
 
     div[data-testid="stExpander"] {border-radius: 10px !important; margin-bottom: 10px;}
 
-    .dev-badge {background: none; padding: 0; margin: 0 0 10px 0; gap: 6px;}
-    .dev-badge::before, .dev-badge .dev-dot {display: none;}
-    .dev-badge .dev-label {font-size: 0.78rem; font-weight: 500; letter-spacing: 0.04em; text-transform: none;}
-    .dev-badge .dev-name {font-size: 0.85rem; font-weight: 600; background: none; animation: none;}
-
     .rp-loader {background: transparent; box-shadow: none; border-radius: 12px; border-color: rgba(128,128,128,0.25); padding: 1rem;}
-    .rp-track {display: none;}
     .rp-bar i {background: #2563EB; animation: none;}
     .rp-indet i {animation: rp-slide 1.5s ease-in-out infinite;}
+
+    /* ---------- Sidebar: lapisan warna biru-hijau tipis di atas warna tema, supaya beda dari area utama (terang & gelap) ---------- */
+    section[data-testid="stSidebar"] {
+        background-image:
+            linear-gradient(90deg, #2563EB, #0D9488),
+            linear-gradient(180deg, rgba(37,99,235,0.17) 0%, rgba(13,148,136,0.13) 100%);
+        background-size: 100% 3px, 100% 100%; background-repeat: no-repeat;
+        border-right: 1px solid rgba(37,99,235,0.28);
+        box-shadow: 6px 0 28px rgba(15,23,42,0.08);
+    }
+
+    /* ---------- Strip statistik hasil rute ---------- */
+    .stat-strip {
+        position: relative; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+        margin: 6px 0 18px 0; overflow: hidden; border-radius: 18px;
+        border: 1px solid rgba(37,99,235,0.2);
+        background: linear-gradient(135deg, rgba(37,99,235,0.07), rgba(13,148,136,0.07));
+    }
+    .stat-strip::before {content: ""; position: absolute; left: 0; right: 0; top: 0; height: 3px; background: linear-gradient(90deg, #2563EB, #0D9488);}
+    .stat {position: relative; padding: 20px 22px 18px 22px; animation: statIn 0.6s ease both;}
+    .stat:nth-child(2) {animation-delay: 0.08s;} .stat:nth-child(3) {animation-delay: 0.16s;} .stat:nth-child(4) {animation-delay: 0.24s;}
+    .stat + .stat {border-left: 1px solid rgba(128,128,128,0.2);}
+    .stat-icon {display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; font-size: 0.9rem; background: rgba(37,99,235,0.12);}
+    .stat-label {margin-top: 10px; font-size: 0.78rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; opacity: 0.85;}
+    .stat-line {display: flex; align-items: baseline; gap: 6px; margin-top: 2px; flex-wrap: wrap;}
+    .stat-val {
+        font-size: clamp(1.6rem, 2.4vw, 2.2rem); font-weight: 800; line-height: 1.15; font-variant-numeric: tabular-nums;
+        background: linear-gradient(90deg, #2563EB, #0D9488); -webkit-background-clip: text; background-clip: text;
+        color: transparent; -webkit-text-fill-color: transparent;
+    }
+    .stat-unit {font-size: 0.95rem; font-weight: 600; opacity: 0.8;}
+    .stat-sub {margin-top: 2px; font-size: 0.8rem; opacity: 0.85;}
+    @keyframes statIn {from {opacity: 0; transform: translateY(6px);} to {opacity: 1; transform: none;}}
+    @media (max-width: 720px) {
+        .stat-strip {grid-template-columns: repeat(2, minmax(0, 1fr));}
+        .stat {padding: 16px 16px 14px 16px;}
+        .stat:nth-child(3) {border-left: 0;}
+        .stat:nth-child(n+3) {border-top: 1px solid rgba(128,128,128,0.2);}
+    }
+
+    /* ---------- Panel perbandingan sebelum vs sesudah ---------- */
+    .cmp {
+        display: flex; align-items: center; gap: 30px; margin: 4px 0 10px 0; padding: 22px 26px; border-radius: 18px;
+        border: 1px solid rgba(37,99,235,0.2); background: linear-gradient(135deg, rgba(37,99,235,0.05), rgba(13,148,136,0.07));
+    }
+    .cmp-bars {flex: 1 1 auto; min-width: 0; display: grid; gap: 16px;}
+    .cmp-row {display: grid; grid-template-columns: 128px minmax(0, 1fr) auto; align-items: center; gap: 14px;}
+    .cmp-lbl {font-size: 0.85rem; font-weight: 600; opacity: 0.9;}
+    .cmp-track {height: 12px; border-radius: 99px; background: rgba(128,128,128,0.16); overflow: hidden;}
+    .cmp-track i {display: block; height: 100%; border-radius: 99px; background: rgba(128,128,128,0.55); transform-origin: left center; animation: cmpGrow 0.9s cubic-bezier(0.22, 1, 0.36, 1) both;}
+    .cmp-row.opt .cmp-track i {background: linear-gradient(90deg, #2563EB, #0D9488); animation-delay: 0.15s;}
+    .cmp-val {min-width: 76px; text-align: right; font-weight: 700; font-variant-numeric: tabular-nums;}
+    .cmp-save {flex: none; display: flex; align-items: center; gap: 16px; padding-left: 28px; border-left: 1px solid rgba(128,128,128,0.2);}
+    .cmp-ring {position: relative; width: 84px; height: 84px; flex: none;}
+    .cmp-ring::before {
+        content: ""; position: absolute; inset: 0; border-radius: 50%;
+        background: conic-gradient(#0D9488 calc(var(--p) * 1%), rgba(128,128,128,0.2) 0);
+        -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px));
+        mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px));
+    }
+    .cmp-ring span {position: absolute; inset: 0; display: grid; place-items: center; font-weight: 800; font-size: 1.15rem;}
+    .cmp-save-text .big {font-weight: 800; font-size: 1.3rem; line-height: 1.2;}
+    .cmp-save-text .small {font-size: 0.82rem; opacity: 0.85; margin-top: 2px; max-width: 190px;}
+    @keyframes cmpGrow {from {transform: scaleX(0);} to {transform: scaleX(1);}}
+    @media (max-width: 720px) {
+        .cmp {flex-direction: column; align-items: stretch; gap: 18px; padding: 18px;}
+        .cmp-row {grid-template-columns: 1fr auto;}
+        .cmp-track {grid-column: 1 / -1; order: 3;}
+        .cmp-save {padding-left: 0; border-left: 0; padding-top: 16px; border-top: 1px solid rgba(128,128,128,0.2);}
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        .hero-route, .dev-badge::before, .stat, .cmp-track i {animation: none !important;}
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -353,7 +437,7 @@ st.markdown(
 
 
 def loader_html(title, sub="", pct=None):
-    """Animasi loading bertema rute (motor melaju melewati titik-titik singgah) + bar progres.
+    """Animasi loading bertema rute (roket melaju melewati titik-titik singgah) + bar progres.
     pct=None → bar berjalan terus (tidak tahu berapa lama); pct 0–1 → bar sesuai kemajuan."""
     t = html_lib.escape(str(title))
     sub_html = f'<div class="rp-sub">{html_lib.escape(str(sub))}</div>' if sub else ""
@@ -365,7 +449,7 @@ def loader_html(title, sub="", pct=None):
     return (
         '<div class="rp-loader" role="status" aria-live="polite"><div class="rp-track"><div class="rp-line"></div>'
         '<span class="rp-stop s1"></span><span class="rp-stop s2"></span><span class="rp-stop s3"></span>'
-        '<span class="rp-stop s4"></span><div class="rp-van"><span>🛵</span></div></div>'
+        '<span class="rp-stop s4"></span><div class="rp-rocket" aria-hidden="true"><i class="rp-flame"></i><span>🚀</span></div></div>'
         f'<div class="rp-title">{t}<span class="rp-dots"><b>.</b><b>.</b><b>.</b></span></div>{sub_html}{bar}</div>'
     )
 
@@ -417,6 +501,80 @@ def metric_card(icon, label, value):
     )
 
 
+HERO_ART = (
+    '<svg class="hero-art" viewBox="0 0 220 84" fill="none" aria-hidden="true" focusable="false">'
+    '<defs><linearGradient id="heroGrad" x1="0" y1="0" x2="1" y2="0">'
+    '<stop offset="0" stop-color="#2563EB"/><stop offset="1" stop-color="#0D9488"/></linearGradient></defs>'
+    '<path class="hero-route" d="M10 68 C 52 68, 56 24, 96 32 S 150 72, 178 42 S 202 20, 210 14" '
+    'stroke="url(#heroGrad)" stroke-width="2.6" stroke-linecap="round"/>'
+    '<circle cx="10" cy="68" r="5" fill="#2563EB"/><circle cx="96" cy="32" r="5" fill="#2563EB"/>'
+    '<circle cx="178" cy="42" r="5" fill="#0D9488"/>'
+    '<circle cx="210" cy="14" r="9" fill="#0D9488" fill-opacity="0.2"/><circle cx="210" cy="14" r="5" fill="#0D9488"/>'
+    '</svg>'
+)
+
+
+def render_hero(eyebrow, title_plain, title_accent, desc):
+    """Banner judul halaman: label kecil, judul dengan satu kata beraksen gradien, deskripsi, dan ilustrasi rute tipis."""
+    st.markdown(
+        '<div class="hero-header"><div class="hero-text">'
+        f'<div class="hero-eyebrow">{html_lib.escape(eyebrow)}</div>'
+        f'<h1>{html_lib.escape(title_plain)} <span class="grad">{html_lib.escape(title_accent)}</span></h1>'
+        f'<p>{html_lib.escape(desc)}</p></div>{HERO_ART}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def stat_strip(items):
+    """Strip statistik: angka besar bergradien, label kecil, keterangan singkat. items = [{icon,label,value,unit,sub}]."""
+    cells = []
+    for it in items:
+        unit = f'<span class="stat-unit">{html_lib.escape(str(it["unit"]))}</span>' if it.get("unit") else ""
+        sub = f'<div class="stat-sub">{html_lib.escape(str(it["sub"]))}</div>' if it.get("sub") else ""
+        cells.append(
+            '<div class="stat">'
+            f'<span class="stat-icon" aria-hidden="true">{it["icon"]}</span>'
+            f'<div class="stat-label">{html_lib.escape(str(it["label"]))}</div>'
+            f'<div class="stat-line"><span class="stat-val">{html_lib.escape(str(it["value"]))}</span>{unit}</div>'
+            f'{sub}</div>'
+        )
+    st.markdown(
+        '<div class="stat-strip" role="group" aria-label="Ringkasan hasil rute">' + "".join(cells) + "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def compare_panel(naive_km, opt_km, delta_km, saving_pct):
+    """Perbandingan jarak sebelum vs sesudah optimasi: dua bilah sebanding + cincin persen penghematan."""
+    top = max(naive_km, opt_km, 0.001)
+    w_naive, w_opt = naive_km / top * 100, opt_km / top * 100
+    if delta_km > 0.05:
+        pct = max(0, min(100, saving_pct))
+        side = (
+            f'<div class="cmp-save"><div class="cmp-ring" style="--p:{pct:.0f}" aria-hidden="true"><span>{pct:.0f}%</span></div>'
+            f'<div class="cmp-save-text"><div class="big">Hemat {delta_km:.1f} km</div>'
+            f'<div class="small">{pct:.0f}% lebih singkat dari urutan di file</div></div></div>'
+        )
+    elif delta_km < -0.05:
+        side = (
+            f'<div class="cmp-save"><div class="cmp-save-text"><div class="big">+{abs(delta_km):.1f} km</div>'
+            '<div class="small">lebih panjang dari urutan di file</div></div></div>'
+        )
+    else:
+        side = (
+            '<div class="cmp-save"><div class="cmp-save-text"><div class="big">≈ sama</div>'
+            '<div class="small">urutan di file sudah efisien</div></div></div>'
+        )
+    st.markdown(
+        '<div class="cmp">'
+        '<div class="cmp-bars">'
+        f'<div class="cmp-row"><span class="cmp-lbl">Urutan di file</span><div class="cmp-track" aria-hidden="true"><i style="width:{w_naive:.1f}%"></i></div><span class="cmp-val">{naive_km:.1f} km</span></div>'
+        f'<div class="cmp-row opt"><span class="cmp-lbl">Setelah optimasi</span><div class="cmp-track" aria-hidden="true"><i style="width:{w_opt:.1f}%"></i></div><span class="cmp-val">{opt_km:.1f} km</span></div>'
+        f'</div>{side}</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def section_header(icon, title, subtitle=None):
     subtitle_html = f'<div class="subtitle">{subtitle}</div>' if subtitle else ""
     st.markdown(
@@ -447,8 +605,8 @@ def empty_state(icon, title, desc):
 
 
 DEV_BADGE_HTML = (
-    '<div class="dev-badge"><span class="dev-dot"></span>'
-    '<span class="dev-label">Developed by</span><span class="dev-name">Abdillah</span></div>'
+    '<div class="dev-badge"><span class="dev-avatar" aria-hidden="true">A</span>'
+    '<span class="dev-text"><span class="dev-label">Developed by</span><span class="dev-name">Abdillah</span></span></div>'
 )
 
 
@@ -3143,6 +3301,15 @@ section[data-testid="stSidebar"],
 .hero-header {padding: 16px 16px; border-radius: 14px; margin-bottom: 14px;}
 .hero-header h1 {font-size: 1.25rem;}
 .hero-header p {font-size: 0.8rem; line-height: 1.4;}
+.hero-art {display: none;}
+.stat-strip {grid-template-columns: repeat(2, minmax(0, 1fr));}
+.stat {padding: 16px 16px 14px 16px;}
+.stat:nth-child(3) {border-left: 0;}
+.stat:nth-child(n+3) {border-top: 1px solid rgba(128,128,128,0.2);}
+.cmp {flex-direction: column; align-items: stretch; gap: 18px; padding: 18px;}
+.cmp-row {grid-template-columns: 1fr auto;}
+.cmp-track {grid-column: 1 / -1; order: 3;}
+.cmp-save {padding-left: 0; border-left: 0; padding-top: 16px; border-top: 1px solid rgba(128,128,128,0.2);}
 .section-header {margin: 20px 0 10px 0; gap: 10px;}
 .section-header .badge {width: 32px; height: 32px;}
 .metric-card {padding: 12px 14px;}
@@ -4202,14 +4369,9 @@ render_unsaved_notice(_notice_slot, IS_PRO)
 # HALAMAN 1: ROUTING PIPELINE OPTIMIZER
 # ================================================================
 if st.session_state.page == "Routing":
-    st.markdown(
-        """
-        <div class="hero-header">
-            <h1>Routing Pipeline Optimizer</h1>
-            <p>Optimalkan rute kunjungan dengan clustering (KMeans) dan penentuan urutan kunjungan (TSP) yang diselesaikan dengan Google OR-Tools.</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    render_hero(
+        "Optimasi rute", "Routing Pipeline", "Optimizer",
+        "Optimalkan rute kunjungan dengan clustering (KMeans) dan penentuan urutan kunjungan (TSP) yang diselesaikan dengan Google OR-Tools.",
     )
 
     stepper_slot = st.empty()
@@ -4663,6 +4825,7 @@ if st.session_state.page == "Routing":
         if IS_PRO:
             render_preset_panel()
         dp_on = False
+        dp_balance = False
         dp_n, dp_cap, dp_lock, _dp_days_est = 1, 12, False, 0
         dp_names, dp_rows, dp_days_sel, dp_start_date = [], [], [], datetime.date.today()
         if IS_PRO:
@@ -4701,6 +4864,19 @@ if st.session_state.page == "Routing":
                              "itu; merchant baru masuk ke wilayah petugas terdekat. Simpan wilayah dari hasil rute lewat "
                              "tombol 🔒 di tab Ringkasan, atau isi kolom petugas di Lihat & Edit Data Awal / Excel.",
                     )
+                    dp_balance = st.checkbox(
+                        "⏱️ Seimbangkan beban waktu antar rute",
+                        value=st.session_state.balance_time_flag,
+                        key="_balance_time_widget",
+                        on_change=_sync_balance_time,
+                        help=(
+                            "Tanpa ini, satu hari kerja bisa 2 jam sementara hari lain 5 jam. Dengan ini, merchant di "
+                            "perbatasan antar hari milik petugas yang sama dipindahkan supaya durasi (perjalanan + "
+                            "kunjungan) tiap hari lebih mirip. Wilayah dan titik awal petugas tidak berubah, dan batas "
+                            "merchant per hari tetap dihormati. Perkiraan memakai jarak garis lurus; rute akhir tetap "
+                            "dihitung dengan jarak jalan asli."
+                        ),
+                    )
                     st.markdown("**Petugas** — nama dan titik awal (rumah/kantor, opsional)")
                     for _i in range(dp_n):
                         pc1, pc2 = st.columns([1, 2])
@@ -4731,7 +4907,7 @@ if st.session_state.page == "Routing":
                 plan_mode = PLAN_MAX
                 max_points_per_route, target_routes = dp_cap, None
                 n_cluster_default = max(1, dp_n * _dp_days_est)
-                split_mode, balance_time = SPLIT_AUTO, False
+                split_mode, balance_time = SPLIT_AUTO, dp_balance   # dp_balance ikut tanda tangan pengaturan hasil
                 st.info(
                     "Dinonaktifkan karena **Rencana beberapa hari** aktif — jumlah rute ditentukan oleh jumlah petugas, "
                     "hari kerja, dan batas merchant per hari di atas.",
@@ -5076,6 +5252,31 @@ if st.session_state.page == "Routing":
                         df["latitude"], df["longitude"], dp_n, dp_cap, starts=_starts, assigned=_assigned,
                     )
                     df["route"] = _labels
+                    if balance_time:
+                        # Per petugas: pindahkan titik di perbatasan antar hari kerja miliknya. Lintas petugas tidak
+                        # disentuh supaya wilayah (dan kunci wilayah) serta titik awal tiap petugas tetap utuh.
+                        _bal_parts = []
+                        for _p in sorted({_m["p"] for _m in _meta}):
+                            _rids = [_m["route_id"] for _m in _meta if _m["p"] == _p]
+                            if len(_rids) < 2:
+                                continue
+                            _mask = df["route"].isin(_rids).to_numpy()
+                            _sub = df[_mask]
+                            _nl, _inf = balance_by_time(
+                                _sub, _sub["route"].to_numpy(), int(visit_minutes), start=_starts[_p], max_points=dp_cap,
+                            )
+                            df.loc[_mask, "route"] = _nl
+                            _bal_parts.append(_inf)
+                        if _bal_parts:
+                            # selisih = rata-rata per petugas (nilai terburuk saja menyembunyikan perbaikan di petugas lain);
+                            # hari terlama = yang terlama di antara semua petugas
+                            balance_info = {
+                                "before_spread_min": float(np.mean([_i["before_spread_min"] for _i in _bal_parts])),
+                                "after_spread_min": float(np.mean([_i["after_spread_min"] for _i in _bal_parts])),
+                                "before_max_min": max(_i["before_max_min"] for _i in _bal_parts),
+                                "after_max_min": max(_i["after_max_min"] for _i in _bal_parts),
+                                "scope": "petugas",
+                            }
                     _wd = {ID_DAYS.index(x) for x in dp_days_sel}
                     _dates = make_work_dates(dp_start_date, _wd, max(m["day"] for m in _meta) + 1)
                     for _m in _meta:
@@ -5305,10 +5506,16 @@ if st.session_state.page == "Routing":
             st.success(f"🎉 Rute berhasil dibuat! {len(route_summaries)} rute siap dipakai.")
             _bal = result.get("balance_info")
             if _bal and _bal["before_spread_min"] - _bal["after_spread_min"] > 1:
-                st.caption(
+                _bal_lead = (
+                    "⏱️ Beban waktu diseimbangkan antar hari kerja tiap petugas: selisih hari terlama–tercepat "
+                    "(perkiraan, rata-rata per petugas) turun dari "
+                    if _bal.get("scope") == "petugas" else
                     "⏱️ Beban waktu diseimbangkan: selisih rute terlama–tercepat (perkiraan) turun dari "
-                    f"{format_duration(_bal['before_spread_min'] * 60)} menjadi {format_duration(_bal['after_spread_min'] * 60)}; "
-                    f"rute terlama dari ±{format_duration(_bal['before_max_min'] * 60)} menjadi ±{format_duration(_bal['after_max_min'] * 60)}."
+                )
+                st.caption(
+                    _bal_lead
+                    + f"{format_duration(_bal['before_spread_min'] * 60)} menjadi {format_duration(_bal['after_spread_min'] * 60)}; "
+                    f"yang terlama dari ±{format_duration(_bal['before_max_min'] * 60)} menjadi ±{format_duration(_bal['after_max_min'] * 60)}."
                 )
             if result.get("multi_depot_used"):
                 _used_dep = len({r.get("depot_idx") for r in route_summaries if r.get("depot_idx") is not None})
@@ -5321,20 +5528,19 @@ if st.session_state.page == "Routing":
             total_distance = sum(r["distance_km"] for r in route_summaries)
             total_duration = sum(r["duration_sec"] for r in route_summaries)
             total_visit = sum(r.get("visit_sec", 0) + r.get("wait_sec", 0) for r in route_summaries)
-            with st.container(key="grid4"):
-                m1, m2, m3, m4 = st.columns(4)
-                with m1:
-                    metric_card("🧭", "Total Rute", len(route_summaries))
-                with m2:
-                    metric_card("📍", "Total Titik", result["total_points"])
-                with m3:
-                    metric_card("📏", "Estimasi Total Jarak", f"{total_distance:.1f} km")
-                with m4:
-                    metric_card(
-                        "⏱️",
-                        "Waktu Total (jalan + kunjungan + tunggu)" if total_visit else "Estimasi Waktu Tempuh",
-                        format_duration(total_duration + total_visit),
-                    )
+            _n_rt = len(route_summaries)
+            _time_total = total_duration + total_visit
+            stat_strip([
+                {"icon": "🧭", "label": "Total Rute", "value": _n_rt,
+                 "sub": f"≈ {round(result['total_points'] / _n_rt)} titik per rute" if _n_rt > 1 else None},
+                {"icon": "📍", "label": "Total Titik", "value": result["total_points"], "sub": "merchant terjadwal"},
+                {"icon": "📏", "label": "Estimasi Total Jarak", "value": f"{total_distance:.1f}", "unit": "km",
+                 "sub": f"≈ {total_distance / _n_rt:.1f} km per rute" if _n_rt > 1 else None},
+                {"icon": "⏱️", "label": "Waktu Total" if total_visit else "Estimasi Waktu Tempuh",
+                 "value": format_duration_short(_time_total),
+                 "sub": ("jalan + kunjungan + tunggu" if total_visit
+                         else (f"≈ {format_duration_short(_time_total / _n_rt)} per rute" if _n_rt > 1 else "waktu di jalan"))},
+            ])
 
             _tf = st.session_state.pop("territory_flash", None)
             if _tf:
@@ -5669,17 +5875,7 @@ if st.session_state.page == "Routing":
                         "Dibanding mengunjungi merchant sesuai urutan di file kamu",
                     )
                     saving_pct = delta_km / total_naive_km * 100
-                    with st.container(key="grid3cmp"):
-                        cm1, cm2, cm3 = st.columns(3)
-                        with cm1:
-                            metric_card("📋", "Urutan di file", f"{total_naive_km:.1f} km")
-                        with cm2:
-                            metric_card("✅", "Setelah optimasi", f"{total_distance:.1f} km")
-                        with cm3:
-                            if delta_km > 0.05:
-                                metric_card("📉", "Penghematan", f"{delta_km:.1f} km ({saving_pct:.0f}%)")
-                            else:
-                                metric_card("⚖️", "Selisih", "≈ sama")
+                    compare_panel(total_naive_km, total_distance, delta_km, saving_pct)
                     if delta_km > 0.05:
                         st.caption(
                             f"💡 Hemat ±{format_duration(max(delta_sec, 0))} waktu perjalanan dibanding urutan di file "
@@ -5706,14 +5902,9 @@ if st.session_state.page == "Routing":
 # HALAMAN 2: GOOGLE MAPS EXTRACTOR
 # ================================================================
 elif st.session_state.page == "Extract":
-    st.markdown(
-        """
-        <div class="hero-header">
-            <h1>Google Maps Extractor</h1>
-            <p>Ubah link Google Maps, pencarian nama merchant, atau input manual jadi tabel (merchant_name, latitude, longitude) siap pakai.</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    render_hero(
+        "Ekstraksi lokasi", "Google Maps", "Extractor",
+        "Ubah link Google Maps, pencarian nama merchant, atau input manual jadi tabel (merchant_name, latitude, longitude) siap pakai.",
     )
 
     tab_link, tab_search, tab_manual = st.tabs(
