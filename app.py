@@ -3744,6 +3744,7 @@ def _cookie_js(token):
 # pengguna ditawari memulihkannya. Tanpa kredensial Supabase di secrets, fitur ini mati dan aplikasi berjalan seperti biasa.
 # ================================================================
 PERSIST_COOKIE = "rp_sid"
+PERSIST_PARAM = "rps"      # cadangan: ID sesi juga di URL (?rps=...), ikut terbawa saat refresh walau cookie gagal dipasang
 PERSIST_TTL_DAYS = 14
 PERSIST_MAX_BYTES = 8 * 1024 * 1024        # batas ukuran terkompresi per sesi
 PERSIST_TABLE = "rp_sessions"
@@ -3964,31 +3965,50 @@ def _check_saved_session():
         ss.persist_check_error = val
 
 
+def _persist_sync_url(sid):
+    """Selaraskan parameter URL ?rps= dengan ID sesi (tanpa JavaScript; tetap ada saat halaman di-refresh)."""
+    try:
+        if st.query_params.get(PERSIST_PARAM) != sid:
+            st.query_params[PERSIST_PARAM] = sid
+    except Exception:
+        pass
+
+
 def init_persistence():
-    """Tentukan ID sesi (dari cookie bila ada) dan, kalau sesi masih kosong, cek apakah ada sesi tersimpan untuk ditawarkan."""
+    """Tentukan ID sesi (dari cookie, atau dari URL bila cookie tidak ada) dan, kalau sesi masih kosong, cek sesi tersimpan untuk ditawarkan."""
     ss = st.session_state
     if not persist_enabled():
         return
     if "persist_sid" in ss:
         if not ss.get("persist_cookie_seen"):
             _persist_cookie_js(ss.persist_sid)   # browser belum terbukti menyimpan cookie: pasang lagi (aman diulang)
+        _persist_sync_url(ss.persist_sid)
         return
-    cookie = None
+    cookie = param = None
     if not ss.get("persist_ignore_cookie"):
         try:
             cookie = st.context.cookies.get(PERSIST_COOKIE)
         except Exception:
             cookie = None
-    if isinstance(cookie, str) and _SID_RE.match(cookie):
-        ss.persist_sid = cookie
-        ss.persist_cookie_seen = True
+        try:
+            param = st.query_params.get(PERSIST_PARAM)
+        except Exception:
+            param = None
+    cookie_ok = isinstance(cookie, str) and bool(_SID_RE.match(cookie))
+    param_ok = isinstance(param, str) and bool(_SID_RE.match(param))
+    if cookie_ok or param_ok:
+        ss.persist_sid = cookie if cookie_ok else param
+        ss.persist_cookie_seen = cookie_ok
+        ss.persist_sid_source = "cookie" if cookie_ok else "url"
         _check_saved_session()
-        _persist_cookie_js(cookie)               # perpanjang masa berlaku cookie (14 hari sejak kunjungan terakhir)
+        _persist_cookie_js(ss.persist_sid)       # (ulang) pasang cookie & perpanjang masa berlakunya (14 hari)
     else:
         ss.persist_sid = pysecrets.token_urlsafe(24)
         ss.persist_cookie_seen = False
+        ss.persist_sid_source = "baru"
         ss.persist_offer = None
         _persist_cookie_js(ss.persist_sid)
+    _persist_sync_url(ss.persist_sid)
 
 
 def _persist_restore():
@@ -4113,7 +4133,8 @@ def render_persist_status():
     with st.expander("🔧 Diagnosa simpan otomatis", expanded=False):
         sid = ss.get("persist_sid") or ""
         st.caption("Cookie ID sesi: " + ("✅ terbaca dari browser saat halaman dibuka" if ss.get("persist_cookie_seen")
-                                         else "⚠️ belum ada saat halaman dibuka (baru dipasang; refresh sekali lagi setelah ada data tersimpan)"))
+                                         else "⚠️ belum terbaca saat halaman dibuka (cadangan lewat URL aktif)"))
+        st.caption({"cookie": "Sumber ID: cookie", "url": "Sumber ID: URL (?rps=)", "baru": "Sumber ID: baru dibuat"}.get(ss.get("persist_sid_source"), "Sumber ID: -"))
         st.caption(f"ID sesi: `{sid[:6]}…`" if sid else "ID sesi: belum ada")
         st.button("Tes koneksi Supabase", key="_persist_test", on_click=_persist_run_test, width="stretch")
         d = ss.get("persist_diag")
@@ -4145,6 +4166,10 @@ def _logout():
     keep = {k: ss[k] for k in ("view_mode", "app_mode") if k in ss}
     ss.clear()
     ss.update(keep)
+    try:
+        st.query_params.pop(PERSIST_PARAM, None)   # ID sesi di URL ikut dibersihkan
+    except Exception:
+        pass
     ss["no_autologin"] = True   # cookie lama masih terbaca di sesi ini
     ss["persist_ignore_cookie"] = True   # begitu juga cookie ID sesi
     ss["clear_cookie"] = True

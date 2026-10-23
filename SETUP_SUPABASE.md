@@ -45,5 +45,8 @@ dan aplikasi berjalan seperti biasa.
 - **Jika Supabase tidak bisa dihubungi**, aplikasi tetap berjalan. Sidebar menampilkan peringatan dan penyimpanan dicoba lagi
   setelah 60 detik.
 - **Proyek gratis dijeda** bila lama tidak aktif; aktifkan lagi dari dashboard Supabase. Data tidak dihapus saat dijeda.
+- **ID sesi juga ada di URL** (`?rps=...`) sebagai cadangan bila cookie diblokir. Jangan bagikan URL itu ke orang lain
+  (orang yang membukanya dan berhasil login bisa memulihkan sesi Anda). Membuka alamat aplikasi tanpa `?rps=` dan tanpa
+  cookie dianggap sesi baru.
 - **Dua tab di browser yang sama** memakai ID yang sama, jadi tab yang terakhir menyimpan akan menimpa yang lain.
 - **Privasi**: isi sesi berupa data merchant Anda. Simpan kunci rahasia hanya di Secrets, jangan di kode atau repositori.
