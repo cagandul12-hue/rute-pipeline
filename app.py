@@ -3505,19 +3505,42 @@ TABLE_KW = {"height": 260} if IS_MOBILE else {}
 # ================================================================
 # LOGIN — halaman masuk sebelum menu app bisa dipakai
 # ================================================================
-# Default admin / 123. Ganti lewat Secrets / env: APP_USERNAME & APP_PASSWORD.
-APP_DEFAULT_USERNAME = "admin"
-APP_DEFAULT_PASSWORD = "123"
+# Kredensial TIDAK ada di kode. Atur lewat Secrets / env: APP_USERNAME dan APP_PASSWORD_HASH (disarankan; buat dengan
+# buat_hash_password.py) atau APP_PASSWORD (teks biasa). Bila belum diatur, semua login ditolak (aman secara bawaan).
 LOGIN_MAX_FAILS = 5        # gagal berturut-turut sebelum dikunci
 LOGIN_LOCK_SECONDS = 60    # lama kunci
 LOGIN_FAIL_WINDOW = 300    # kegagalan lama (detik) dianggap kedaluwarsa
 
 
+HASH_PREFIX = "pbkdf2_sha256"
+
+
+def hash_password(password, iterations=240_000, salt=None):
+    """Format: pbkdf2_sha256$iterasi$salt(hex)$hash(hex). Sama dengan yang dibuat buat_hash_password.py."""
+    salt = salt if salt is not None else os.urandom(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return f"{HASH_PREFIX}${iterations}${salt.hex()}${dk.hex()}"
+
+
+def verify_password(password, stored):
+    """Cocokkan password dengan hash tersimpan (atau teks biasa bila stored bukan hash)."""
+    if stored.startswith(HASH_PREFIX + "$"):
+        try:
+            _, it, salt_hex, hash_hex = stored.split("$")
+            dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), int(it))
+            return hmac.compare_digest(dk.hex(), hash_hex.lower())
+        except Exception:
+            return False
+    return _same(password, stored)
+
+
 def _auth_credentials():
-    return (
-        str(_setting("APP_USERNAME", APP_DEFAULT_USERNAME)),
-        str(_setting("APP_PASSWORD", APP_DEFAULT_PASSWORD)),
-    )
+    """(username, password_atau_hash) dari Secrets/env; None bila belum diatur."""
+    user = _setting("APP_USERNAME")
+    secret = _setting("APP_PASSWORD_HASH") or _setting("APP_PASSWORD")
+    if not user or not secret:
+        return None
+    return str(user).strip(), str(secret).strip()
 
 
 AUTH_COOKIE = "rp_auth"
@@ -3559,7 +3582,7 @@ def check_credentials(user, password, expected_user, expected_pass):
     """Username: tanpa spasi tepi & tak peka huruf besar (keyboard HP sering kapital).
     Password: persis (peka huruf besar, spasi dihitung)."""
     user_ok = _same((user or "").strip().casefold(), expected_user.strip().casefold())
-    pass_ok = _same(password or "", expected_pass)
+    pass_ok = verify_password(password or "", expected_pass)
     return user_ok and pass_ok
 
 
@@ -3664,6 +3687,14 @@ def render_login_page():
     st.markdown(LOGIN_CSS, unsafe_allow_html=True)
     st.markdown(LOGIN_BRAND_HTML, unsafe_allow_html=True)
     nonce = ss.get("login_nonce", 0)
+    if _auth_credentials() is None:
+        with st.container(key="login_card"):
+            st.error("Login belum diatur, jadi aplikasi terkunci.")
+            st.markdown(
+                "Pemilik aplikasi: isi **Secrets** (Streamlit Cloud: *App → Settings → Secrets*) dengan "
+                "`APP_USERNAME` dan `APP_PASSWORD_HASH`, lalu muat ulang halaman. Panduan ada di `SETUP_LOGIN.md`."
+            )
+        return
     with st.container(key="login_card"):
         with st.form("login_form", clear_on_submit=False):
             user = st.text_input(
@@ -3709,7 +3740,10 @@ def _cookie_login():
         return
     if not isinstance(tok, str):
         return
-    user = verify_auth_token(tok, _auth_credentials(), time.time())
+    creds = _auth_credentials()
+    if creds is None:
+        return
+    user = verify_auth_token(tok, creds, time.time())
     if user:
         ss["auth_ok"] = True
         ss["auth_user"] = user
