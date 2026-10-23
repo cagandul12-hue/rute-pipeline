@@ -469,6 +469,51 @@ st.markdown(
     @media (prefers-reduced-motion: reduce) {
         .hero-route, .dev-pulse, .dev-route .n, .stat, .cmp-track i {animation: none !important;}
     }
+
+    /* ---------- Keterbacaan di tema terang & gelap ----------
+       Dirancang netral terhadap tema (tanpa mendeteksi tema): tidak ada teks bergradien, garis & permukaan lebih tegas,
+       latar halaman dilembutkan oleh lapisan translusen (terasa di tema terang, nyaris tak terasa di tema gelap).
+       Hapus blok ini (sampai akhir CSS) untuk kembali ke tampilan sebelumnya. */
+    .stApp {background-image: linear-gradient(rgba(71,85,105,0.09), rgba(71,85,105,0.09));}
+    [data-testid="stAppViewContainer"], [data-testid="stMain"], [data-testid="stMainBlockContainer"], section.main, .main {background: transparent !important;}
+    [data-testid="stHeader"] {background: transparent !important; backdrop-filter: blur(8px);}
+
+    /* teks bergradien -> teks warna tema (kontras penuh) + garis gradien di bawahnya */
+    .hero-header h1 .grad, .stat-val, .dev-name {
+        -webkit-background-clip: border-box; background-clip: border-box;
+        -webkit-text-fill-color: currentColor; color: inherit !important;
+        background-image: linear-gradient(90deg, #2563EB, #0D9488); background-repeat: no-repeat;
+        background-position: left bottom; background-size: 100% 3px; padding-bottom: 3px;
+    }
+    .dev-name {background-size: 100% 2px; padding-bottom: 2px;}
+
+    /* garis & permukaan lebih tegas + sedikit bayangan (terlihat di tema terang, tak mengganggu di tema gelap) */
+    .hero-header, .stat-strip, .cmp {
+        border: 1px solid rgba(71,85,105,0.45);
+        box-shadow: 0 1px 2px rgba(15,23,42,0.08), 0 8px 22px -10px rgba(15,23,42,0.18);
+    }
+    .metric-card, .empty-state {border-color: rgba(71,85,105,0.45);}
+    .stat + .stat, .cmp-save {border-color: rgba(71,85,105,0.30);}
+    .section-header {border-bottom-color: rgba(71,85,105,0.32);}
+    .app-footer {border-top-color: rgba(71,85,105,0.32);}
+    .rp-loader {border-color: rgba(71,85,105,0.40);}
+    .cmp-track {background: rgba(71,85,105,0.24);}
+    .cmp-ring::before {background: conic-gradient(#0D9488 calc(var(--p) * 1%), rgba(71,85,105,0.28) 0);}
+    section[data-testid="stSidebar"] {border-right-color: rgba(37,99,235,0.42);}
+    .dev-badge {background: rgba(71,85,105,0.12);}
+    div[data-testid="stExpander"] {border: 1px solid rgba(71,85,105,0.45) !important;}
+    div[data-baseweb="input"], div[data-baseweb="select"] > div, div[data-baseweb="textarea"] {border: 1px solid rgba(71,85,105,0.68) !important;}
+    div[data-testid="stDataFrame"] {border: 1px solid rgba(71,85,105,0.35); border-radius: 10px; overflow: hidden;}
+    .stButton > button:not([kind="primary"]):not([data-testid="stBaseButton-primary"]),
+    .stDownloadButton > button:not([kind="primary"]):not([data-testid="stBaseButton-primary"]),
+    .stLinkButton > a:not([data-testid="stBaseLinkButton-primary"]) {
+        border: 1px solid rgba(71,85,105,0.68) !important;
+    }
+
+    /* teks sekunder lebih pekat */
+    .hero-header p, .hero-eyebrow, .stepper .step, .stat-label, .stat-unit, .stat-sub, .cmp-lbl,
+    .cmp-save-text .small, .cmp-legend, .app-footer .f-dev, .metric-card .metric-label,
+    .sidebar-brand .subtitle, .section-header .subtitle, .empty-state, .dev-label, .rp-sub {opacity: 0.94;}
     </style>
     """,
     unsafe_allow_html=True,
