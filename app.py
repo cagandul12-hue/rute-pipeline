@@ -3543,31 +3543,92 @@ def _auth_credentials():
     return str(user).strip(), str(secret).strip()
 
 
-AUTH_COOKIE = "rp_auth"
-AUTH_COOKIE_MAX_AGE = 12 * 3600  # batas atas; cookie sesi tetap hilang saat browser ditutup
+AUTH_COOKIE = "rp_auth"          # hanya untuk MENGHAPUS cookie login versi lama
+AUTH_PARAM = "rpa"               # token login di URL: ikut terbawa saat refresh, hilang saat tab ditutup
+AUTH_IDLE_SECONDS = 30 * 60      # keluar otomatis bila tidak dipakai selama ini
 
 
-def _auth_sign(user, exp, expected):
-    key = hashlib.sha256(("rp-auth|" + expected[0] + "|" + expected[1]).encode("utf-8")).digest()
-    return hmac.new(key, f"{user}|{exp}".encode("utf-8"), hashlib.sha256).hexdigest()
+@st.cache_resource
+def _auth_store():
+    """Sesi login di memori server (bersama antar-rerun). Kunci = hash token; nilai = (user, terakhir dipakai)."""
+    return {"lock": threading.Lock(), "tokens": {}}
 
 
-def make_auth_token(user, expected, now):
-    exp = int(now) + AUTH_COOKIE_MAX_AGE
-    return f"{user}|{exp}|{_auth_sign(user, exp, expected)}"
+def _tok_key(token):
+    return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
 
 
-def verify_auth_token(token, expected, now):
-    """Return username kalau token sah & belum kedaluwarsa, selain itu None."""
-    try:
-        user, exp, sig = str(token).rsplit("|", 2)
-        if int(exp) < now or not user:
+def auth_session_create(user, now, store=None):
+    store = store or _auth_store()
+    token = pysecrets.token_urlsafe(32)
+    with store["lock"]:
+        for k in [k for k, (_, seen) in store["tokens"].items() if now - seen > AUTH_IDLE_SECONDS]:
+            del store["tokens"][k]               # bersihkan yang sudah kedaluwarsa
+        store["tokens"][_tok_key(token)] = (user, now)
+    return token
+
+
+def auth_session_check(token, now, store=None, idle=AUTH_IDLE_SECONDS):
+    """Return username bila token sah & tidak menganggur > idle detik (sekaligus menyegarkan waktu pakai); selain itu None."""
+    if not isinstance(token, str) or not token:
+        return None
+    store = store or _auth_store()
+    k = _tok_key(token)
+    with store["lock"]:
+        rec = store["tokens"].get(k)
+        if not rec:
             return None
-        if hmac.compare_digest(sig, _auth_sign(user, int(exp), expected)):
-            return user
+        user, seen = rec
+        if now - seen > idle:
+            del store["tokens"][k]
+            return None
+        store["tokens"][k] = (user, now)
+        return user
+
+
+def auth_session_end(token, store=None):
+    store = store or _auth_store()
+    with store["lock"]:
+        store["tokens"].pop(_tok_key(token), None)
+
+
+def _auth_set_url(token):
+    try:
+        if token is None:
+            st.query_params.pop(AUTH_PARAM, None)
+        elif st.query_params.get(AUTH_PARAM) != token:
+            st.query_params[AUTH_PARAM] = token
     except Exception:
         pass
-    return None
+
+
+def auth_refresh():
+    """Dipanggil di awal tiap run: pulihkan login dari token di URL (refresh) dan akhiri login yang menganggur > 30 menit."""
+    ss = st.session_state
+    now = time.time()
+    if ss.get("auth_ok"):
+        tok = ss.get("auth_token")
+        user = auth_session_check(tok, now) if tok else None
+        if user:
+            _auth_set_url(tok)
+            return
+        ss["auth_ok"] = False                    # kedaluwarsa (atau server dimulai ulang): minta login lagi
+        ss.pop("auth_token", None)
+        ss["login_flash"] = "Sesi berakhir karena tidak digunakan lebih dari 30 menit. Silakan masuk lagi."
+        ss["auth_expired"] = True                # data sesi tetap di memori & Supabase; hanya layar login yang tampil
+        _auth_set_url(None)
+        return
+    if ss.get("no_autologin"):
+        return
+    try:
+        tok = st.query_params.get(AUTH_PARAM)
+    except Exception:
+        return
+    user = auth_session_check(tok, now)
+    if user:
+        ss["auth_ok"], ss["auth_user"], ss["auth_token"] = True, user, tok
+    elif tok:
+        _auth_set_url(None)                      # token basi di URL: buang
 
 
 def _same(a, b):
@@ -3712,7 +3773,8 @@ def render_login_page():
             if ok:
                 ss["auth_ok"] = True
                 ss["auth_user"] = expected[0]
-                ss["set_cookie"] = make_auth_token(expected[0], expected, time.time())
+                ss["auth_token"] = auth_session_create(expected[0], time.time())
+                _auth_set_url(ss["auth_token"])
                 ss.pop("no_autologin", None)
                 ss.pop("login_flash", None)
                 st.rerun()
@@ -3722,54 +3784,31 @@ def render_login_page():
                 st.rerun()
         flash = ss.pop("login_flash", None)
         if flash:
-            if flash.startswith("Terlalu banyak"):
+            if flash.startswith("Sesi berakhir"):
+                st.info(flash)
+            elif flash.startswith("Terlalu banyak"):
                 st.warning(flash)
             else:
                 st.error(flash)
-        st.caption("🔒 Login tetap aktif saat halaman di-refresh, dan berakhir kalau browser ditutup.")
-
-
-def _cookie_login():
-    """Pulihkan login dari cookie sesi (mis. setelah refresh)."""
-    ss = st.session_state
-    if ss.get("no_autologin"):
-        return
-    try:
-        tok = st.context.cookies.get(AUTH_COOKIE)
-    except Exception:
-        return
-    if not isinstance(tok, str):
-        return
-    creds = _auth_credentials()
-    if creds is None:
-        return
-    user = verify_auth_token(tok, creds, time.time())
-    if user:
-        ss["auth_ok"] = True
-        ss["auth_user"] = user
+        st.caption("🔒 Login tetap aktif saat halaman di-refresh. Keluar otomatis bila tidak digunakan lebih dari 30 menit atau tab ditutup.")
 
 
 def _cookie_js(token):
-    """JS kecil (iframe) yang memasang / menghapus cookie sesi di halaman induk."""
-    if token:
-        val = urllib.parse.quote(token, safe="")
-        body = (f"d.cookie='{AUTH_COOKIE}='+'{val}'+'; path=/; SameSite=Lax; max-age={AUTH_COOKIE_MAX_AGE}'"
-                "+(location.protocol==='https:'?'; Secure':'');")
-    else:
-        body = f"d.cookie='{AUTH_COOKIE}=; path=/; max-age=0; SameSite=Lax';"
+    """Hapus cookie login versi lama (rp_auth) bila masih ada di browser."""
+    body = f"d.cookie='{AUTH_COOKIE}=; path=/; max-age=0; SameSite=Lax';"
     script = f"<script>try{{var d=document;{body}}}catch(e){{}}</script>"
     try:
         import inspect
         if "unsafe_allow_javascript" in inspect.signature(st.html).parameters:
-            st.html(script, unsafe_allow_javascript=True)   # Streamlit baru: jalan di halaman utama, tidak deprecated
+            st.html(script, unsafe_allow_javascript=True)
             return
     except Exception:
         pass
     try:
-        import streamlit.components.v1 as components      # Streamlit lama: lewat iframe
+        import streamlit.components.v1 as components
         components.html(f"<script>try{{var d=window.parent.document;{body}}}catch(e){{}}</script>", height=0)
     except Exception:
-        pass   # tanpa cookie, login tetap jalan (hanya tidak bertahan saat refresh)
+        pass
 
 # ================================================================
 # PENYIMPANAN SESI OTOMATIS (Supabase lewat REST/PostgREST)
@@ -4176,35 +4215,37 @@ def render_persist_status():
             (st.success if d[0] == "ok" else st.error)(d[1])
 
 
-if not st.session_state.get("auth_ok"):
-    _cookie_login()
+auth_refresh()
 
 if not st.session_state.get("auth_ok"):
     if st.session_state.pop("clear_cookie", False):
         _cookie_js(None)
         _persist_cookie_js(None)
         _leave_guard_js(False)   # logout: lepas konfirmasi refresh supaya tidak muncul di halaman login
+    elif st.session_state.pop("auth_expired", False):
+        _leave_guard_js(False)   # login kedaluwarsa: konfirmasi refresh juga dilepas di halaman login
     render_login_page()
     render_footer()
     st.stop()
 
 
-if st.session_state.get("auth_ok") and st.session_state.get("set_cookie"):
-    _cookie_js(st.session_state.pop("set_cookie"))
 
 
 def _logout():
     ss = st.session_state
+    if ss.get("auth_token"):
+        auth_session_end(ss["auth_token"])     # token login di server dicabut
     if persist_enabled() and ss.get("persist_sid"):
         persist_delete(ss["persist_sid"])      # keluar = akhiri sesi tersimpan juga
     keep = {k: ss[k] for k in ("view_mode", "app_mode") if k in ss}
     ss.clear()
     ss.update(keep)
     try:
-        st.query_params.pop(PERSIST_PARAM, None)   # ID sesi di URL ikut dibersihkan
+        st.query_params.pop(PERSIST_PARAM, None)   # ID sesi & token login di URL ikut dibersihkan
+        st.query_params.pop(AUTH_PARAM, None)
     except Exception:
         pass
-    ss["no_autologin"] = True   # cookie lama masih terbaca di sesi ini
+    ss["no_autologin"] = True   # token lama bisa masih ada di URL sesi ini
     ss["persist_ignore_cookie"] = True   # begitu juga cookie ID sesi
     ss["clear_cookie"] = True
 
