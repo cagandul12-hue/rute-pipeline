@@ -3803,6 +3803,28 @@ def _sb(method, params=None, body=None, prefer=None, timeout=(3, 8)):
     return requests.request(method, f"{url}/rest/v1/{PERSIST_TABLE}", params=params, json=body, headers=headers, timeout=timeout)
 
 
+def _sb_error(r):
+    """Ringkas galat Supabase/PostgREST: 'HTTP 403 - permission denied for table rp_sessions (42501)' + petunjuk bila dikenal."""
+    msg = code = ""
+    try:
+        j = r.json()
+        if isinstance(j, dict):
+            msg, code = str(j.get("message") or j.get("error") or ""), str(j.get("code") or "")
+    except Exception:
+        pass
+    out = f"HTTP {r.status_code}"
+    if msg:
+        out += f" - {msg[:160]}" + (f" ({code})" if code else "")
+    hint = ""
+    if r.status_code == 403 or code == "42501":
+        hint = " -> jalankan ulang supabase_setup.sql (bagian GRANT untuk service_role)"
+    elif r.status_code == 401:
+        hint = " -> secret key salah/kedaluwarsa; salin ulang dari Project Settings -> API Keys"
+    elif r.status_code == 404 or code in ("PGRST205", "42P01"):
+        hint = " -> tabel rp_sessions belum dibuat atau URL proyek salah; jalankan supabase_setup.sql"
+    return out + hint
+
+
 def persist_save(sid, raw, meta):
     """Simpan (upsert) isi sesi. Return (ok, pesan). Pesan 'toobig' = melebihi batas ukuran."""
     if not _SID_RE.match(sid or ""):
@@ -3819,20 +3841,27 @@ def persist_save(sid, raw, meta):
     except Exception as e:
         return False, f"tidak bisa terhubung ({type(e).__name__})"
     if r.status_code not in (200, 201, 204):
-        return False, f"HTTP {r.status_code}"
+        return False, _sb_error(r)
     return True, ""
 
 
 def persist_meta(sid):
-    """Info ringkas sesi tersimpan (updated_at, size_bytes, meta) tanpa mengunduh isinya; None bila tak ada/gagal."""
+    """Info ringkas sesi tersimpan tanpa mengunduh isinya. Return ('ok', baris) | ('none', None) | ('error', pesan)."""
     if not _SID_RE.match(sid or ""):
-        return None
+        return "none", None
     try:
         r = _sb("GET", params={"id": f"eq.{sid}", "select": "updated_at,size_bytes,meta"})
-        rows = r.json() if r.status_code == 200 else []
+    except Exception as e:
+        return "error", f"tidak bisa terhubung ({type(e).__name__})"
+    if r.status_code != 200:
+        return "error", _sb_error(r)
+    try:
+        rows = r.json()
     except Exception:
-        return None
-    return rows[0] if rows and isinstance(rows[0], dict) else None
+        return "error", "balasan Supabase tidak terbaca"
+    if rows and isinstance(rows[0], dict):
+        return "ok", rows[0]
+    return "none", None
 
 
 def persist_load(sid):
@@ -3922,10 +3951,27 @@ def _ago(iso):
     return f"{int(sec // 86400)} hari lalu"
 
 
+def _check_saved_session():
+    """Cek apakah sesi tersimpan untuk ID ini ada; hasilnya masuk persist_offer (ada) atau persist_check_error (gagal dicek)."""
+    ss = st.session_state
+    ss.persist_offer, ss.persist_check_error = None, None
+    if _state_has_data(ss):
+        return
+    state, val = persist_meta(ss.persist_sid)
+    if state == "ok":
+        ss.persist_offer = val
+    elif state == "error":
+        ss.persist_check_error = val
+
+
 def init_persistence():
     """Tentukan ID sesi (dari cookie bila ada) dan, kalau sesi masih kosong, cek apakah ada sesi tersimpan untuk ditawarkan."""
     ss = st.session_state
-    if not persist_enabled() or "persist_sid" in ss:
+    if not persist_enabled():
+        return
+    if "persist_sid" in ss:
+        if not ss.get("persist_cookie_seen"):
+            _persist_cookie_js(ss.persist_sid)   # browser belum terbukti menyimpan cookie: pasang lagi (aman diulang)
         return
     cookie = None
     if not ss.get("persist_ignore_cookie"):
@@ -3935,9 +3981,12 @@ def init_persistence():
             cookie = None
     if isinstance(cookie, str) and _SID_RE.match(cookie):
         ss.persist_sid = cookie
-        ss.persist_offer = persist_meta(cookie) if not _state_has_data(ss) else None
+        ss.persist_cookie_seen = True
+        _check_saved_session()
+        _persist_cookie_js(cookie)               # perpanjang masa berlaku cookie (14 hari sejak kunjungan terakhir)
     else:
         ss.persist_sid = pysecrets.token_urlsafe(24)
+        ss.persist_cookie_seen = False
         ss.persist_offer = None
         _persist_cookie_js(ss.persist_sid)
 
@@ -3964,11 +4013,28 @@ def _persist_discard():
     ss.persist_offer = None
 
 
+def _persist_recheck():
+    _check_saved_session()
+
+
+def _persist_skip_check():
+    st.session_state.persist_check_error = None
+
+
 def render_restore_offer():
     ss = st.session_state
     msg = ss.pop("persist_msg", None)
     if msg:
         (st.success if msg[0] == "ok" else st.error)(msg[1])
+    err = ss.get("persist_check_error")
+    if err and not _state_has_data(ss):
+        with st.container(border=True):
+            st.warning(f"Tidak bisa memeriksa sesi tersimpan di Supabase: {err}")
+            e1, e2 = st.columns(2)
+            e1.button("🔄 Coba lagi", key="_persist_recheck", on_click=_persist_recheck, width="stretch")
+            e2.button("Lewati, mulai baru", key="_persist_skip", on_click=_persist_skip_check, width="stretch",
+                      help="Simpan otomatis lalu jalan seperti biasa; sesi lama (bila ada) akan tertimpa.")
+        return
     offer = ss.get("persist_offer")
     if not offer:
         return
@@ -3996,7 +4062,7 @@ def autosave_session():
     ss = st.session_state
     if not persist_enabled() or "persist_sid" not in ss:
         return
-    if ss.get("persist_offer") or not _state_has_data(ss):
+    if ss.get("persist_offer") or ss.get("persist_check_error") or not _state_has_data(ss):
         return                         # jangan menimpa sesi tersimpan sebelum pengguna memutuskan / dengan sesi kosong
     if time.time() < _persist_shared()["fail_until"]:
         return
@@ -4023,6 +4089,16 @@ def autosave_session():
         ss.persist_status = ("error", err)
 
 
+def _persist_run_test():
+    ss = st.session_state
+    try:
+        r = _sb("GET", params={"select": "id", "limit": "1"})
+        ss.persist_diag = ("ok", "Koneksi & izin tabel OK (HTTP %s)." % r.status_code) if r.status_code == 200 \
+            else ("error", _sb_error(r))
+    except Exception as e:
+        ss.persist_diag = ("error", f"tidak bisa terhubung ({type(e).__name__}: {str(e)[:120]})")
+
+
 def render_persist_status():
     ss = st.session_state
     if not persist_enabled():
@@ -4034,7 +4110,15 @@ def render_persist_status():
         st.caption(f"ℹ️ Sesi terlalu besar (> {max(1, round(_persist_max_bytes() / (1024 * 1024)))} MB) untuk disimpan otomatis.")
     elif st_ == "error":
         st.caption(f"⚠️ Simpan otomatis tertunda: {val}. Akan dicoba lagi.")
-
+    with st.expander("🔧 Diagnosa simpan otomatis", expanded=False):
+        sid = ss.get("persist_sid") or ""
+        st.caption("Cookie ID sesi: " + ("✅ terbaca dari browser saat halaman dibuka" if ss.get("persist_cookie_seen")
+                                         else "⚠️ belum ada saat halaman dibuka (baru dipasang; refresh sekali lagi setelah ada data tersimpan)"))
+        st.caption(f"ID sesi: `{sid[:6]}…`" if sid else "ID sesi: belum ada")
+        st.button("Tes koneksi Supabase", key="_persist_test", on_click=_persist_run_test, width="stretch")
+        d = ss.get("persist_diag")
+        if d:
+            (st.success if d[0] == "ok" else st.error)(d[1])
 
 
 if not st.session_state.get("auth_ok"):

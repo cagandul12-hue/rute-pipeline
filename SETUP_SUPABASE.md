@@ -17,6 +17,18 @@ dan aplikasi berjalan seperti biasa.
 5. **Reboot** aplikasi, lalu uji: unggah data -> sidebar menampilkan "☁️ Tersimpan otomatis" -> refresh halaman ->
    muncul tawaran "Ada sesi tersimpan" -> klik **Pulihkan sesi**. Di *Table Editor* Supabase akan ada satu baris.
 
+## Jika sesi tidak muncul setelah refresh
+
+1. Buka sidebar -> **🔧 Diagnosa simpan otomatis** -> **Tes koneksi Supabase**. Pesannya menyebut penyebab dan solusinya.
+2. **"HTTP 403 ... permission denied (42501)"**: Supabase (sejak 2026) tidak lagi memberi akses otomatis ke tabel baru.
+   Jalankan di *SQL Editor*:
+   `grant select, insert, update, delete on public.rp_sessions to service_role;`
+   (baris ini sudah ada di `supabase_setup.sql` versi terbaru).
+3. **"HTTP 401"**: secret key salah. Salin ulang dari *Project Settings -> API Keys*, tanpa spasi tambahan.
+4. **"HTTP 404" / tabel tidak ditemukan**: `supabase_setup.sql` belum dijalankan, atau *Project URL* salah.
+5. Sidebar menampilkan "☁️ Tersimpan otomatis" dan *Table Editor -> rp_sessions* berisi satu baris, tetapi tawaran tidak muncul:
+   cek baris "Cookie ID sesi" di panel diagnosa. Bila belum terbaca, cookie diblokir browser (mode privat / blokir cookie).
+
 ## Cara kerja singkat
 
 - Browser diberi cookie acak `rp_sid` (14 hari). ID itu menjadi kunci satu baris di tabel `rp_sessions`.

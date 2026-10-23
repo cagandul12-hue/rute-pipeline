@@ -16,3 +16,8 @@ create index if not exists rp_sessions_updated_at_idx on public.rp_sessions (upd
 -- Hanya kunci rahasia server (secret key / service_role) yang bisa, karena melewati RLS.
 alter table public.rp_sessions enable row level security;
 revoke all on public.rp_sessions from anon, authenticated;
+
+-- IZIN UNTUK APLIKASI: sejak 2026 Supabase tidak lagi memberi akses Data API otomatis ke tabel baru
+-- (termasuk untuk service_role). Tanpa baris ini, simpan gagal dengan "HTTP 403 ... permission denied (42501)".
+-- Aman dijalankan berulang, dan tidak membuka akses untuk kunci publik (anon / authenticated).
+grant select, insert, update, delete on public.rp_sessions to service_role;
