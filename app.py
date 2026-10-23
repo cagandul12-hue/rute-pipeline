@@ -21,6 +21,7 @@ import hmac
 import gzip
 import secrets as pysecrets
 import threading
+import tempfile
 import contextlib
 import urllib.parse
 from urllib.parse import unquote, quote
@@ -3332,6 +3333,8 @@ if "use_extracted_flag" not in st.session_state:
     st.session_state.use_extracted_flag = False
 if "starting_link_saved" not in st.session_state:
     st.session_state.starting_link_saved = ""
+if "start_mode_saved" not in st.session_state:
+    st.session_state.start_mode_saved = "manual"   # "manual" = tentukan sendiri, "gps" = lokasi pengguna
 if "multi_depot_rows" not in st.session_state:
     st.session_state.multi_depot_rows = []  # id unik per baris, misal [1, 2, 3]
 if "multi_depot_next_id" not in st.session_state:
@@ -4316,6 +4319,143 @@ def _sync_starting_link():
     )
 
 
+def _sync_start_mode():
+    ss = st.session_state
+    label = ss.get(_wk("_start_mode_widget"))
+    for k, v in START_MODE_LABELS.items():
+        if v == label:
+            ss.start_mode_saved = k
+
+
+# ---- Titik awal dari lokasi pengguna (GPS browser) -------------------------------------------------------
+# Komponen kecil (iframe) yang memanggil navigator.geolocation dan mengirim hasilnya ke Python. Ditulis ke folder
+# sementara saat dibutuhkan, jadi tidak perlu file tambahan di repositori.
+START_MODE_LABELS = {"manual": "✍️ Tentukan titik awal", "gps": "📍 Lokasi anda"}
+GEO_ERRORS = {
+    "denied": "Izin lokasi ditolak. Klik ikon gembok/lokasi di sebelah alamat web, ubah Lokasi menjadi **Izinkan**, "
+              "lalu klik **Ambil ulang lokasi**. (Di HP: aktifkan juga GPS/Lokasi di pengaturan perangkat.)",
+    "unavailable": "Lokasi tidak tersedia di perangkat ini. Nyalakan GPS/Lokasi lalu klik **Ambil ulang lokasi**, "
+                   "atau pilih **Tentukan titik awal**.",
+    "timeout": "Mengambil lokasi terlalu lama. Pastikan GPS menyala dan sinyal baik, lalu klik **Ambil ulang lokasi**.",
+    "insecure": "Browser hanya mengizinkan lokasi lewat HTTPS. Buka aplikasi lewat alamat https://.",
+}
+GEO_HTML = r"""<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  html,body{margin:0;padding:0;background:transparent}
+  body{font:14px/1.4 "Source Sans Pro",system-ui,-apple-system,"Segoe UI",sans-serif;color:#31333F}
+  #row{display:flex;align-items:center;gap:10px;padding:2px 0 4px}
+  button{cursor:pointer;font:inherit;font-weight:600;color:inherit;background:transparent;
+         border:1px solid rgba(128,128,128,.45);border-radius:8px;padding:6px 12px}
+  button:hover{border-color:#2563EB;color:#2563EB}
+  button[disabled]{opacity:.55;cursor:progress}
+  #s{opacity:.85}
+</style></head>
+<body>
+<div id="row"><button id="b" type="button">📍 Ambil ulang lokasi</button><span id="s">Meminta lokasi…</span></div>
+<script>
+(function(){
+  function post(type, data){ window.parent.postMessage(Object.assign({isStreamlitMessage:true, type:type}, data||{}), "*"); }
+  function setValue(v){ post("streamlit:setComponentValue", {value:v, dataType:"json"}); }
+  function setHeight(){ post("streamlit:setFrameHeight", {height: Math.max(40, document.getElementById("row").offsetHeight + 8)}); }
+  var btn = document.getElementById("b"), st = document.getElementById("s"), started = false, busy = false;
+
+  function finish(text, value){ busy = false; btn.disabled = false; st.textContent = text; setValue(value); setHeight(); }
+
+  function locate(){
+    if (busy) return;
+    busy = true; btn.disabled = true; st.textContent = "Meminta lokasi…"; setHeight();
+    if (window.isSecureContext === false){ return finish("Butuh HTTPS", {error:"insecure", t:Date.now()}); }
+    if (!navigator.geolocation){ return finish("Browser tidak mendukung lokasi", {error:"unavailable", t:Date.now()}); }
+    navigator.geolocation.getCurrentPosition(function(p){
+      var acc = Math.round(p.coords.accuracy || 0);
+      finish("Lokasi didapat (±" + acc + " m)", {lat:p.coords.latitude, lon:p.coords.longitude, acc:acc, t:Date.now()});
+    }, function(e){
+      var code = e && e.code === 1 ? "denied" : (e && e.code === 3 ? "timeout" : "unavailable");
+      finish(code === "denied" ? "Izin lokasi ditolak" : (code === "timeout" ? "Waktu habis" : "Lokasi tidak tersedia"),
+             {error:code, t:Date.now()});
+    }, {enableHighAccuracy:true, timeout:20000, maximumAge:30000});
+  }
+
+  btn.addEventListener("click", locate);
+  window.addEventListener("message", function(ev){
+    var d = ev.data;
+    if (!d || d.type !== "streamlit:render") return;
+    var th = d.args && d.args.theme || d.theme;
+    if (th && th.textColor) document.body.style.color = th.textColor;
+    if (!started){ started = true; locate(); }
+  });
+  post("streamlit:componentReady", {apiVersion:1});
+  setHeight();
+})();
+</script></body></html>
+"""
+
+
+@st.cache_resource
+def _geo_component():
+    try:
+        import streamlit.components.v1 as components
+        d = os.path.join(tempfile.gettempdir(), "rp_geo_component_v1")
+        os.makedirs(d, exist_ok=True)
+        f = os.path.join(d, "index.html")
+        cur = None
+        if os.path.exists(f):
+            with open(f, encoding="utf-8") as fh:
+                cur = fh.read()
+        if cur != GEO_HTML:
+            with open(f, "w", encoding="utf-8") as fh:
+                fh.write(GEO_HTML)
+        return components.declare_component("rp_geolocation", path=d)
+    except Exception:
+        return None
+
+
+def parse_geo_value(val):
+    """Nilai dari komponen -> ('ok', (lat, lon, akurasi_m)) | ('error', kode) | (None, None)."""
+    if not isinstance(val, dict):
+        return None, None
+    lat, lon = val.get("lat"), val.get("lon")
+    if isinstance(lat, (int, float)) and isinstance(lon, (int, float)) and not isinstance(lat, bool) \
+            and -90 <= lat <= 90 and -180 <= lon <= 180:
+        acc = val.get("acc")
+        return "ok", (float(lat), float(lon), int(acc) if isinstance(acc, (int, float)) else None)
+    if isinstance(val.get("error"), str):
+        return "error", val["error"][:20]
+    return None, None
+
+
+def render_geo_start():
+    """Tampilkan komponen lokasi + status + peta kecil. Return teks koordinat 'lat, lon' ('' bila belum ada lokasi)."""
+    ss = st.session_state
+    comp = _geo_component()
+    if comp is None:
+        st.error("Komponen lokasi tidak bisa dimuat di server ini. Pilih **Tentukan titik awal** dan isi manual.")
+        return ""
+    kind, val = parse_geo_value(comp(key=_wk("_geo_widget"), default=None))
+    if kind == "ok":
+        ss.geo_last, ss.geo_error = val, None
+    elif kind == "error":
+        ss.geo_last, ss.geo_error = None, val
+    loc, err = ss.get("geo_last"), ss.get("geo_error")
+    if loc:
+        lat, lon, acc = loc
+        st.success(f"📍 Titik awal = lokasi Anda: {lat:.5f}, {lon:.5f}" + (f" (akurasi ±{acc} m)" if acc is not None else ""))
+        if acc is not None and acc > 1000:
+            st.warning("Akurasi rendah (lokasi perkiraan dari jaringan, biasanya di laptop tanpa GPS). Titik bisa meleset "
+                       "beberapa kilometer; gunakan HP, atau pilih **Tentukan titik awal**.")
+        try:
+            st.map(pd.DataFrame({"lat": [lat], "lon": [lon]}), zoom=15, height=170 if IS_MOBILE else 220, size=25, color="#2563EB")
+        except Exception:
+            pass
+        return f"{lat:.6f}, {lon:.6f}"
+    if err:
+        st.error(GEO_ERRORS.get(err, "Lokasi tidak bisa diambil."))
+    else:
+        st.info("Meminta lokasi… klik **Izinkan** saat browser menanyakan akses lokasi.")
+    return ""
+
+
 def _map_set_status(row_key):
     """Callback tombol di pratinjau peta: simpan status baru sebagai edit data (sama seperti edit tabel)."""
     ss = st.session_state
@@ -4439,6 +4579,7 @@ def _session_payload(ss, with_files=True):
         "settings": {
             "use_extracted_flag": bool(ss.use_extracted_flag),
             "starting_link_saved": ss.starting_link_saved,
+            "start_mode_saved": ss.start_mode_saved,
             "round_trip_flag": bool(ss.round_trip_flag),
             "dedupe_flag": bool(ss.dedupe_flag),
             "split_mode_flag": ss.split_mode_flag,
@@ -4509,6 +4650,8 @@ def load_session_bytes(raw):
     for key in ("use_extracted_flag", "round_trip_flag", "dedupe_flag"):
         if isinstance(cfg.get(key), bool):
             updates[key] = cfg[key]
+    if cfg.get("start_mode_saved") in ("manual", "gps"):
+        updates["start_mode_saved"] = cfg["start_mode_saved"]
     if isinstance(cfg.get("starting_link_saved"), str):
         updates["starting_link_saved"] = cfg["starting_link_saved"][:2000]
     if cfg.get("split_mode_flag") in (SPLIT_AUTO, SPLIT_FULL):
@@ -5623,19 +5766,36 @@ if st.session_state.page == "Routing":
 
         with st.container(border=True):
             st.markdown("**📍 Titik awal**")
-            starting_link = st.text_input(
-                "📍 Titik Awal (opsional)",
-                value=st.session_state.starting_link_saved,
-                key=_wk("_starting_link_widget"),
-                on_change=_sync_starting_link,
+            _sm_keys = list(START_MODE_LABELS)
+            _sm_label = st.radio(
+                "Cara menentukan titik awal",
+                options=list(START_MODE_LABELS.values()),
+                index=_sm_keys.index(st.session_state.start_mode_saved) if st.session_state.start_mode_saved in _sm_keys else 0,
+                horizontal=True,
+                key=_wk("_start_mode_widget"),
+                on_change=_sync_start_mode,
                 disabled=dp_on,
-                placeholder="Link Google Maps atau koordinat (-7.5665, 110.8167)",
-                help=(
-                    "Misalnya lokasi gudang atau toko pusat. Kalau diisi, titik ini otomatis jadi awal setiap rute. "
-                    "Cara dapat link: buka lokasinya di Google Maps → Bagikan → Salin link. "
-                    "Atau tempel koordinatnya langsung."
-                ),
+                label_visibility="collapsed",
+                help="**Tentukan titik awal**: isi link Google Maps/koordinat sendiri (kosong = titik mulai dipilih otomatis). "
+                     "**Lokasi anda**: titik awal otomatis memakai posisi perangkat Anda saat ini (butuh izin lokasi di browser).",
             )
+            use_geo_start = (_sm_label == START_MODE_LABELS["gps"]) and not dp_on
+            if use_geo_start:
+                starting_link = render_geo_start()
+            else:
+                starting_link = st.text_input(
+                    "📍 Titik Awal (opsional)",
+                    value=st.session_state.starting_link_saved,
+                    key=_wk("_starting_link_widget"),
+                    on_change=_sync_starting_link,
+                    disabled=dp_on,
+                    placeholder="Link Google Maps atau koordinat (-7.5665, 110.8167)",
+                    help=(
+                        "Misalnya lokasi gudang atau toko pusat. Kalau diisi, titik ini otomatis jadi awal setiap rute. "
+                        "Cara dapat link: buka lokasinya di Google Maps → Bagikan → Salin link. "
+                        "Atau tempel koordinatnya langsung."
+                    ),
+                )
 
             use_multi_depot = False
             depot_rows_raw = []  # [(nama, lokasi), ...] — mentah, belum divalidasi/resolve
@@ -5773,7 +5933,7 @@ if st.session_state.page == "Routing":
             f"**Ringkasan:** {len(df)} merchant → {_plan_txt} · mulai {start_time:%H:%M} · "
             + (f"{int(visit_minutes)} menit/toko" if visit_minutes else "tanpa durasi kunjungan")
             + " · " + ("pulang-pergi" if round_trip else "satu arah")
-            + " · titik awal: " + ("per petugas" if dp_on else ("sesuai isian" if starting_link else "otomatis (paling efisien)"))
+            + " · titik awal: " + ("per petugas" if dp_on else (("lokasi Anda" if use_geo_start else "sesuai isian") if starting_link else "otomatis (paling efisien)"))
             + (" · urut sesuai jam buka/tutup" if hours_opt else ""),
             icon="🧾",
         )
@@ -5793,6 +5953,10 @@ if st.session_state.page == "Routing":
         if run:
             if len(df) < 2:
                 st.warning("⚠️ Minimal butuh 2 titik untuk bisa membuat rute.")
+                st.stop()
+            if use_geo_start and not starting_link and not use_multi_depot:
+                st.error("❌ Lokasi Anda belum didapat. Izinkan akses lokasi di browser (lihat bagian Titik awal), "
+                         "atau pilih **Tentukan titik awal**.")
                 st.stop()
 
             # Daftar titik awal per rute (kalau multi-depot aktif) — resolve DULU.
@@ -5815,7 +5979,7 @@ if st.session_state.page == "Routing":
                     if "http" not in starting_link.lower():
                         coord_lat, coord_lon, _coord_err = parse_coordinate_text(starting_link)
                     if coord_lat is not None:
-                        start_name, start_lat, start_lon = "Titik Awal", coord_lat, coord_lon
+                        start_name, start_lat, start_lon = ("Lokasi Anda" if use_geo_start else "Titik Awal"), coord_lat, coord_lon
                     else:
                         parsed_name, start_lat, start_lon = extract_google_maps_data(starting_link)
                         start_name = parsed_name or "START POINT"
