@@ -18,6 +18,8 @@ import unicodedata
 import html as html_lib
 import hashlib
 import hmac
+import gzip
+import secrets as pysecrets
 import threading
 import contextlib
 import urllib.parse
@@ -3735,6 +3737,305 @@ def _cookie_js(token):
     except Exception:
         pass   # tanpa cookie, login tetap jalan (hanya tidak bertahan saat refresh)
 
+# ================================================================
+# PENYIMPANAN SESI OTOMATIS (Supabase lewat REST/PostgREST)
+# Cookie `rp_sid` (ID acak) menautkan browser ke satu baris di tabel `rp_sessions`. Tiap ada perubahan berarti, isi sesi
+# (file + data Extractor + edit + pengaturan) disimpan terkompresi; saat halaman dibuka lagi dalam keadaan kosong,
+# pengguna ditawari memulihkannya. Tanpa kredensial Supabase di secrets, fitur ini mati dan aplikasi berjalan seperti biasa.
+# ================================================================
+PERSIST_COOKIE = "rp_sid"
+PERSIST_TTL_DAYS = 14
+PERSIST_MAX_BYTES = 8 * 1024 * 1024        # batas ukuran terkompresi per sesi
+PERSIST_TABLE = "rp_sessions"
+_SID_RE = re.compile(r"^[A-Za-z0-9_-]{32,64}$")
+
+
+@st.cache_resource
+def _persist_shared():
+    """Keadaan bersama antar-rerun & antar-pengguna di satu proses server: pemutus sirkuit dan jadwal pembersihan.
+    (Variabel biasa tidak cukup: skrip dijalankan ulang dari nol tiap interaksi.)"""
+    return {"fail_until": 0.0, "last_cleanup": 0.0}
+
+
+def _persist_conf():
+    """(url, key) dari st.secrets['supabase'] (url, service_key) atau env SUPABASE_URL / SUPABASE_SERVICE_KEY; None bila belum diatur."""
+    url = key = None
+    try:
+        sec = st.secrets.get("supabase")
+        if sec:
+            url, key = sec.get("url"), sec.get("service_key")
+    except Exception:
+        pass
+    url = url or os.environ.get("SUPABASE_URL")
+    key = key or os.environ.get("SUPABASE_SERVICE_KEY")
+    if not (isinstance(url, str) and url.startswith("http") and isinstance(key, str) and key):
+        return None
+    return url.rstrip("/"), key
+
+
+def persist_enabled():
+    return _persist_conf() is not None
+
+
+def _persist_max_bytes():
+    """Batas ukuran terkompresi per sesi: secrets supabase.max_mb bila ada, selain itu PERSIST_MAX_BYTES."""
+    try:
+        mb = float(st.secrets.get("supabase", {}).get("max_mb", 0))
+        if mb > 0:
+            return int(mb * 1024 * 1024)
+    except Exception:
+        pass
+    return PERSIST_MAX_BYTES
+
+
+def _sb(method, params=None, body=None, prefer=None, timeout=(3, 8)):
+    conf = _persist_conf()
+    if conf is None:
+        raise RuntimeError("Supabase belum diatur")
+    url, key = conf
+    headers = {"apikey": key, "Content-Type": "application/json"}
+    if not key.startswith("sb_"):
+        # Kunci lama (JWT service_role) juga dikirim sebagai Bearer. Kunci baru sb_secret_... BUKAN JWT dan tidak boleh
+        # ada di header Authorization (ditolak Supabase) — cukup di header apikey.
+        headers["Authorization"] = f"Bearer {key}"
+    if prefer:
+        headers["Prefer"] = prefer
+    return requests.request(method, f"{url}/rest/v1/{PERSIST_TABLE}", params=params, json=body, headers=headers, timeout=timeout)
+
+
+def persist_save(sid, raw, meta):
+    """Simpan (upsert) isi sesi. Return (ok, pesan). Pesan 'toobig' = melebihi batas ukuran."""
+    if not _SID_RE.match(sid or ""):
+        return False, "ID sesi tidak valid"
+    comp = gzip.compress(raw, compresslevel=6)
+    if len(comp) > _persist_max_bytes():
+        return False, "toobig"
+    body = {
+        "id": sid, "data": base64.b64encode(comp).decode("ascii"), "size_bytes": len(comp), "meta": meta,
+        "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    try:
+        r = _sb("POST", params={"on_conflict": "id"}, prefer="resolution=merge-duplicates,return=minimal", body=body)
+    except Exception as e:
+        return False, f"tidak bisa terhubung ({type(e).__name__})"
+    if r.status_code not in (200, 201, 204):
+        return False, f"HTTP {r.status_code}"
+    return True, ""
+
+
+def persist_meta(sid):
+    """Info ringkas sesi tersimpan (updated_at, size_bytes, meta) tanpa mengunduh isinya; None bila tak ada/gagal."""
+    if not _SID_RE.match(sid or ""):
+        return None
+    try:
+        r = _sb("GET", params={"id": f"eq.{sid}", "select": "updated_at,size_bytes,meta"})
+        rows = r.json() if r.status_code == 200 else []
+    except Exception:
+        return None
+    return rows[0] if rows and isinstance(rows[0], dict) else None
+
+
+def persist_load(sid):
+    """Isi sesi (bytes JSON) atau None. Ukuran hasil dekompresi dibatasi MAX_SESSION_BYTES."""
+    if not _SID_RE.match(sid or ""):
+        return None
+    try:
+        r = _sb("GET", params={"id": f"eq.{sid}", "select": "data"}, timeout=(3, 20))
+        rows = r.json() if r.status_code == 200 else []
+        if not rows:
+            return None
+        comp = base64.b64decode(rows[0]["data"])
+        raw = gzip.GzipFile(fileobj=io.BytesIO(comp)).read(MAX_SESSION_BYTES + 1)
+    except Exception:
+        return None
+    return raw if len(raw) <= MAX_SESSION_BYTES else None
+
+
+def persist_delete(sid):
+    if not _SID_RE.match(sid or ""):
+        return
+    try:
+        _sb("DELETE", params={"id": f"eq.{sid}"}, timeout=(3, 5))
+    except Exception:
+        pass
+
+
+def persist_cleanup():
+    """Hapus sesi yang tak disentuh lebih dari PERSIST_TTL_DAYS hari (paling sering sekali per 6 jam per proses)."""
+    shared = _persist_shared()
+    if time.time() - shared["last_cleanup"] < 6 * 3600:
+        return
+    shared["last_cleanup"] = time.time()
+    cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=PERSIST_TTL_DAYS)).isoformat()
+    try:
+        _sb("DELETE", params={"updated_at": f"lt.{cutoff}"}, timeout=(3, 8))
+    except Exception:
+        pass
+
+
+def _persist_cookie_js(sid):
+    """Pasang (sid) atau hapus (None) cookie ID sesi di browser."""
+    if sid:
+        body = (f"d.cookie='{PERSIST_COOKIE}={sid}; path=/; SameSite=Lax; max-age={PERSIST_TTL_DAYS * 86400}'"
+                "+(location.protocol==='https:'?'; Secure':'');")
+    else:
+        body = f"d.cookie='{PERSIST_COOKIE}=; path=/; max-age=0; SameSite=Lax';"
+    try:
+        import inspect
+        if "unsafe_allow_javascript" in inspect.signature(st.html).parameters:
+            st.html(f"<script>try{{var d=document;{body}}}catch(e){{}}</script>", unsafe_allow_javascript=True)
+            return
+    except Exception:
+        pass
+    try:
+        import streamlit.components.v1 as components
+        components.html(f"<script>try{{var d=window.parent.document;{body}}}catch(e){{}}</script>", height=0)
+    except Exception:
+        pass
+
+
+def _state_has_data(ss):
+    return bool(ss.get("uploaded_store")) or bool(ss.get("extracted_data"))
+
+
+def _persist_sig(ss):
+    """Sidik jari isi sesi (file diwakili nama+ukuran+hash agar murah dihitung)."""
+    files = [(n, len(b), hashlib.blake2b(b, digest_size=16).hexdigest()) for n, b in sorted(ss.uploaded_store.items())]
+    rest = _session_payload(ss, with_files=False)
+    return hashlib.sha256(json.dumps([files, rest], sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+def _ago(iso):
+    try:
+        dt = datetime.datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        sec = max(0, (datetime.datetime.now(datetime.timezone.utc) - dt).total_seconds())
+    except Exception:
+        return "beberapa waktu lalu"
+    if sec < 60:
+        return "baru saja"
+    if sec < 3600:
+        return f"{int(sec // 60)} menit lalu"
+    if sec < 86400:
+        return f"{int(sec // 3600)} jam lalu"
+    return f"{int(sec // 86400)} hari lalu"
+
+
+def init_persistence():
+    """Tentukan ID sesi (dari cookie bila ada) dan, kalau sesi masih kosong, cek apakah ada sesi tersimpan untuk ditawarkan."""
+    ss = st.session_state
+    if not persist_enabled() or "persist_sid" in ss:
+        return
+    cookie = None
+    if not ss.get("persist_ignore_cookie"):
+        try:
+            cookie = st.context.cookies.get(PERSIST_COOKIE)
+        except Exception:
+            cookie = None
+    if isinstance(cookie, str) and _SID_RE.match(cookie):
+        ss.persist_sid = cookie
+        ss.persist_offer = persist_meta(cookie) if not _state_has_data(ss) else None
+    else:
+        ss.persist_sid = pysecrets.token_urlsafe(24)
+        ss.persist_offer = None
+        _persist_cookie_js(ss.persist_sid)
+
+
+def _persist_restore():
+    ss = st.session_state
+    raw = persist_load(ss.get("persist_sid"))
+    if raw is None:
+        ss.persist_msg = ("error", "Sesi tersimpan tidak bisa dimuat (mungkin sudah kedaluwarsa atau koneksi bermasalah).")
+        ss.persist_offer = None
+        return
+    ok, msg = load_session_bytes(raw)
+    ss.persist_offer = None
+    ss.persist_msg = ("ok" if ok else "error", ("Sesi dipulihkan. " + msg) if ok else msg)
+    if ok:
+        ss.persist_last_sig = _persist_sig(ss)           # isi sama dengan yang tersimpan: jangan unggah ulang
+        ss.session_saved_sig = _work_sig(ss)
+        ss.persist_status = ("saved", time.time())
+
+
+def _persist_discard():
+    ss = st.session_state
+    persist_delete(ss.get("persist_sid"))
+    ss.persist_offer = None
+
+
+def render_restore_offer():
+    ss = st.session_state
+    msg = ss.pop("persist_msg", None)
+    if msg:
+        (st.success if msg[0] == "ok" else st.error)(msg[1])
+    offer = ss.get("persist_offer")
+    if not offer:
+        return
+    if _state_has_data(ss):          # pengguna sudah mulai bekerja: tawaran tidak relevan lagi
+        ss.persist_offer = None
+        return
+    meta = offer.get("meta") or {}
+    bits = []
+    if meta.get("files"):
+        bits.append(f"{meta['files']} file")
+    if meta.get("extracted"):
+        bits.append(f"{meta['extracted']} data Maps Extractor")
+    if meta.get("edits"):
+        bits.append(f"{meta['edits']} edit tabel")
+    what = ", ".join(bits) if bits else "data dan pengaturan"
+    with st.container(border=True):
+        st.markdown(f"💾 **Ada sesi tersimpan** — {what}; disimpan {_ago(offer.get('updated_at'))}.")
+        c1, c2 = st.columns(2)
+        c1.button("♻️ Pulihkan sesi", key="_persist_restore", type="primary", on_click=_persist_restore, width="stretch")
+        c2.button("Mulai baru", key="_persist_discard", on_click=_persist_discard, width="stretch")
+
+
+def autosave_session():
+    """Simpan otomatis bila isi sesi berubah. Gagal tidak mengganggu aplikasi; setelah gagal, jeda 60 detik sebelum mencoba lagi."""
+    ss = st.session_state
+    if not persist_enabled() or "persist_sid" not in ss:
+        return
+    if ss.get("persist_offer") or not _state_has_data(ss):
+        return                         # jangan menimpa sesi tersimpan sebelum pengguna memutuskan / dengan sesi kosong
+    if time.time() < _persist_shared()["fail_until"]:
+        return
+    try:
+        sig = _persist_sig(ss)
+        if sig == ss.get("persist_last_sig"):
+            return
+        raw = build_session_bytes()
+    except Exception:
+        return
+    n_edits = len(ss.data_edits.get("deleted", [])) + sum(len(c) for c in ss.data_edits.get("changed", {}).values())
+    meta = {"files": len(ss.uploaded_store), "extracted": len(ss.extracted_data), "edits": n_edits}
+    ok, err = persist_save(ss.persist_sid, raw, meta)
+    if ok:
+        ss.persist_last_sig = sig
+        ss.session_saved_sig = _work_sig(ss)     # data & edit kini tersimpan: tidak lagi dihitung "belum tersimpan"
+        ss.persist_status = ("saved", time.time())
+        persist_cleanup()
+    elif err == "toobig":
+        ss.persist_last_sig = sig                # jangan hitung ulang sampai isinya berubah
+        ss.persist_status = ("toobig", time.time())
+    else:
+        _persist_shared()["fail_until"] = time.time() + 60
+        ss.persist_status = ("error", err)
+
+
+def render_persist_status():
+    ss = st.session_state
+    if not persist_enabled():
+        return
+    st_, val = ss.get("persist_status", (None, None))
+    if st_ == "saved":
+        st.caption(f"☁️ Tersimpan otomatis · {_ago(datetime.datetime.fromtimestamp(val, datetime.timezone.utc).isoformat())}")
+    elif st_ == "toobig":
+        st.caption(f"ℹ️ Sesi terlalu besar (> {max(1, round(_persist_max_bytes() / (1024 * 1024)))} MB) untuk disimpan otomatis.")
+    elif st_ == "error":
+        st.caption(f"⚠️ Simpan otomatis tertunda: {val}. Akan dicoba lagi.")
+
+
 
 if not st.session_state.get("auth_ok"):
     _cookie_login()
@@ -3742,6 +4043,7 @@ if not st.session_state.get("auth_ok"):
 if not st.session_state.get("auth_ok"):
     if st.session_state.pop("clear_cookie", False):
         _cookie_js(None)
+        _persist_cookie_js(None)
         _leave_guard_js(False)   # logout: lepas konfirmasi refresh supaya tidak muncul di halaman login
     render_login_page()
     render_footer()
@@ -3754,10 +4056,13 @@ if st.session_state.get("auth_ok") and st.session_state.get("set_cookie"):
 
 def _logout():
     ss = st.session_state
+    if persist_enabled() and ss.get("persist_sid"):
+        persist_delete(ss["persist_sid"])      # keluar = akhiri sesi tersimpan juga
     keep = {k: ss[k] for k in ("view_mode", "app_mode") if k in ss}
     ss.clear()
     ss.update(keep)
     ss["no_autologin"] = True   # cookie lama masih terbaca di sesi ini
+    ss["persist_ignore_cookie"] = True   # begitu juga cookie ID sesi
     ss["clear_cookie"] = True
 
 
@@ -3937,8 +4242,8 @@ def _set_depot_rows(depot_rows):
         ss.multi_depot_rows.append(rid)
 
 
-def build_session_bytes():
-    ss = st.session_state
+def _session_payload(ss, with_files=True):
+    """Isi sesi sebagai dict (tanpa stempel waktu). with_files=False untuk menghitung sidik jari tanpa meng-encode file."""
     extracted = [
         {k: (None if isinstance(v, float) and math.isnan(v) else v) for k, v in row.items()}
         for row in ss.extracted_data
@@ -3946,8 +4251,6 @@ def build_session_bytes():
     payload = {
         "app": "routing-extractor",
         "version": 1,
-        "saved_at": datetime.datetime.now().isoformat(timespec="seconds"),
-        "files": {name: base64.b64encode(data).decode("ascii") for name, data in ss.uploaded_store.items()},
         "extracted_data": extracted,
         "settings": {
             "use_extracted_flag": bool(ss.use_extracted_flag),
@@ -3977,6 +4280,14 @@ def build_session_bytes():
         "presets": ss.presets,
         "geocode_cache": ss.geocode_cache,
     }
+    if with_files:
+        payload["files"] = {name: base64.b64encode(data).decode("ascii") for name, data in ss.uploaded_store.items()}
+    return payload
+
+
+def build_session_bytes():
+    payload = _session_payload(st.session_state)
+    payload["saved_at"] = datetime.datetime.now().isoformat(timespec="seconds")
     return json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
 
 
@@ -4465,9 +4776,13 @@ else:
             render_session_panel("side")
         with st.expander("⚙️ Tampilan layar", expanded=False):
             render_mode_toggle("side")
+        render_persist_status()
         render_user_bar("side")
 
 
+init_persistence()
+autosave_session()      # keadaan akhir interaksi sebelumnya (juga bila run sebelumnya berhenti lebih awal lewat st.stop)
+render_restore_offer()
 _notice_slot = st.empty()
 render_unsaved_notice(_notice_slot, IS_PRO)
 
@@ -6229,5 +6544,6 @@ elif st.session_state.page == "Extract":
         )
 
 
+autosave_session()
 render_unsaved_notice(_notice_slot, IS_PRO)   # hitung ulang: hasil/edit yang baru dibuat di run ini
 render_footer()
