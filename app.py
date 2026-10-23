@@ -21,7 +21,6 @@ import hmac
 import gzip
 import secrets as pysecrets
 import threading
-import tempfile
 import contextlib
 import urllib.parse
 from urllib.parse import unquote, quote
@@ -1526,15 +1525,22 @@ MAPS_MAX_WAYPOINTS_DESKTOP = 9
 MAPS_MAX_WAYPOINTS_MOBILE = 3
 
 
-def generate_google_maps_links(df, max_waypoints):
+def generate_google_maps_links(df, max_waypoints, from_my_location=False):
     """Pecah rute jadi beberapa link Google Maps.
 
     Tiap link berisi origin + maksimal `max_waypoints` titik singgah + destination.
     Link berikutnya dimulai dari titik akhir link sebelumnya, sehingga urutan tetap
     tersambung. Mengembalikan list (indeks_awal, indeks_akhir, url) — indeks 0-based
     pada baris df.
+
+    from_my_location=True: link PERTAMA tidak memuat origin, sehingga Google Maps memakai posisi pengguna saat
+    link dibuka ("Lokasi Anda"). Semua baris df menjadi titik singgah/tujuan (baris 0 = tujuan pertama).
     """
     coords = [f"{row.latitude},{row.longitude}" for _, row in df.iterrows()]
+    off = 0
+    if from_my_location and coords:
+        coords = [None] + coords          # None = posisi pengguna (tanpa parameter origin)
+        off = 1
     if len(coords) < 2:
         return []
     step = max_waypoints + 1
@@ -1543,13 +1549,14 @@ def generate_google_maps_links(df, max_waypoints):
     while start < len(coords) - 1:
         end = min(start + step, len(coords) - 1)
         seg = coords[start:end + 1]
-        url = (
-            f"https://www.google.com/maps/dir/?api=1&origin={seg[0]}&destination={seg[-1]}"
-        )
+        url = "https://www.google.com/maps/dir/?api=1"
+        if seg[0] is not None:
+            url += f"&origin={seg[0]}"
+        url += f"&destination={seg[-1]}"
         if len(seg) > 2:
             url += "&waypoints=" + "%7C".join(seg[1:-1])
         url += "&travelmode=driving"
-        links.append((start, end, url))
+        links.append((max(0, start - off), end - off, url))
         start = end
     return links
 
@@ -2610,6 +2617,8 @@ def build_whatsapp_text(r, map_links):
         lines.append(f"🧑‍✈️ Petugas: {r['driver']}")
     if r.get("depot_name"):
         lines.append(f"🏭 Titik awal: {r['depot_name']}")
+    elif r.get("from_my_location"):
+        lines.append("📍 Titik awal: lokasi Anda saat membuka Google Maps")
     if r.get("finish_label"):
         lines.append(f"🏁 Estimasi selesai ±{r['finish_label']}")
     lines.append("")
@@ -2734,10 +2743,12 @@ def build_excel_bytes(route_summaries):
 def route_links_info(r, max_waypoints):
     """Link Google Maps + nomor urut titik untuk sebuah rute (termasuk kaki pulang bila pulang-pergi)."""
     df = r["df"]
-    is_round = bool(r.get("round_trip"))
+    mine = bool(r.get("from_my_location")) and not r.get("has_start")
+    # Dari "Lokasi anda": kaki pulang tidak bisa dibuatkan link (Google Maps tak bisa memakai posisi pengguna sebagai tujuan).
+    is_round = bool(r.get("round_trip")) and not mine
     link_df = pd.concat([df, df.iloc[[0]]], ignore_index=True) if is_round else df
     seq_nums = list(df["sequence"]) + ([df["sequence"].iloc[0]] if is_round else [])
-    return generate_google_maps_links(link_df, max_waypoints), seq_nums, link_df
+    return generate_google_maps_links(link_df, max_waypoints, from_my_location=mine), seq_nums, link_df
 
 
 MAPS_PART_EMOJIS = ["🟦", "🟩", "🟧", "🟪", "🟨", "🟥", "🟫", "⬛"]
@@ -3091,6 +3102,7 @@ def _pdf_payload(r, links, seq_nums, result):
     return {
         "route_no": int(r["route_id"]) + 1, "rows": rows,
         "has_start": bool(r.get("has_start")), "round_trip": bool(r.get("round_trip")),
+        "from_my_location": bool(r.get("from_my_location")) and not r.get("has_start"),
         "back_label": r.get("back_label") or "", "manual": bool(r.get("manual")),
         "distance_km": float(r["distance_km"]), "duration_sec": float(r["duration_sec"]),
         "visit_sec": float(r.get("visit_sec", 0)), "wait_sec": float(r.get("wait_sec", 0)),
@@ -3212,6 +3224,8 @@ def build_routes_pdf(payloads):
             parts.append(f"Selesai +/-{xml_escape(p['finish_label'])}" + (" (sudah pulang)" if p["round_trip"] else ""))
         if p.get("depot_name"):
             parts.append(f"Titik awal: {xml_escape(p['depot_name'])}")
+        elif p.get("from_my_location"):
+            parts.append("Titik awal: lokasi pengguna saat membuka Google Maps")
         story.append(Paragraph("  |  ".join(parts), st_meta))
         story.append(Spacer(1, 2 * mm))
         petugas_val = f"<b>{xml_escape(p['driver'])}</b>" if p.get("driver") else "________________________________"
@@ -3334,7 +3348,7 @@ if "use_extracted_flag" not in st.session_state:
 if "starting_link_saved" not in st.session_state:
     st.session_state.starting_link_saved = ""
 if "start_mode_saved" not in st.session_state:
-    st.session_state.start_mode_saved = "manual"   # "manual" = tentukan sendiri, "gps" = lokasi pengguna
+    st.session_state.start_mode_saved = "manual"   # "manual" = tentukan sendiri, "mylocation" = lokasi pengguna di Google Maps
 if "multi_depot_rows" not in st.session_state:
     st.session_state.multi_depot_rows = []  # id unik per baris, misal [1, 2, 3]
 if "multi_depot_next_id" not in st.session_state:
@@ -4319,141 +4333,15 @@ def _sync_starting_link():
     )
 
 
+START_MODE_LABELS = {"manual": "✍️ Tentukan titik awal", "mylocation": "📍 Lokasi anda"}
+
+
 def _sync_start_mode():
     ss = st.session_state
     label = ss.get(_wk("_start_mode_widget"))
     for k, v in START_MODE_LABELS.items():
         if v == label:
             ss.start_mode_saved = k
-
-
-# ---- Titik awal dari lokasi pengguna (GPS browser) -------------------------------------------------------
-# Komponen kecil (iframe) yang memanggil navigator.geolocation dan mengirim hasilnya ke Python. Ditulis ke folder
-# sementara saat dibutuhkan, jadi tidak perlu file tambahan di repositori.
-START_MODE_LABELS = {"manual": "✍️ Tentukan titik awal", "gps": "📍 Lokasi anda"}
-GEO_ERRORS = {
-    "denied": "Izin lokasi ditolak. Klik ikon gembok/lokasi di sebelah alamat web, ubah Lokasi menjadi **Izinkan**, "
-              "lalu klik **Ambil ulang lokasi**. (Di HP: aktifkan juga GPS/Lokasi di pengaturan perangkat.)",
-    "unavailable": "Lokasi tidak tersedia di perangkat ini. Nyalakan GPS/Lokasi lalu klik **Ambil ulang lokasi**, "
-                   "atau pilih **Tentukan titik awal**.",
-    "timeout": "Mengambil lokasi terlalu lama. Pastikan GPS menyala dan sinyal baik, lalu klik **Ambil ulang lokasi**.",
-    "insecure": "Browser hanya mengizinkan lokasi lewat HTTPS. Buka aplikasi lewat alamat https://.",
-}
-GEO_HTML = r"""<!doctype html>
-<html><head><meta charset="utf-8">
-<style>
-  html,body{margin:0;padding:0;background:transparent}
-  body{font:14px/1.4 "Source Sans Pro",system-ui,-apple-system,"Segoe UI",sans-serif;color:#31333F}
-  #row{display:flex;align-items:center;gap:10px;padding:2px 0 4px}
-  button{cursor:pointer;font:inherit;font-weight:600;color:inherit;background:transparent;
-         border:1px solid rgba(128,128,128,.45);border-radius:8px;padding:6px 12px}
-  button:hover{border-color:#2563EB;color:#2563EB}
-  button[disabled]{opacity:.55;cursor:progress}
-  #s{opacity:.85}
-</style></head>
-<body>
-<div id="row"><button id="b" type="button">📍 Ambil ulang lokasi</button><span id="s">Meminta lokasi…</span></div>
-<script>
-(function(){
-  function post(type, data){ window.parent.postMessage(Object.assign({isStreamlitMessage:true, type:type}, data||{}), "*"); }
-  function setValue(v){ post("streamlit:setComponentValue", {value:v, dataType:"json"}); }
-  function setHeight(){ post("streamlit:setFrameHeight", {height: Math.max(40, document.getElementById("row").offsetHeight + 8)}); }
-  var btn = document.getElementById("b"), st = document.getElementById("s"), started = false, busy = false;
-
-  function finish(text, value){ busy = false; btn.disabled = false; st.textContent = text; setValue(value); setHeight(); }
-
-  function locate(){
-    if (busy) return;
-    busy = true; btn.disabled = true; st.textContent = "Meminta lokasi…"; setHeight();
-    if (window.isSecureContext === false){ return finish("Butuh HTTPS", {error:"insecure", t:Date.now()}); }
-    if (!navigator.geolocation){ return finish("Browser tidak mendukung lokasi", {error:"unavailable", t:Date.now()}); }
-    navigator.geolocation.getCurrentPosition(function(p){
-      var acc = Math.round(p.coords.accuracy || 0);
-      finish("Lokasi didapat (±" + acc + " m)", {lat:p.coords.latitude, lon:p.coords.longitude, acc:acc, t:Date.now()});
-    }, function(e){
-      var code = e && e.code === 1 ? "denied" : (e && e.code === 3 ? "timeout" : "unavailable");
-      finish(code === "denied" ? "Izin lokasi ditolak" : (code === "timeout" ? "Waktu habis" : "Lokasi tidak tersedia"),
-             {error:code, t:Date.now()});
-    }, {enableHighAccuracy:true, timeout:20000, maximumAge:30000});
-  }
-
-  btn.addEventListener("click", locate);
-  window.addEventListener("message", function(ev){
-    var d = ev.data;
-    if (!d || d.type !== "streamlit:render") return;
-    var th = d.args && d.args.theme || d.theme;
-    if (th && th.textColor) document.body.style.color = th.textColor;
-    if (!started){ started = true; locate(); }
-  });
-  post("streamlit:componentReady", {apiVersion:1});
-  setHeight();
-})();
-</script></body></html>
-"""
-
-
-@st.cache_resource
-def _geo_component():
-    try:
-        import streamlit.components.v1 as components
-        d = os.path.join(tempfile.gettempdir(), "rp_geo_component_v1")
-        os.makedirs(d, exist_ok=True)
-        f = os.path.join(d, "index.html")
-        cur = None
-        if os.path.exists(f):
-            with open(f, encoding="utf-8") as fh:
-                cur = fh.read()
-        if cur != GEO_HTML:
-            with open(f, "w", encoding="utf-8") as fh:
-                fh.write(GEO_HTML)
-        return components.declare_component("rp_geolocation", path=d)
-    except Exception:
-        return None
-
-
-def parse_geo_value(val):
-    """Nilai dari komponen -> ('ok', (lat, lon, akurasi_m)) | ('error', kode) | (None, None)."""
-    if not isinstance(val, dict):
-        return None, None
-    lat, lon = val.get("lat"), val.get("lon")
-    if isinstance(lat, (int, float)) and isinstance(lon, (int, float)) and not isinstance(lat, bool) \
-            and -90 <= lat <= 90 and -180 <= lon <= 180:
-        acc = val.get("acc")
-        return "ok", (float(lat), float(lon), int(acc) if isinstance(acc, (int, float)) else None)
-    if isinstance(val.get("error"), str):
-        return "error", val["error"][:20]
-    return None, None
-
-
-def render_geo_start():
-    """Tampilkan komponen lokasi + status + peta kecil. Return teks koordinat 'lat, lon' ('' bila belum ada lokasi)."""
-    ss = st.session_state
-    comp = _geo_component()
-    if comp is None:
-        st.error("Komponen lokasi tidak bisa dimuat di server ini. Pilih **Tentukan titik awal** dan isi manual.")
-        return ""
-    kind, val = parse_geo_value(comp(key=_wk("_geo_widget"), default=None))
-    if kind == "ok":
-        ss.geo_last, ss.geo_error = val, None
-    elif kind == "error":
-        ss.geo_last, ss.geo_error = None, val
-    loc, err = ss.get("geo_last"), ss.get("geo_error")
-    if loc:
-        lat, lon, acc = loc
-        st.success(f"📍 Titik awal = lokasi Anda: {lat:.5f}, {lon:.5f}" + (f" (akurasi ±{acc} m)" if acc is not None else ""))
-        if acc is not None and acc > 1000:
-            st.warning("Akurasi rendah (lokasi perkiraan dari jaringan, biasanya di laptop tanpa GPS). Titik bisa meleset "
-                       "beberapa kilometer; gunakan HP, atau pilih **Tentukan titik awal**.")
-        try:
-            st.map(pd.DataFrame({"lat": [lat], "lon": [lon]}), zoom=15, height=170 if IS_MOBILE else 220, size=25, color="#2563EB")
-        except Exception:
-            pass
-        return f"{lat:.6f}, {lon:.6f}"
-    if err:
-        st.error(GEO_ERRORS.get(err, "Lokasi tidak bisa diambil."))
-    else:
-        st.info("Meminta lokasi… klik **Izinkan** saat browser menanyakan akses lokasi.")
-    return ""
 
 
 def _map_set_status(row_key):
@@ -4650,7 +4538,7 @@ def load_session_bytes(raw):
     for key in ("use_extracted_flag", "round_trip_flag", "dedupe_flag"):
         if isinstance(cfg.get(key), bool):
             updates[key] = cfg[key]
-    if cfg.get("start_mode_saved") in ("manual", "gps"):
+    if cfg.get("start_mode_saved") in ("manual", "mylocation"):
         updates["start_mode_saved"] = cfg["start_mode_saved"]
     if isinstance(cfg.get("starting_link_saved"), str):
         updates["starting_link_saved"] = cfg["starting_link_saved"][:2000]
@@ -5777,11 +5665,17 @@ if st.session_state.page == "Routing":
                 disabled=dp_on,
                 label_visibility="collapsed",
                 help="**Tentukan titik awal**: isi link Google Maps/koordinat sendiri (kosong = titik mulai dipilih otomatis). "
-                     "**Lokasi anda**: titik awal otomatis memakai posisi perangkat Anda saat ini (butuh izin lokasi di browser).",
+                     "**Lokasi anda**: saat link Google Maps rute dibuka, rute dimulai dari posisi pengguna pada saat itu.",
             )
-            use_geo_start = (_sm_label == START_MODE_LABELS["gps"]) and not dp_on
-            if use_geo_start:
-                starting_link = render_geo_start()
+            use_my_loc = (_sm_label == START_MODE_LABELS["mylocation"]) and not dp_on
+            if use_my_loc:
+                starting_link = ""
+                st.info(
+                    "Titik awal = **lokasi Anda saat link Google Maps dibuka** (posisi GPS perangkat pada saat itu, bukan "
+                    "lokasi yang dikunci sekarang). Urutan kunjungan tetap dioptimalkan otomatis. Saat membuka link, "
+                    "aktifkan GPS dan izinkan Google Maps memakai lokasi.",
+                    icon="📍",
+                )
             else:
                 starting_link = st.text_input(
                     "📍 Titik Awal (opsional)",
@@ -5933,7 +5827,7 @@ if st.session_state.page == "Routing":
             f"**Ringkasan:** {len(df)} merchant → {_plan_txt} · mulai {start_time:%H:%M} · "
             + (f"{int(visit_minutes)} menit/toko" if visit_minutes else "tanpa durasi kunjungan")
             + " · " + ("pulang-pergi" if round_trip else "satu arah")
-            + " · titik awal: " + ("per petugas" if dp_on else (("lokasi Anda" if use_geo_start else "sesuai isian") if starting_link else "otomatis (paling efisien)"))
+            + " · titik awal: " + ("per petugas" if dp_on else ("sesuai isian" if starting_link else ("lokasi Anda saat buka Google Maps" if (use_my_loc and not use_multi_depot) else "otomatis (paling efisien)")))
             + (" · urut sesuai jam buka/tutup" if hours_opt else ""),
             icon="🧾",
         )
@@ -5946,17 +5840,13 @@ if st.session_state.page == "Routing":
         data_fingerprint = (
             len(df), tuple(df["merchant_name"]), max_points_per_route, target_routes, starting_link,
             round_trip, split_mode, int(visit_minutes), start_time.strftime("%H:%M"),
-            use_multi_depot, tuple(depot_rows_raw), balance_time, hours_opt,
+            use_multi_depot, tuple(depot_rows_raw), balance_time, hours_opt, use_my_loc,
             (dp_n, tuple(dp_names), tuple(dp_rows), tuple(dp_days_sel), dp_cap, str(dp_start_date), dp_lock) if dp_on else None,
         )
 
         if run:
             if len(df) < 2:
                 st.warning("⚠️ Minimal butuh 2 titik untuk bisa membuat rute.")
-                st.stop()
-            if use_geo_start and not starting_link and not use_multi_depot:
-                st.error("❌ Lokasi Anda belum didapat. Izinkan akses lokasi di browser (lihat bagian Titik awal), "
-                         "atau pilih **Tentukan titik awal**.")
                 st.stop()
 
             # Daftar titik awal per rute (kalau multi-depot aktif) — resolve DULU.
@@ -5979,7 +5869,7 @@ if st.session_state.page == "Routing":
                     if "http" not in starting_link.lower():
                         coord_lat, coord_lon, _coord_err = parse_coordinate_text(starting_link)
                     if coord_lat is not None:
-                        start_name, start_lat, start_lon = ("Lokasi Anda" if use_geo_start else "Titik Awal"), coord_lat, coord_lon
+                        start_name, start_lat, start_lon = "Titik Awal", coord_lat, coord_lon
                     else:
                         parsed_name, start_lat, start_lon = extract_google_maps_data(starting_link)
                         start_name = parsed_name or "START POINT"
@@ -6165,6 +6055,7 @@ if st.session_state.page == "Routing":
                             "real_roads": used_real_roads,
                             "round_trip": round_trip,
                             "has_start": has_start,
+                            "from_my_location": bool(use_my_loc and not dp_on and not depots and not has_start),
                             "depot_name": route_start_name if has_start else "",
                             "depot_idx": (route_depot.get(route_id) or {}).get("row"),
                             "driver": st.session_state.driver_names.get(route_id, ""),
@@ -6520,7 +6411,13 @@ if st.session_state.page == "Routing":
                             # alasan untuk kasus paling umum, dan cukup beri catatan untuk skenario
                             # browser-HP yang lebih jarang terjadi.
                             max_wp = MAPS_MAX_WAYPOINTS_DESKTOP
-                            link_waypoints = max(0, len(link_df) - 2)
+                            _mine = bool(r.get("from_my_location")) and not r.get("has_start")
+                            link_waypoints = max(0, len(link_df) - (1 if _mine else 2))
+                            if _mine:
+                                st.caption(
+                                    "📍 Rute ini dimulai dari **lokasi Anda saat link dibuka** (Google Maps memakai GPS perangkat)."
+                                    + (" Perjalanan pulang ke lokasi awal tidak ikut di link; navigasikan manual." if r.get("round_trip") else "")
+                                )
                             if len(map_links) == 1:
                                 st.link_button("🚗 Buka di Google Maps", map_links[0][2], width='stretch')
                                 if IS_MOBILE and link_waypoints > MAPS_MAX_WAYPOINTS_MOBILE:
