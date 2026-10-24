@@ -4382,6 +4382,12 @@ def _sync_start_mode():
             ss.start_mode_saved = k
 
 
+def _step_next(key, n):
+    """Tombol "Titik berikutnya": geser pilihan titik navigasi satu langkah (maksimal sampai titik terakhir)."""
+    ss = st.session_state
+    ss[key] = min(int(ss.get(key, 0)) + 1, max(0, n - 1))
+
+
 def _map_set_status(row_key):
     """Callback tombol di pratinjau peta: simpan status baru sebagai edit data (sama seperti edit tabel)."""
     ss = st.session_state
@@ -6494,10 +6500,7 @@ if st.session_state.page == "Routing":
                                         width='stretch',
                                     )
 
-                            if st.checkbox(
-                                "🧭 Navigasi titik demi titik (cadangan)", key=f"stepnav_{route_id}",
-                                help="Cadangan kalau navigasi multi-titik Google Maps berhenti di titik singgah.",
-                            ):
+                            with st.popover("🧭 Navigasi titik demi titik (cadangan)"):
                                 st.caption(
                                     "Kalau navigasi multi-titik Google Maps berhenti di titik singgah (\"sudah sampai tujuan\"), "
                                     "pakai tombol di bawah: tiap tombol memulai navigasi dari **lokasi Anda saat ini** ke satu "
@@ -6510,17 +6513,31 @@ if st.session_state.page == "Routing":
                                 else:
                                     st.caption(
                                         "ℹ️ Teks rute terlalu panjang untuk tombol langsung — "
-                                        "salin lewat tombol di bawah lalu tempel di WhatsApp."
+                                        "salin lewat pilihan di bawah lalu tempel di WhatsApp."
                                     )
-                                with st.popover("📋 Salin teks rute (titik demi titik)"):
-                                    st.code(_step_text, language=None)
-                                for _, _nr in r["df"].iterrows():
-                                    if r.get("has_start") and _nr.name == r["df"].index[0]:
-                                        continue          # titik awal tetap bukan tujuan kunjungan
+                                if st.checkbox("📋 Salin teks rute (titik demi titik)", key=f"stepcopy_{route_id}"):
+                                    with st.container(height=200):     # kotak bergulir: teks panjang tidak memanjangkan halaman
+                                        st.code(_step_text, language=None)
+                                _first_stop = 1 if r.get("has_start") else 0            # titik awal tetap bukan tujuan kunjungan
+                                _stops = r["df"].iloc[_first_stop:]
+                                _sel_key = f"stepsel_{route_id}"
+                                if len(_stops):
+                                    _pick = st.selectbox(
+                                        f"Titik tujuan ({len(_stops)} titik) — ketik untuk mencari",
+                                        options=list(range(len(_stops))),
+                                        format_func=lambda i, _s=_stops: f"{int(_s.iloc[i]['sequence'])}. {_s.iloc[i]['merchant_name']}",
+                                        key=_sel_key,
+                                    )
+                                    _row = _stops.iloc[_pick]
                                     st.link_button(
-                                        f"Rute {route_id + 1} · {int(_nr['sequence'])}. {_nr['merchant_name']}",
-                                        stop_nav_url(_nr["latitude"], _nr["longitude"]),
-                                        width='stretch',
+                                        f"🧭 Navigasi ke titik {int(_row['sequence'])}",
+                                        stop_nav_url(_row["latitude"], _row["longitude"]),
+                                        type="primary", width='stretch',
+                                    )
+                                    st.button(
+                                        "⏭️ Titik berikutnya", key=f"stepnext_{route_id}", width='stretch',
+                                        on_click=_step_next, args=(_sel_key, len(_stops)),
+                                        disabled=_pick >= len(_stops) - 1,
                                     )
                             wa_text = build_whatsapp_text(r, map_links)
                             wa_url = "https://wa.me/?text=" + quote(wa_text, safe="")
