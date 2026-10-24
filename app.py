@@ -427,15 +427,15 @@ st.markdown(
         border: 1px solid rgba(37,99,235,0.2); background: linear-gradient(135deg, rgba(37,99,235,0.05), rgba(13,148,136,0.07));
     }
     .cmp-bars {flex: 1 1 auto; min-width: 0; display: grid; gap: 16px;}
-    .cmp-row {display: grid; grid-template-columns: 128px minmax(0, 1fr) auto; align-items: center; gap: 14px;}
+    .cmp-row {display: grid; grid-template-columns: 140px minmax(0, 1fr) auto; align-items: center; gap: 14px;}
     .cmp-lbl {font-size: 0.85rem; font-weight: 600; opacity: 0.9;}
     .cmp-track {position: relative; height: 18px; border-radius: 99px; background: rgba(128,128,128,0.14); overflow: hidden;}
     .cmp-track i {
         position: absolute; left: 0; top: 0; bottom: 0; border-radius: 99px; transform-origin: left center;
         animation: cmpGrow 0.9s cubic-bezier(0.22, 1, 0.36, 1) both;
     }
-    .cmp-row.base .cmp-track i {background: linear-gradient(90deg, #F59E0B, #F97316);}
-    .cmp-row.opt .cmp-track i {background: linear-gradient(90deg, #2563EB, #0D9488); animation-delay: 0.15s;}
+    .cmp-row .cmp-track i.fill {background: #2563EB;}   /* satu warna solid untuk kedua batang: yang dibandingkan hanya panjangnya */
+    .cmp-row.opt .cmp-track i {animation-delay: 0.15s;}
     .cmp-row.has-saved .cmp-track i.fill {border-radius: 99px 0 0 99px;}
     .cmp-track i.saved {   /* bagian berarsir = jarak yang berhasil dihemat */
         box-sizing: border-box; border-radius: 0 99px 99px 0; border: 1.5px dashed rgba(13,148,136,0.75); border-left: 0;
@@ -643,22 +643,22 @@ def compare_panel(naive_km, opt_km, delta_km, saving_pct):
         side = (
             f'<div class="cmp-save"><div class="cmp-ring" style="--p:{pct:.0f}" aria-hidden="true"><span>{pct:.0f}%</span></div>'
             f'<div class="cmp-save-text"><div class="big">Hemat {delta_km:.1f} km</div>'
-            f'<div class="small">{pct:.0f}% lebih singkat dari urutan di file</div></div></div>'
+            f'<div class="small">{pct:.0f}% lebih singkat dibanding sebelum optimasi</div></div></div>'
         )
     elif delta_km < -0.05:
         side = (
             f'<div class="cmp-save"><div class="cmp-save-text"><div class="big">+{abs(delta_km):.1f} km</div>'
-            '<div class="small">lebih panjang dari urutan di file</div></div></div>'
+            '<div class="small">lebih panjang dibanding sebelum optimasi</div></div></div>'
         )
     else:
         side = (
             '<div class="cmp-save"><div class="cmp-save-text"><div class="big">≈ sama</div>'
-            '<div class="small">urutan di file sudah efisien</div></div></div>'
+            '<div class="small">urutan awal sudah efisien</div></div></div>'
         )
     st.markdown(
         '<div class="cmp">'
         '<div class="cmp-bars">'
-        f'<div class="cmp-row base"><span class="cmp-lbl">Urutan di file</span><div class="cmp-track" aria-hidden="true"><i class="fill" style="width:{w_naive:.1f}%"></i></div><span class="cmp-val">{naive_km:.1f} km</span></div>'
+        f'<div class="cmp-row base"><span class="cmp-lbl">Sebelum optimasi</span><div class="cmp-track" aria-hidden="true"><i class="fill" style="width:{w_naive:.1f}%"></i></div><span class="cmp-val">{naive_km:.1f} km</span></div>'
         f'<div class="cmp-row opt{" has-saved" if saved_w > 0 else ""}"><span class="cmp-lbl">Setelah optimasi</span><div class="cmp-track" aria-hidden="true"><i class="fill" style="width:{w_opt:.1f}%"></i>{saved_html}</div><span class="cmp-val">{opt_km:.1f} km</span></div>'
         f'{legend}</div>{side}</div>',
         unsafe_allow_html=True,
@@ -6208,7 +6208,7 @@ if st.session_state.page == "Routing":
             if _tn_km > 0 and len(df) >= 3 and _tn_km - total_distance > 0.05:
                 st.info(
                     f"**Hemat {_tn_km - total_distance:.1f} km ({(_tn_km - total_distance) / _tn_km * 100:.0f}%)** "
-                    f"dibanding urutan di file: {_tn_km:.1f} km → {total_distance:.1f} km.",
+                    f"dibanding sebelum optimasi: {_tn_km:.1f} km → {total_distance:.1f} km.",
                     icon="📉",
                 )
 
@@ -6354,7 +6354,7 @@ if st.session_state.page == "Routing":
                             parts.append(f"🏭 Titik awal: {r['depot_name']}")
                         _route_saved = r.get("naive_distance_km", r["distance_km"]) - r["distance_km"]
                         if _route_saved > 0.05:
-                            parts.append(f"📉 Hemat {_route_saved:.1f} km vs urutan file")
+                            parts.append(f"📉 Hemat {_route_saved:.1f} km vs sebelum optimasi")
                         st.caption(" · ".join(parts))
                         if r.get("n_outside_hours"):
                             st.warning(
@@ -6550,22 +6550,22 @@ if st.session_state.page == "Routing":
                 if total_naive_km > 0 and len(df) >= 3:
                     section_header(
                         "📉", "Sebelum vs Sesudah Optimasi",
-                        "Dibanding mengunjungi merchant sesuai urutan di file kamu",
+                        "Sebelum optimasi = mengunjungi merchant sesuai urutan di file kamu",
                     )
                     saving_pct = delta_km / total_naive_km * 100
                     compare_panel(total_naive_km, total_distance, delta_km, saving_pct)
                     if delta_km > 0.05:
                         st.caption(
-                            f"💡 Hemat ±{format_duration(max(delta_sec, 0))} waktu perjalanan dibanding urutan di file "
+                            f"💡 Hemat ±{format_duration(max(delta_sec, 0))} waktu perjalanan dibanding sebelum optimasi "
                             "(belum termasuk waktu kunjungan)."
                         )
                     elif delta_km < -0.05:
                         st.caption(
-                            f"ℹ️ Rute sekarang {abs(delta_km):.1f} km lebih panjang dari urutan di file — biasanya karena "
+                            f"ℹ️ Rute sekarang {abs(delta_km):.1f} km lebih panjang dibanding sebelum optimasi — biasanya karena "
                             "merchant prioritas diutamakan atau urutan diubah manual."
                         )
                     else:
-                        st.caption("ℹ️ Urutan di file kamu ternyata sudah hampir seefisien hasil optimasi.")
+                        st.caption("ℹ️ Urutan awal (sebelum optimasi) ternyata sudah hampir seefisien hasil optimasi.")
 
         elif result and result["fingerprint"] != data_fingerprint:
             st.info("ℹ️ Pengaturan atau data berubah — tekan **Buat Rute Optimal Sekarang** lagi untuk memperbarui hasil.")
