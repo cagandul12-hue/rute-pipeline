@@ -1533,32 +1533,42 @@ def generate_google_maps_links(df, max_waypoints, from_my_location=False):
     tersambung. Mengembalikan list (indeks_awal, indeks_akhir, url) — indeks 0-based
     pada baris df.
 
-    from_my_location=True: link PERTAMA tidak memuat origin, sehingga Google Maps memakai posisi pengguna saat
-    link dibuka ("Lokasi Anda"). Semua baris df menjadi titik singgah/tujuan (baris 0 = tujuan pertama).
+    from_my_location=True: TIAP link tanpa origin, sehingga Google Maps memakai posisi pengguna saat link itu
+    dibuka ("Lokasi Anda"). Rute dipotong jadi bagian yang tidak saling tumpang-tindih (maks. max_waypoints + 1
+    merchant per link; merchant terakhir bagian = tujuan, sisanya titik singgah).
     """
     coords = [f"{row.latitude},{row.longitude}" for _, row in df.iterrows()]
-    off = 0
-    if from_my_location and coords:
-        coords = [None] + coords          # None = posisi pengguna (tanpa parameter origin)
-        off = 1
+    links = []
+    if from_my_location:
+        size = max_waypoints + 1
+        for start in range(0, len(coords), size):
+            seg = coords[start:start + size]
+            url = f"https://www.google.com/maps/dir/?api=1&destination={seg[-1]}"
+            if len(seg) > 1:
+                url += "&waypoints=" + "%7C".join(seg[:-1])
+            links.append((start, start + len(seg) - 1, url + "&travelmode=driving"))
+        return links
     if len(coords) < 2:
         return []
     step = max_waypoints + 1
-    links = []
     start = 0
     while start < len(coords) - 1:
         end = min(start + step, len(coords) - 1)
         seg = coords[start:end + 1]
-        url = "https://www.google.com/maps/dir/?api=1"
-        if seg[0] is not None:
-            url += f"&origin={seg[0]}"
-        url += f"&destination={seg[-1]}"
+        url = (
+            f"https://www.google.com/maps/dir/?api=1&origin={seg[0]}&destination={seg[-1]}"
+        )
         if len(seg) > 2:
             url += "&waypoints=" + "%7C".join(seg[1:-1])
         url += "&travelmode=driving"
-        links.append((max(0, start - off), end - off, url))
+        links.append((start, end, url))
         start = end
     return links
+
+
+def stop_nav_url(lat, lon):
+    """Link navigasi ke SATU titik dari posisi pengguna saat ini (tanpa origin), langsung mulai navigasi di aplikasi."""
+    return f"https://www.google.com/maps/dir/?api=1&destination={lat},{lon}&travelmode=driving&dir_action=navigate"
 
 
 SHORT_LINK_DOMAINS = ("maps.app.goo.gl", "goo.gl/maps", "app.goo.gl")
@@ -6394,8 +6404,10 @@ if st.session_state.page == "Routing":
                             if len(map_links) > 1:
                                 st.caption(
                                     "🧭 Kolom **Bagian Maps** menunjukkan merchant ini masuk link Google Maps yang mana "
-                                    "(mis. 1/3 = link pertama dari 3). Baris **abu-abu** dengan dua bagian adalah titik "
-                                    "sambungan: tujuan bagian sebelumnya sekaligus titik awal bagian berikutnya."
+                                    "(mis. 1/3 = link pertama dari 3). "
+                                    + ("Tiap bagian dimulai dari lokasi Anda saat link-nya dibuka." if r.get("from_my_location") and not r.get("has_start")
+                                       else "Baris **abu-abu** dengan dua bagian adalah titik sambungan: tujuan bagian sebelumnya "
+                                            "sekaligus titik awal bagian berikutnya.")
                                 )
                             if IS_PRO and st.checkbox(
                                 "✏️ Ubah urutan manual", key=f"edit_{route_id}",
@@ -6415,7 +6427,7 @@ if st.session_state.page == "Routing":
                             link_waypoints = max(0, len(link_df) - (1 if _mine else 2))
                             if _mine:
                                 st.caption(
-                                    "📍 Rute ini dimulai dari **lokasi Anda saat link dibuka** (Google Maps memakai GPS perangkat)."
+                                    "📍 Tiap link rute ini dimulai dari **lokasi Anda saat link dibuka** (Google Maps memakai GPS perangkat)."
                                     + (" Perjalanan pulang ke lokasi awal tidak ikut di link; navigasikan manual." if r.get("round_trip") else "")
                                 )
                             if len(map_links) == 1:
@@ -6430,7 +6442,9 @@ if st.session_state.page == "Routing":
                                 st.caption(
                                     f"ℹ️ Google Maps membatasi titik singgah (maks. {max_wp} per link), "
                                     f"jadi rute dibagi jadi {len(map_links)} link. Buka berurutan — "
-                                    "tiap bagian dimulai dari titik akhir bagian sebelumnya."
+                                    + ("tiap bagian dimulai dari lokasi Anda saat link-nya dibuka (buka bagian berikutnya setelah "
+                                       "selesai dengan bagian sebelumnya)." if (r.get("from_my_location") and not r.get("has_start"))
+                                       else "tiap bagian dimulai dari titik akhir bagian sebelumnya.")
                                 )
                                 for i, (ia, ib, url) in enumerate(map_links, start=1):
                                     st.link_button(
@@ -6439,6 +6453,20 @@ if st.session_state.page == "Routing":
                                         width='stretch',
                                     )
 
+                            with st.popover("🧭 Navigasi titik demi titik (cadangan)"):   # popover: expander tidak boleh bersarang
+                                st.caption(
+                                    "Kalau navigasi multi-titik Google Maps berhenti di titik singgah (\"sudah sampai tujuan\"), "
+                                    "pakai tombol di bawah: tiap tombol memulai navigasi dari **lokasi Anda saat ini** ke satu "
+                                    "titik. Setelah tiba, tekan tombol titik berikutnya."
+                                )
+                                for _, _nr in r["df"].iterrows():
+                                    if r.get("has_start") and _nr.name == r["df"].index[0]:
+                                        continue          # titik awal tetap bukan tujuan kunjungan
+                                    st.link_button(
+                                        f"Rute {route_id + 1} · {int(_nr['sequence'])}. {_nr['merchant_name']}",
+                                        stop_nav_url(_nr["latitude"], _nr["longitude"]),
+                                        width='stretch',
+                                    )
                             wa_text = build_whatsapp_text(r, map_links)
                             wa_url = "https://wa.me/?text=" + quote(wa_text, safe="")
                             if len(wa_url) <= 3800:
