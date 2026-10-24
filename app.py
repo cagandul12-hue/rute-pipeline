@@ -6494,7 +6494,10 @@ if st.session_state.page == "Routing":
                                         width='stretch',
                                     )
 
-                            with st.popover("🧭 Navigasi titik demi titik (cadangan)"):   # popover: expander tidak boleh bersarang
+                            if st.checkbox(
+                                "🧭 Navigasi titik demi titik (cadangan)", key=f"stepnav_{route_id}",
+                                help="Cadangan kalau navigasi multi-titik Google Maps berhenti di titik singgah.",
+                            ):
                                 st.caption(
                                     "Kalau navigasi multi-titik Google Maps berhenti di titik singgah (\"sudah sampai tujuan\"), "
                                     "pakai tombol di bawah: tiap tombol memulai navigasi dari **lokasi Anda saat ini** ke satu "
@@ -6505,9 +6508,12 @@ if st.session_state.page == "Routing":
                                 if len(_step_wa) <= 3800:
                                     st.link_button("📲 Kirim via WhatsApp (titik demi titik)", _step_wa, width='stretch')
                                 else:
-                                    st.caption("ℹ️ Teks terlalu panjang untuk tombol WhatsApp langsung. Salin teks di bawah, lalu tempel di WhatsApp.")
-                                st.caption("📋 Salin teks titik demi titik (ikon salin di pojok kanan atas kotak):")
-                                st.code(_step_text, language=None)
+                                    st.caption(
+                                        "ℹ️ Teks rute terlalu panjang untuk tombol langsung — "
+                                        "salin lewat tombol di bawah lalu tempel di WhatsApp."
+                                    )
+                                with st.popover("📋 Salin teks rute (titik demi titik)"):
+                                    st.code(_step_text, language=None)
                                 for _, _nr in r["df"].iterrows():
                                     if r.get("has_start") and _nr.name == r["df"].index[0]:
                                         continue          # titik awal tetap bukan tujuan kunjungan
