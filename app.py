@@ -2648,6 +2648,34 @@ def build_whatsapp_text(r, map_links):
     return "\n".join(lines)
 
 
+def build_stepwise_text(r):
+    """Teks WhatsApp/salin untuk NAVIGASI TITIK DEMI TITIK: tiap merchant punya satu tautan navigasi sendiri
+    (dari lokasi pengguna saat tautan dibuka), jadi tidak bergantung pada navigasi multi-titik Google Maps."""
+    df = r["df"]
+    first_is_start = bool(r.get("has_start"))
+    stops = df.iloc[1:] if first_is_start else df
+    total_sec = r["duration_sec"] + r.get("visit_sec", 0) + r.get("wait_sec", 0)
+    lines = [f"*Rute {r['route_id'] + 1} · navigasi titik demi titik* — {len(stops)} titik · ~{r['distance_km']:.1f} km · ~{format_duration(total_sec)}"]
+    if r.get("tanggal"):
+        lines.append(f"📅 {fmt_day_label(datetime.date.fromisoformat(r['tanggal']), short=False)}")
+    if r.get("driver"):
+        lines.append(f"🧑‍✈️ Petugas: {r['driver']}")
+    if first_is_start and r.get("depot_name"):
+        lines.append(f"🏭 Titik awal: {r['depot_name']}")
+    lines.append("Ketuk 🧭 di tiap titik, urut dari nomor 1. Navigasi dimulai dari lokasi Anda saat tautan dibuka.")
+    lines.append("")
+    for _, row in stops.iterrows():
+        eta = f" ({row['jam_tiba']})" if "jam_tiba" in df.columns else ""
+        star = "⭐ " if row.get("prioritas_flag") else ""
+        warn = f" {row['jadwal_status']}" if row.get("jadwal_status", "").startswith(("⚠️", "⏳")) else ""
+        lines.append(f"{int(row['sequence'])}. {star}{row['merchant_name']}{eta}{warn}")
+        lines.append(f"🧭 {stop_nav_url(round(float(row['latitude']), 6), round(float(row['longitude']), 6))}")
+        lines.append("")
+    if r.get("round_trip"):
+        lines.append("↩️ Lalu kembali ke titik awal")
+    return "\n".join(lines).rstrip()
+
+
 # ==========================================================================================
 # HASIL RUTE: finalisasi, ubah urutan manual, peta gabungan, lembar PDF
 # ==========================================================================================
@@ -6276,6 +6304,19 @@ if st.session_state.page == "Routing":
                     )
                 with st.popover("📋 Salin teks semua rute"):
                     st.code(wa_text_all, language=None)
+                _step_all = (
+                    f"*Ringkasan {len(route_summaries)} Rute · navigasi titik demi titik*\n\n"
+                    + ("\n\n" + "━" * 20 + "\n\n").join(build_stepwise_text(_r) for _r in route_summaries)
+                )
+                _step_all_wa = "https://wa.me/?text=" + quote(_step_all, safe="")
+                st.markdown("**🧭 Navigasi titik demi titik** — tiap merchant punya tautan navigasi sendiri")
+                if len(_step_all_wa) <= 3800:
+                    st.link_button("📲 Kirim Semua Rute via WhatsApp (titik demi titik)", _step_all_wa, width='stretch')
+                else:
+                    st.caption("ℹ️ Teks gabungan terlalu panjang untuk tombol WhatsApp langsung. Salin lewat tombol di bawah, "
+                               "atau kirim per rute dari bagian 🧭 di masing-masing rute.")
+                with st.popover("📋 Salin teks semua rute (titik demi titik)"):
+                    st.code(_step_all, language=None)
 
             _views = ["🛣️ Detail rute"] + (["🗺️ Peta semua rute"] if len(route_summaries) >= 2 else []) + ["📊 Ringkasan & perbandingan"]
             if st.session_state.get("_result_view") not in _views:
@@ -6459,6 +6500,14 @@ if st.session_state.page == "Routing":
                                     "pakai tombol di bawah: tiap tombol memulai navigasi dari **lokasi Anda saat ini** ke satu "
                                     "titik. Setelah tiba, tekan tombol titik berikutnya."
                                 )
+                                _step_text = build_stepwise_text(r)
+                                _step_wa = "https://wa.me/?text=" + quote(_step_text, safe="")
+                                if len(_step_wa) <= 3800:
+                                    st.link_button("📲 Kirim via WhatsApp (titik demi titik)", _step_wa, width='stretch')
+                                else:
+                                    st.caption("ℹ️ Teks terlalu panjang untuk tombol WhatsApp langsung. Salin teks di bawah, lalu tempel di WhatsApp.")
+                                st.caption("📋 Salin teks titik demi titik (ikon salin di pojok kanan atas kotak):")
+                                st.code(_step_text, language=None)
                                 for _, _nr in r["df"].iterrows():
                                     if r.get("has_start") and _nr.name == r["df"].index[0]:
                                         continue          # titik awal tetap bukan tujuan kunjungan
