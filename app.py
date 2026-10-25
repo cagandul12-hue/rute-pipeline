@@ -1856,6 +1856,65 @@ OPTIONAL_COLS = ("prioritas", "jam_buka", "jam_tutup", "alamat", "status")
 NORMALIZE_COLS = REQUIRED_COLS + OPTIONAL_COLS
 
 
+# ---- Impor data dari link Google Sheet --------------------------------------------------------------------
+SHEET_MAX_BYTES = 10 * 1024 * 1024
+_SHEET_RE = re.compile(r"^https?://docs\.google\.com/spreadsheets/d/(e/)?([A-Za-z0-9_-]{20,})")
+
+
+def parse_sheet_link(link):
+    """Link Google Sheet -> (id, gid_atau_None, diterbitkan_ke_web) atau None bila bukan link Google Sheet."""
+    m = _SHEET_RE.match((link or "").strip())
+    if not m:
+        return None
+    gid = re.search(r"[#&?]gid=(\d+)", link)
+    return m.group(2), (gid.group(1) if gid else None), bool(m.group(1))
+
+
+def fetch_google_sheet_csv(link, getter=None):
+    """Unduh satu tab Google Sheet sebagai CSV. Return (ok, bytes_atau_pesan_galat, nama_file).
+    URL unduhan dibuat sendiri dari ID yang sudah divalidasi (tidak pernah mengambil alamat sembarang dari pengguna)."""
+    parsed = parse_sheet_link(link)
+    if parsed is None:
+        return False, ("Itu bukan link Google Sheet. Buka sheet-nya lalu salin link dari address bar, bentuknya "
+                       "https://docs.google.com/spreadsheets/d/…/edit. (File Excel di Google Drive tidak didukung; "
+                       "unduh lalu upload, atau buka dengan Google Sheets.)"), ""
+    sid, gid, published = parsed
+    if published:
+        url = f"https://docs.google.com/spreadsheets/d/e/{sid}/pub?output=csv" + (f"&gid={gid}" if gid else "")
+    else:
+        url = f"https://docs.google.com/spreadsheets/d/{sid}/export?format=csv" + (f"&gid={gid}" if gid else "")
+    getter = getter or requests.get
+    try:
+        r = getter(url, timeout=(5, 20), stream=True, allow_redirects=True, headers={"User-Agent": "Mozilla/5.0 (routing-app)"})
+    except Exception as e:
+        return False, f"Tidak bisa terhubung ke Google Sheets ({type(e).__name__}). Coba lagi sebentar.", ""
+    host = (urllib.parse.urlparse(str(getattr(r, "url", url))).hostname or "").lower()
+    if not (host == "docs.google.com" or host.endswith(".googleusercontent.com")):
+        return False, ("Sheet ini tidak bisa dibaca tanpa login. Buka Sheet → Bagikan → Akses umum → "
+                       "**Siapa saja yang memiliki link** (Pelihat), lalu coba lagi."), ""
+    if r.status_code in (401, 403):
+        return False, "Sheet tidak dibagikan. Buka Sheet → Bagikan → **Siapa saja yang memiliki link** (Pelihat), lalu coba lagi.", ""
+    if r.status_code == 404:
+        return False, "Sheet tidak ditemukan. Periksa linknya (atau nomor tab #gid=…).", ""
+    if r.status_code != 200:
+        return False, f"Google Sheets menolak permintaan (HTTP {r.status_code}).", ""
+    ctype = (r.headers.get("Content-Type") or "").lower()
+    chunks, total = [], 0
+    for ch in r.iter_content(65536):
+        total += len(ch)
+        if total > SHEET_MAX_BYTES:
+            return False, f"Sheet terlalu besar (> {SHEET_MAX_BYTES // (1024 * 1024)} MB).", ""
+        chunks.append(ch)
+    data = b"".join(chunks)
+    head = data[:200].lstrip().lower()
+    if "html" in ctype or head.startswith(b"<!doctype") or head.startswith(b"<html"):
+        return False, ("Sheet belum bisa dibaca tanpa login. Buka Sheet → Bagikan → Akses umum → "
+                       "**Siapa saja yang memiliki link** (Pelihat), lalu coba lagi."), ""
+    if not data.strip():
+        return False, "Sheet (tab ini) kosong.", ""
+    return True, data, f"GoogleSheet-{sid[:6]}-{gid or 'tab1'}.csv"
+
+
 def read_table_file(name, data):
     """Baca file .xlsx atau .csv menjadi DataFrame.
 
@@ -5248,7 +5307,7 @@ if st.session_state.page == "Routing":
 
     section_header(
         "1️⃣", "Siapkan Data Merchant",
-        "Upload file Excel/CSV, pakai data dari Maps Extractor, atau gabungan keduanya",
+        "Upload file Excel/CSV, ambil dari link Google Sheet, pakai data dari Maps Extractor, atau gabungan semuanya",
     )
 
     new_files = st.file_uploader(
@@ -5263,6 +5322,33 @@ if st.session_state.page == "Routing":
             st.session_state.uploaded_store[nf.name] = nf.getvalue()
         st.session_state.uploader_nonce += 1
         st.rerun()
+
+    _sheet_flash = st.session_state.pop("_sheet_flash", None)
+    if _sheet_flash:
+        st.success(_sheet_flash)
+    with st.expander("🔗 Atau ambil data dari link Google Sheet", expanded=False):
+        st.caption(
+            "Isi tab Sheet dibaca seperti file CSV: kolom sama dengan file upload (merchant_name, latitude, longitude, dst.). "
+            "Sheet harus dibagikan sebagai **Siapa saja yang memiliki link → Pelihat**; artinya siapa pun yang tahu linknya "
+            "bisa membuka datanya, jadi jangan dipakai untuk data sensitif (unduh sebagai CSV lalu upload saja). "
+            "Untuk tab tertentu, buka tab itu lalu salin link (mengandung `#gid=…`). Ambil lagi dengan link yang sama untuk "
+            "memperbarui data."
+        )
+        _sheet_link = st.text_input(
+            "Link Google Sheet", key="sheet_link_input", placeholder="https://docs.google.com/spreadsheets/d/…/edit#gid=0",
+        )
+        if st.button("📥 Ambil data dari Sheet", key="sheet_fetch_btn", width='stretch'):
+            if not _sheet_link.strip():
+                st.error("Tempel link Google Sheet dulu.")
+            else:
+                with st.spinner("Mengambil data dari Google Sheets…"):
+                    _ok, _res, _fname = fetch_google_sheet_csv(_sheet_link)
+                if _ok:
+                    st.session_state.uploaded_store[_fname] = _res
+                    st.session_state._sheet_flash = f"✅ Data dari Google Sheet dimuat sebagai **{_fname}**."
+                    st.rerun()
+                else:
+                    st.error(_res)
 
 
     # Daftar file yang tersimpan (tetap ada setelah pindah halaman)
