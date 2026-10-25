@@ -1915,6 +1915,66 @@ def fetch_google_sheet_csv(link, getter=None):
     return True, data, f"GoogleSheet-{sid[:6]}-{gid or 'tab1'}.csv"
 
 
+SHEET_SYNC_SECONDS = 30      # jeda pengecekan otomatis
+
+
+def sheet_sync_start(ss, link, fname, data):
+    """Muat data Sheet ke daftar file dan mulai pantau perubahannya."""
+    ss.uploaded_store[fname] = data
+    ss.sheet_sync = {"link": link.strip(), "fname": fname, "hash": hashlib.sha256(data).hexdigest(), "on": True,
+                     "checked": None, "changed": None, "error": None, "pending": None}
+
+
+def _sheet_conflict(ss, fname):
+    """'edits' = ada edit tabel tersimpan pada baris Sheet ini (kuncinya berbasis nomor baris, bisa salah sasaran bila baris
+    bergeser); 'pending' = ada perubahan di editor tabel yang belum diterapkan; None = aman diperbarui."""
+    pre = fname + "#"
+    ed = ss.get("data_edits") or {}
+    if any(str(k).startswith(pre) for k in ed.get("deleted", [])) or any(str(k).startswith(pre) for k in ed.get("changed", {})):
+        return "edits"
+    stt = ss.get(f"data_editor_{ss.get('data_edit_nonce', 0)}")
+    if isinstance(stt, dict) and any(stt.get(k) for k in ("edited_rows", "added_rows", "deleted_rows")):
+        return "pending"
+    return None
+
+
+def sheet_sync_apply(ss, data, now, drop_edits=False):
+    sy = ss.sheet_sync
+    if drop_edits:
+        pre = sy["fname"] + "#"
+        ed = ss.data_edits
+        ed["deleted"] = [k for k in ed.get("deleted", []) if not str(k).startswith(pre)]
+        ed["changed"] = {k: v for k, v in ed.get("changed", {}).items() if not str(k).startswith(pre)}
+    ss.uploaded_store[sy["fname"]] = data
+    sy.update(hash=hashlib.sha256(data).hexdigest(), changed=now, pending=None, error=None)
+    ss.data_edit_nonce = ss.get("data_edit_nonce", 0) + 1       # editor tabel dimuat ulang dengan data baru
+
+
+def sheet_sync_check(ss, now, fetcher=None):
+    """Satu kali pengecekan. Return: 'off' | 'error' | 'same' | 'conflict' | 'applied'."""
+    sy = ss.get("sheet_sync")
+    if not sy or not sy.get("on"):
+        return "off"
+    if sy["fname"] not in ss.uploaded_store:      # file dihapus pengguna: berhenti memantau
+        ss.sheet_sync = None
+        return "off"
+    ok, data, _ = (fetcher or fetch_google_sheet_csv)(sy["link"])
+    sy["checked"] = now
+    if not ok:
+        sy["error"] = data
+        return "error"
+    sy["error"] = None
+    if hashlib.sha256(data).hexdigest() == sy["hash"]:
+        sy["pending"] = None
+        return "same"
+    kind = _sheet_conflict(ss, sy["fname"])
+    if kind:
+        sy["pending"] = (data, kind)
+        return "conflict"
+    sheet_sync_apply(ss, data, now)
+    return "applied"
+
+
 def read_table_file(name, data):
     """Baca file .xlsx atau .csv menjadi DataFrame.
 
@@ -5330,6 +5390,47 @@ if st.session_state.page == "Routing":
                   "memperbarui data."),
         )
         _sheet_go = st.button("📥 Ambil data dari Sheet", key="sheet_fetch_btn", width='stretch')
+        _sy = st.session_state.get("sheet_sync")
+        if _sy:
+            def _sync_toggle():
+                if st.session_state.get("sheet_sync"):
+                    st.session_state.sheet_sync["on"] = bool(st.session_state.get("sheet_sync_toggle"))
+            st.toggle(
+                f"🔄 Perbarui otomatis (tiap {SHEET_SYNC_SECONDS} detik)", value=bool(_sy["on"]), key="sheet_sync_toggle",
+                on_change=_sync_toggle,
+                help="Selama halaman ini terbuka, aplikasi mengecek Sheet secara berkala dan memuat perubahannya ke tabel "
+                     "Lihat & Edit Data Awal. Google kadang menunda beberapa detik sampai menit sebelum perubahan terbaca. "
+                     "Pembaruan ditahan kalau Anda punya edit tabel pada data Sheet ini, supaya edit tidak menimpa atau salah sasaran.",
+            )
+
+            def _sheet_sync_tick():
+                ss = st.session_state
+                _stt = sheet_sync_check(ss, time.time())
+                if _stt == "applied":
+                    st.toast("🔄 Data dari Google Sheet diperbarui")
+                    st.rerun(scope="app")
+                sy = ss.get("sheet_sync")
+                if not sy:
+                    return
+                _utc = datetime.timezone.utc
+                if sy.get("checked"):
+                    _txt = f"Dicek {_ago(datetime.datetime.fromtimestamp(sy['checked'], _utc).isoformat())}"
+                    if sy.get("changed"):
+                        _txt += f" · terakhir berubah {_ago(datetime.datetime.fromtimestamp(sy['changed'], _utc).isoformat())}"
+                    st.caption("🔄 " + _txt)
+                if sy.get("error"):
+                    st.caption(f"⚠️ Gagal memeriksa Sheet: {sy['error']} Akan dicoba lagi.")
+                pend = sy.get("pending")
+                if pend:
+                    if pend[1] == "edits":
+                        st.warning("Sheet berubah, tetapi Anda punya edit tabel pada data Sheet ini, jadi belum dimuat.")
+                        if st.button("Terapkan data Sheet (edit tabel pada Sheet ini dihapus)", key="sheet_apply_force", width='stretch'):
+                            sheet_sync_apply(ss, pend[0], time.time(), drop_edits=True)
+                            st.rerun(scope="app")
+                    else:
+                        st.info("Sheet berubah. Terapkan atau batalkan perubahan di tabel dulu; data Sheet dimuat otomatis setelahnya.")
+
+            st.fragment(run_every=SHEET_SYNC_SECONDS if _sy["on"] else None)(_sheet_sync_tick)()
     if new_files:
         for nf in new_files:
             st.session_state.uploaded_store[nf.name] = nf.getvalue()
@@ -5346,7 +5447,8 @@ if st.session_state.page == "Routing":
             with st.spinner("Mengambil data dari Google Sheets…"):
                 _ok, _res, _fname = fetch_google_sheet_csv(_sheet_link)
             if _ok:
-                st.session_state.uploaded_store[_fname] = _res
+                sheet_sync_start(st.session_state, _sheet_link, _fname, _res)
+                st.session_state.data_edit_nonce = st.session_state.get("data_edit_nonce", 0) + 1
                 st.session_state._sheet_flash = f"✅ Data dari Google Sheet dimuat sebagai **{_fname}**."
                 st.rerun()
             else:
