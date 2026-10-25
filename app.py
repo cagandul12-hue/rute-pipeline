@@ -5310,13 +5310,26 @@ if st.session_state.page == "Routing":
         "Upload file Excel/CSV, ambil dari link Google Sheet, pakai data dari Maps Extractor, atau gabungan semuanya",
     )
 
-    new_files = st.file_uploader(
-        "📂 Upload Data (Excel / CSV)",
-        type=["xlsx", "csv"],
-        accept_multiple_files=True,
-        key=f"uploader_{st.session_state.uploader_nonce}",
-        help="Format .xlsx atau .csv. Kolom wajib: merchant_name, latitude, longitude (koma desimal seperti -7,56 juga dikenali). latitude/longitude boleh dikosongkan — akan dicari otomatis dari nama merchant (tambah kolom alamat supaya lebih akurat). Kolom opsional: status (prospek / sedang pendekatan / sudah akuisisi / belum tertarik — dua yang terakhir tidak diikutkan ke rute; kosong = prospek), prioritas (ya/tidak — dikunjungi lebih dulu) serta jam_buka & jam_tutup (HH:MM — dicek terhadap perkiraan jam tiba); dua kolom terakhir ini hanya dipakai di Mode Pro. Bisa pilih beberapa file sekaligus — nanti otomatis digabung. File yang sudah diupload tetap tersimpan walau kamu pindah ke Maps Extractor.",
-    )
+    _c_up, _c_sheet = st.columns(2, gap="medium")   # di HP otomatis tersusun ke bawah
+    with _c_up:
+        new_files = st.file_uploader(
+            "📂 Upload Data (Excel / CSV)",
+            type=["xlsx", "csv"],
+            accept_multiple_files=True,
+            key=f"uploader_{st.session_state.uploader_nonce}",
+            help="Format .xlsx atau .csv. Kolom wajib: merchant_name, latitude, longitude (koma desimal seperti -7,56 juga dikenali). latitude/longitude boleh dikosongkan — akan dicari otomatis dari nama merchant (tambah kolom alamat supaya lebih akurat). Kolom opsional: status (prospek / sedang pendekatan / sudah akuisisi / belum tertarik — dua yang terakhir tidak diikutkan ke rute; kosong = prospek), prioritas (ya/tidak — dikunjungi lebih dulu) serta jam_buka & jam_tutup (HH:MM — dicek terhadap perkiraan jam tiba); dua kolom terakhir ini hanya dipakai di Mode Pro. Bisa pilih beberapa file sekaligus — nanti otomatis digabung. File yang sudah diupload tetap tersimpan walau kamu pindah ke Maps Extractor.",
+        )
+    with _c_sheet:
+        _sheet_link = st.text_input(
+            "🔗 Atau ambil dari link Google Sheet", key="sheet_link_input",
+            placeholder="https://docs.google.com/spreadsheets/d/…/edit#gid=0",
+            help=("Isi tab Sheet dibaca seperti file CSV: kolom sama dengan file upload (merchant_name, latitude, longitude, dst.). "
+                  "Sheet harus dibagikan sebagai **Siapa saja yang memiliki link → Pelihat**; artinya siapa pun yang tahu linknya "
+                  "bisa membuka datanya, jadi jangan dipakai untuk data sensitif (unduh sebagai CSV lalu upload saja). "
+                  "Untuk tab tertentu, buka tab itu lalu salin link (mengandung #gid=…). Ambil lagi dengan link yang sama untuk "
+                  "memperbarui data."),
+        )
+        _sheet_go = st.button("📥 Ambil data dari Sheet", key="sheet_fetch_btn", width='stretch')
     if new_files:
         for nf in new_files:
             st.session_state.uploaded_store[nf.name] = nf.getvalue()
@@ -5326,29 +5339,18 @@ if st.session_state.page == "Routing":
     _sheet_flash = st.session_state.pop("_sheet_flash", None)
     if _sheet_flash:
         st.success(_sheet_flash)
-    with st.expander("🔗 Atau ambil data dari link Google Sheet", expanded=False):
-        st.caption(
-            "Isi tab Sheet dibaca seperti file CSV: kolom sama dengan file upload (merchant_name, latitude, longitude, dst.). "
-            "Sheet harus dibagikan sebagai **Siapa saja yang memiliki link → Pelihat**; artinya siapa pun yang tahu linknya "
-            "bisa membuka datanya, jadi jangan dipakai untuk data sensitif (unduh sebagai CSV lalu upload saja). "
-            "Untuk tab tertentu, buka tab itu lalu salin link (mengandung `#gid=…`). Ambil lagi dengan link yang sama untuk "
-            "memperbarui data."
-        )
-        _sheet_link = st.text_input(
-            "Link Google Sheet", key="sheet_link_input", placeholder="https://docs.google.com/spreadsheets/d/…/edit#gid=0",
-        )
-        if st.button("📥 Ambil data dari Sheet", key="sheet_fetch_btn", width='stretch'):
-            if not _sheet_link.strip():
-                st.error("Tempel link Google Sheet dulu.")
+    if _sheet_go:
+        if not _sheet_link.strip():
+            st.error("Tempel link Google Sheet dulu.")
+        else:
+            with st.spinner("Mengambil data dari Google Sheets…"):
+                _ok, _res, _fname = fetch_google_sheet_csv(_sheet_link)
+            if _ok:
+                st.session_state.uploaded_store[_fname] = _res
+                st.session_state._sheet_flash = f"✅ Data dari Google Sheet dimuat sebagai **{_fname}**."
+                st.rerun()
             else:
-                with st.spinner("Mengambil data dari Google Sheets…"):
-                    _ok, _res, _fname = fetch_google_sheet_csv(_sheet_link)
-                if _ok:
-                    st.session_state.uploaded_store[_fname] = _res
-                    st.session_state._sheet_flash = f"✅ Data dari Google Sheet dimuat sebagai **{_fname}**."
-                    st.rerun()
-                else:
-                    st.error(_res)
+                st.error(_res)
 
 
     # Daftar file yang tersimpan (tetap ada setelah pindah halaman)
