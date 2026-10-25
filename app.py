@@ -3543,6 +3543,25 @@ input, textarea, [data-baseweb="select"] {font-size: 16px !important;}
     min-width: calc(50% - 0.3rem) !important;
 }
 
+/* ruang bawah aman untuk HP dengan bilah gestur / notch */
+.block-container {padding-bottom: calc(4rem + env(safe-area-inset-bottom, 0px)) !important;}
+
+/* Mode Lapangan: tombol aksi tetap berdampingan, besar, mudah ditekan satu jempol */
+[class*="st-key-fmrow"] [data-testid="stHorizontalBlock"] {
+    flex-direction: row !important; flex-wrap: nowrap !important; gap: 0.5rem !important;
+}
+[class*="st-key-fmrow"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"],
+[class*="st-key-fmrow"] [data-testid="stHorizontalBlock"] > [data-testid="column"] {
+    width: auto !important; flex: 1 1 0 !important; min-width: 0 !important;
+}
+[class*="st-key-fmrow_main"] .stButton > button {min-height: 3.8rem; font-size: 1.15rem !important; font-weight: 700;}
+[class*="st-key-fmrow_aux"] .stButton > button {min-height: 2.6rem; font-size: 0.85rem !important;}
+[class*="st-key-fm_nav"] .stLinkButton > a {min-height: 3.9rem; font-size: 1.2rem !important; font-weight: 700;}
+
+/* pilihan tampilan hasil: satu baris yang bisa digeser (tidak patah ke dua baris) */
+.st-key-resultview [role="radiogroup"] {flex-wrap: nowrap !important; overflow-x: auto; gap: 0.5rem 0.9rem !important; padding-bottom: 4px;}
+.st-key-resultview [role="radiogroup"] label {white-space: nowrap;}
+
 .stTabs [role="tablist"] {overflow-x: auto;}
 .stTabs [data-baseweb="tab"] {padding: 0.5rem 0.7rem;}
 div[data-testid="stExpander"] {margin-bottom: 10px; border-radius: 12px !important;}
@@ -4247,17 +4266,34 @@ def _persist_run_test():
         ss.persist_diag = ("error", f"tidak bisa terhubung ({type(e).__name__}: {str(e)[:120]})")
 
 
-def render_persist_status():
+def persist_caption_text():
+    """Baris status simpan otomatis ('' bila fitur mati atau belum ada status)."""
+    ss = st.session_state
+    if not persist_enabled():
+        return ""
+    st_, val = ss.get("persist_status", (None, None))
+    if st_ == "saved":
+        return f"☁️ Tersimpan otomatis · {_ago(datetime.datetime.fromtimestamp(val, datetime.timezone.utc).isoformat())}"
+    if st_ == "toobig":
+        return f"ℹ️ Sesi terlalu besar (> {max(1, round(_persist_max_bytes() / (1024 * 1024)))} MB) untuk disimpan otomatis."
+    if st_ == "error":
+        return f"⚠️ Simpan otomatis tertunda: {val}. Akan dicoba lagi."
+    return ""
+
+
+def render_persist_caption(slot):
+    """Isi/perbarui slot status. Dipanggil SETELAH autosave_session (awal & akhir skrip), jadi status selalu yang terbaru."""
+    txt = persist_caption_text()
+    if txt:
+        slot.caption(txt)
+    else:
+        slot.empty()
+
+
+def render_persist_diag():
     ss = st.session_state
     if not persist_enabled():
         return
-    st_, val = ss.get("persist_status", (None, None))
-    if st_ == "saved":
-        st.caption(f"☁️ Tersimpan otomatis · {_ago(datetime.datetime.fromtimestamp(val, datetime.timezone.utc).isoformat())}")
-    elif st_ == "toobig":
-        st.caption(f"ℹ️ Sesi terlalu besar (> {max(1, round(_persist_max_bytes() / (1024 * 1024)))} MB) untuk disimpan otomatis.")
-    elif st_ == "error":
-        st.caption(f"⚠️ Simpan otomatis tertunda: {val}. Akan dicoba lagi.")
     with st.expander("🔧 Diagnosa simpan otomatis", expanded=False):
         sid = ss.get("persist_sid") or ""
         st.caption("Cookie ID sesi: " + ("✅ terbaca dari browser saat halaman dibuka" if ss.get("persist_cookie_seen")
@@ -4386,6 +4422,154 @@ def _step_next(key, n):
     """Tombol "Titik berikutnya": geser pilihan titik navigasi satu langkah (maksimal sampai titik terakhir)."""
     ss = st.session_state
     ss[key] = min(int(ss.get(key, 0)) + 1, max(0, n - 1))
+
+
+# ---- Mode Lapangan: satu titik per layar untuk petugas ------------------------------------------------------
+FIELD_ICONS = {"done": "✅", "skip": "⏭️"}
+
+
+def field_stops(r):
+    """Titik kunjungan sebuah rute berurutan (tanpa titik awal tetap). Tiap titik punya 'sig' unik (tahan urutan manual)."""
+    df = r["df"]
+    seen, out = {}, []
+    for _, row in df.iloc[1 if r.get("has_start") else 0:].iterrows():
+        base = f"{r['route_id']}|{_row_sig(row['merchant_name'], row['latitude'], row['longitude'])}"
+        k = seen.get(base, 0)
+        seen[base] = k + 1
+        out.append({
+            "sig": f"{base}#{k}", "seq": int(row["sequence"]), "name": str(row["merchant_name"]),
+            "lat": float(row["latitude"]), "lon": float(row["longitude"]),
+            "eta": str(row["jam_tiba"]) if "jam_tiba" in df.columns and row.get("jam_tiba") else "",
+            "note": str(row["jadwal_status"]) if row.get("jadwal_status") else "",
+            "prio": bool(row.get("prioritas_flag", False)),
+        })
+    return out
+
+
+def field_counts(stops, status):
+    done = sum(1 for x in stops if status.get(x["sig"]) == "done")
+    skip = sum(1 for x in stops if status.get(x["sig"]) == "skip")
+    return done, skip, len(stops) - done - skip
+
+
+def field_current(stops, status, focus_sig=None):
+    """Titik yang sedang dituju: titik pilihan 'lompat' bila masih tersisa, selain itu yang pertama belum ditandai."""
+    pending = [x for x in stops if x["sig"] not in status]
+    if focus_sig:
+        for x in pending:
+            if x["sig"] == focus_sig:
+                return x
+    return pending[0] if pending else None
+
+
+def _field_state(result):
+    return result.setdefault("field", {"status": {}, "log": [], "focus": {}})
+
+
+def _field_mark(result, rid, sig, kind):
+    fs = _field_state(result)
+    fs["status"][sig] = kind
+    fs["log"].append(sig)
+    fs["focus"].pop(rid, None)
+
+
+def _field_undo(result, rid):
+    fs = _field_state(result)
+    if fs["log"]:
+        sig = fs["log"].pop()
+        fs["status"].pop(sig, None)
+        fs["focus"][rid] = sig          # kembali ke titik yang baru dibatalkan
+
+
+def _field_reset(result, sigs):
+    fs = _field_state(result)
+    for sg in sigs:
+        fs["status"].pop(sg, None)
+    fs["log"] = [x for x in fs["log"] if x in fs["status"]]
+    fs["focus"].clear()
+
+
+def _field_jump(result, rid, widget_key):
+    sig = st.session_state.get(widget_key)
+    if sig:
+        _field_state(result)["focus"][rid] = sig
+
+
+def render_field_mode(route_summaries, result):
+    """Tampilan satu-titik-per-layar: kartu titik sekarang, tombol navigasi besar, Selesai / Lewati, progres."""
+    st.caption("📱 Tampilan sederhana untuk di lapangan: satu titik per layar. Penanda selesai/lewati tersimpan selama hasil rute ini "
+               "masih ada (hilang saat rute dibuat ulang atau halaman di-refresh).")
+    if len(route_summaries) > 1:
+        rid = st.selectbox(
+            "Rute", options=[x["route_id"] for x in route_summaries], key="_field_route",
+            format_func=lambda i: next(
+                f"Rute {x['route_id'] + 1}" + (f" — {x['driver']}" if x.get("driver") else "")
+                + (f" · {fmt_day_label(datetime.date.fromisoformat(x['tanggal']))}" if x.get("tanggal") else "")
+                for x in route_summaries if x["route_id"] == i),
+        )
+        r = next(x for x in route_summaries if x["route_id"] == rid)
+    else:
+        r = route_summaries[0]
+        rid = r["route_id"]
+    stops = field_stops(r)
+    if not stops:
+        st.info("Rute ini tidak punya titik kunjungan.")
+        return
+    fs = _field_state(result)
+    status = fs["status"]
+    done, skip, left = field_counts(stops, status)
+    st.progress((done + skip) / len(stops))
+    st.caption(f"✅ {done} selesai · ⏭️ {skip} dilewati · 🕓 {left} tersisa dari {len(stops)} titik")
+    cur = field_current(stops, status, fs["focus"].get(rid))
+    if cur is None:
+        st.success("🎉 Semua titik pada rute ini sudah ditandai.")
+        if r.get("round_trip"):
+            st.caption("↩️ Rute ini pulang-pergi: jangan lupa kembali ke titik awal.")
+    else:
+        pos = next(i for i, x in enumerate(stops) if x["sig"] == cur["sig"]) + 1
+        with st.container(border=True):
+            st.markdown(f"<div style='font-size:.9rem;opacity:.8'>Titik {pos} dari {len(stops)} · urutan #{cur['seq']}</div>",
+                        unsafe_allow_html=True)
+            st.markdown(
+                f"<div style='font-size:1.7rem;font-weight:800;line-height:1.25;margin:2px 0 6px'>"
+                f"{'⭐ ' if cur['prio'] else ''}{html_lib.escape(cur['name'])}</div>",
+                unsafe_allow_html=True,
+            )
+            meta = []
+            if cur["eta"]:
+                meta.append(f"⏰ Perkiraan tiba {html_lib.escape(cur['eta'])}")
+            if cur["note"] and cur["note"] != "✅":
+                meta.append(html_lib.escape(cur["note"]))
+            if meta:
+                st.markdown("<div style='font-size:1rem;margin-bottom:6px'>" + " · ".join(meta) + "</div>", unsafe_allow_html=True)
+            with st.container(key=f"fm_nav_{rid}"):
+                st.link_button("🧭 Navigasi ke titik ini", stop_nav_url(cur["lat"], cur["lon"]), type="primary", width='stretch')
+            with st.container(key=f"fmrow_main_{rid}"):
+                b1, b2 = st.columns(2)
+                b1.button("✅ Selesai", key=f"_fm_done_{rid}", width='stretch', on_click=_field_mark, args=(result, rid, cur["sig"], "done"))
+                b2.button("⏭️ Lewati", key=f"_fm_skip_{rid}", width='stretch', on_click=_field_mark, args=(result, rid, cur["sig"], "skip"))
+        nxt = next((x for x in stops if x["sig"] not in status and x["sig"] != cur["sig"]), None)
+        if nxt:
+            st.caption(f"Berikutnya: **{nxt['name']}**" + (f" · ±{nxt['eta']}" if nxt["eta"] else ""))
+    with st.container(key=f"fmrow_aux_{rid}"):
+        c1, c2 = st.columns(2)
+        c1.button("↩️ Urungkan", key=f"_fm_undo_{rid}", width='stretch', disabled=not fs["log"],
+                  on_click=_field_undo, args=(result, rid))
+        c2.button("🔄 Mulai ulang", key=f"_fm_reset_{rid}", width='stretch', disabled=not status,
+                  on_click=_field_reset, args=(result, [x["sig"] for x in stops]))
+    with st.expander("📋 Daftar titik & lompat ke titik lain"):
+        pend = [x for x in stops if x["sig"] not in status]
+        if pend:
+            st.selectbox(
+                "Lompat ke titik (yang belum ditandai)", options=[x["sig"] for x in pend], key=f"_fm_jump_{rid}",
+                format_func=lambda sg, _p=pend: next(f"{x['seq']}. {x['name']}" for x in _p if x["sig"] == sg),
+                index=None, placeholder="Pilih titik…", on_change=_field_jump, args=(result, rid, f"_fm_jump_{rid}"),
+            )
+        with st.container(height=260):
+            for x in stops:
+                icon = FIELD_ICONS.get(status.get(x["sig"]), "🕓")
+                mark = "👉 " if cur and x["sig"] == cur["sig"] else ""
+                st.markdown(f"{mark}{icon} {x['seq']}. {x['name']}" + (f" · {x['eta']}" if x["eta"] else ""))
 
 
 def _map_set_status(row_key):
@@ -4999,6 +5183,7 @@ def render_mode_desc():
 if IS_MOBILE:
     # Di HP sidebar disembunyikan (susah dibuka) — navigasi & mode pindah ke atas halaman.
     render_user_bar("top", compact=True)
+    _persist_slot = st.empty()          # status simpan otomatis (diisi setelah autosave)
     with st.container(key="navrow"):
         render_nav("top", horizontal=True)
     st.caption("Mode fitur")
@@ -5010,6 +5195,7 @@ if IS_MOBILE:
     with st.expander("⚙️ Tampilan layar", expanded=False):
         with st.container(key="moderow"):
             render_mode_toggle("top")
+    render_persist_diag()
 else:
     with st.sidebar:
         st.markdown(
@@ -5035,12 +5221,14 @@ else:
             render_session_panel("side")
         with st.expander("⚙️ Tampilan layar", expanded=False):
             render_mode_toggle("side")
-        render_persist_status()
+        _persist_slot = st.empty()      # status simpan otomatis (diisi setelah autosave)
+        render_persist_diag()
         render_user_bar("side")
 
 
 init_persistence()
 autosave_session()      # keadaan akhir interaksi sebelumnya (juga bila run sebelumnya berhenti lebih awal lewat st.stop)
+render_persist_caption(_persist_slot)
 render_restore_offer()
 _notice_slot = st.empty()
 render_unsaved_notice(_notice_slot, IS_PRO)
@@ -6324,10 +6512,11 @@ if st.session_state.page == "Routing":
                 with st.popover("📋 Salin teks semua rute (titik demi titik)"):
                     st.code(_step_all, language=None)
 
-            _views = ["🛣️ Detail rute"] + (["🗺️ Peta semua rute"] if len(route_summaries) >= 2 else []) + ["📊 Ringkasan & perbandingan"]
+            _views = ["🛣️ Detail rute"] + (["🗺️ Peta semua rute"] if len(route_summaries) >= 2 else []) + ["📱 Mode Lapangan", "📊 Ringkasan & perbandingan"]
             if st.session_state.get("_result_view") not in _views:
                 st.session_state["_result_view"] = _views[0]
-            _view = st.radio("Tampilan hasil", _views, key="_result_view", horizontal=True, label_visibility="collapsed")
+            with st.container(key="resultview"):
+                _view = st.radio("Tampilan hasil", _views, key="_result_view", horizontal=True, label_visibility="collapsed")
             if _view == _views[0]:
                 _pf = "Semua"
                 if any(r.get("tanggal") for r in route_summaries):
@@ -6579,6 +6768,9 @@ if st.session_state.page == "Routing":
                                 polyline_coords.append(polyline_coords[0])
                             folium.PolyLine(polyline_coords, weight=4, color=color).add_to(fmap)
                             st_folium(fmap, width=None, height=MAP_H, key=f"map_{route_id}", returned_objects=[])
+
+            elif _view.startswith("📱"):
+                render_field_mode(route_summaries, result)
 
             elif _view.startswith("🗺️"):
                 st_folium(
@@ -6890,5 +7082,6 @@ elif st.session_state.page == "Extract":
 
 
 autosave_session()
+render_persist_caption(_persist_slot)         # status simpan otomatis terbaru (setelah autosave di akhir run)
 render_unsaved_notice(_notice_slot, IS_PRO)   # hitung ulang: hasil/edit yang baru dibuat di run ini
 render_footer()
