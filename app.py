@@ -1921,6 +1921,7 @@ SHEET_SYNC_SECONDS = 30      # jeda pengecekan otomatis
 def sheet_sync_start(ss, link, fname, data):
     """Muat data Sheet ke daftar file dan mulai pantau perubahannya."""
     ss.uploaded_store[fname] = data
+    ss.sheet_link_saved = link.strip()
     ss.sheet_sync = {"link": link.strip(), "fname": fname, "hash": hashlib.sha256(data).hexdigest(), "on": True,
                      "checked": None, "changed": None, "error": None, "pending": None}
 
@@ -3504,6 +3505,8 @@ if "use_extracted_flag" not in st.session_state:
     st.session_state.use_extracted_flag = False
 if "starting_link_saved" not in st.session_state:
     st.session_state.starting_link_saved = ""
+if "sheet_link_saved" not in st.session_state:
+    st.session_state.sheet_link_saved = ""     # link Google Sheet terakhir yang berhasil diambil (ikut tersimpan di sesi)
 if "start_mode_saved" not in st.session_state:
     st.session_state.start_mode_saved = "manual"   # "manual" = tentukan sendiri, "mylocation" = lokasi pengguna di Google Maps
 if "multi_depot_rows" not in st.session_state:
@@ -4815,6 +4818,8 @@ def _session_payload(ss, with_files=True):
             "use_extracted_flag": bool(ss.use_extracted_flag),
             "starting_link_saved": ss.starting_link_saved,
             "start_mode_saved": ss.start_mode_saved,
+            "sheet": ({"link": ss.sheet_sync["link"], "fname": ss.sheet_sync["fname"], "on": bool(ss.sheet_sync["on"])}
+                      if ss.get("sheet_sync") else {"link": ss.get("sheet_link_saved", ""), "fname": "", "on": False}),
             "round_trip_flag": bool(ss.round_trip_flag),
             "dedupe_flag": bool(ss.dedupe_flag),
             "split_mode_flag": ss.split_mode_flag,
@@ -4887,6 +4892,10 @@ def load_session_bytes(raw):
             updates[key] = cfg[key]
     if cfg.get("start_mode_saved") in ("manual", "mylocation"):
         updates["start_mode_saved"] = cfg["start_mode_saved"]
+    _sh = cfg.get("sheet") if isinstance(cfg.get("sheet"), dict) else {}
+    _sh_link = _sh.get("link") if isinstance(_sh.get("link"), str) else ""
+    _sh_link = _sh_link.strip()[:500] if parse_sheet_link(_sh_link) else ""
+    updates["sheet_link_saved"] = _sh_link
     if isinstance(cfg.get("starting_link_saved"), str):
         updates["starting_link_saved"] = cfg["starting_link_saved"][:2000]
     if cfg.get("split_mode_flag") in (SPLIT_AUTO, SPLIT_FULL):
@@ -4955,6 +4964,11 @@ def load_session_bytes(raw):
     ss.driver_names = driver_names
     for k, v in updates.items():
         ss[k] = v
+    ss.sheet_sync = None
+    _sh_fn = os.path.basename(str(_sh.get("fname") or ""))
+    if _sh_link and _sh_fn in files:      # lanjutkan pemantauan Sheet untuk file hasil Sheet
+        sheet_sync_start(ss, _sh_link, _sh_fn, files[_sh_fn])
+        ss.sheet_sync["on"] = bool(_sh.get("on"))
     ss.widget_nonce += 1  # kunci widget baru -> browser membuat widget baru yang langsung memakai nilai terbaru
     _set_depot_rows(depot_rows)
     ss.data_edits = clean_data_edits(data.get("data_edits"))
@@ -5381,7 +5395,8 @@ if st.session_state.page == "Routing":
         )
     with _c_sheet:
         _sheet_link = st.text_input(
-            "🔗 Atau ambil dari link Google Sheet", key="sheet_link_input",
+            "🔗 Atau ambil dari link Google Sheet", key=f"sheet_link_input_{st.session_state.widget_nonce}",
+            value=st.session_state.sheet_link_saved,
             placeholder="https://docs.google.com/spreadsheets/d/…/edit#gid=0",
             help=("Isi tab Sheet dibaca seperti file CSV: kolom sama dengan file upload (merchant_name, latitude, longitude, dst.). "
                   "Sheet harus dibagikan sebagai **Siapa saja yang memiliki link → Pelihat**; artinya siapa pun yang tahu linknya "
@@ -5394,9 +5409,9 @@ if st.session_state.page == "Routing":
         if _sy:
             def _sync_toggle():
                 if st.session_state.get("sheet_sync"):
-                    st.session_state.sheet_sync["on"] = bool(st.session_state.get("sheet_sync_toggle"))
+                    st.session_state.sheet_sync["on"] = bool(st.session_state.get(f"sheet_sync_toggle_{st.session_state.widget_nonce}"))
             st.toggle(
-                f"🔄 Perbarui otomatis (tiap {SHEET_SYNC_SECONDS} detik)", value=bool(_sy["on"]), key="sheet_sync_toggle",
+                f"🔄 Perbarui otomatis (tiap {SHEET_SYNC_SECONDS} detik)", value=bool(_sy["on"]), key=f"sheet_sync_toggle_{st.session_state.widget_nonce}",
                 on_change=_sync_toggle,
                 help="Selama halaman ini terbuka, aplikasi mengecek Sheet secara berkala dan memuat perubahannya ke tabel "
                      "Lihat & Edit Data Awal. Google kadang menunda beberapa detik sampai menit sebelum perubahan terbaca. "
