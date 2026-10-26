@@ -5532,7 +5532,7 @@ def render_nav(prefix, horizontal=False):
     pages = [
         ("Routing", "🛣️ Routing" if horizontal else "🛣️  Routing Optimizer", "routing"),
         ("Extract", "📍 Extractor" if horizontal else "📍  Maps Extractor", "extract"),
-        ("Kobo", "📋 Kunjungan" if horizontal else "📋  Kunjungan (Kobo)", "kobo"),
+        ("Kobo", "📋 Survey" if horizontal else "📋  Survey Form", "kobo"),
     ]
     holders = st.columns(len(pages)) if horizontal else [st.container() for _ in pages]
     clicked = None
@@ -5744,7 +5744,8 @@ def render_kobo_page():
                 "formulir KoboCollect dibuat dari data itu (termasuk edit tabelnya).")
     else:
         st.caption(f"Data yang dipakai: {len(df)} baris dari halaman Routing Optimizer (setelah edit tabel).")
-        with st.expander("📱 Buat formulir KoboCollect dari data ini (XLSForm)", expanded=False):
+        with st.container(border=True):
+            st.markdown("#### 📱 Buat formulir KoboCollect dari data ini (XLSForm)")
             st.caption(
                 "Membuat file formulir untuk KoboToolbox dari data di atas (setelah edit tabel). Petugas memilih **nama merchant** dari daftar; "
                 "ID merchant tersimpan otomatis di balik pilihan itu, tidak perlu diketik. Hasil kunjungan: sudah akuisisi, penjadwalan ulang, "
@@ -5787,7 +5788,8 @@ def render_kobo_page():
                            "dan **Redeploy** (atau unggah sebagai versi baru).")
 
     _kcfg = kobo_config()
-    with st.expander("📋 Hasil kunjungan (KoboToolbox)", expanded=False):
+    with st.container(border=True):
+        st.markdown("#### 📋 Hasil kunjungan (KoboToolbox)")
         if not _kcfg:
             st.caption("Belum diatur. Isi KOBO_TOKEN dan KOBO_ASSET_UID (dan KOBO_SERVER bila bukan server global) di secrets; "
                        "lihat SETUP_KOBO.md bagian API.")
@@ -7558,7 +7560,7 @@ if st.session_state.page == "Routing":
 # ================================================================
 elif st.session_state.page == "Kobo":
     render_hero(
-        "Kunjungan lapangan", "Kobo", "Kunjungan",
+        "Kunjungan lapangan", "Survey", "Form",
         "Buat formulir KoboCollect dari data merchant, lalu ambil hasil kunjungan petugas langsung dari KoboToolbox.",
     )
     render_kobo_page()
