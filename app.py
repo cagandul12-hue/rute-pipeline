@@ -2053,7 +2053,7 @@ KOBO_MAX_ROWS = 20000
 _KOBO_SERVER_RE = re.compile(r"^https://[a-z0-9\-]+\.kobotoolbox\.org$")
 _KOBO_UID_RE = re.compile(r"^[A-Za-z0-9]{10,40}$")
 KOBO_STATUS_MAP = {"prospek": "prospek", "sedang_pendekatan": "sedang pendekatan",
-                   "sudah_akuisisi": "sudah akuisisi", "belum_tertarik": "belum tertarik"}
+                   "sudah_akuisisi": "sudah akuisisi", "belum_tertarik": "belum tertarik", "tidak_ditemukan": "tidak ditemukan"}
 
 
 KOBO_HASIL_CHOICES = [
@@ -2064,8 +2064,9 @@ KOBO_HASIL_CHOICES = [
     ("belum_tertarik", "Belum tertarik"),
     ("sudah_memiliki_produk", "Sudah memiliki produk"),
 ]
-# Hasil kunjungan -> status di aplikasi. 'merchant_tidak_ditemukan' sengaja tidak mengubah status.
+# Hasil kunjungan -> status di aplikasi. 'merchant_tidak_ditemukan' -> "tidak ditemukan" (tidak dirutekan lagi).
 KOBO_HASIL_STATUS = {"sudah_akuisisi": "sudah akuisisi", "belum_tertarik": "belum tertarik",
+                     "merchant_tidak_ditemukan": "tidak ditemukan",
                      "sudah_memiliki_produk": "belum tertarik",
                      "penjadwalan_ulang": "sedang pendekatan", "belum_bertemu_pic": "sedang pendekatan"}
 
@@ -2220,6 +2221,7 @@ def build_xlsform(df, title="Kunjungan Merchant", filter_by_petugas=True, includ
         (("select_one petugas" if petugas_vals else "text"), "petugas", "Nama petugas", "yes", "", "minimal" if petugas_vals else ""),
         ("select_one merchant", "merchant_id", "Nama merchant", "yes", "petugas=${petugas} or petugas=''" if filtered else "", "autocomplete"),
         ("select_one hasil", "hasil_kunjungan", "Hasil kunjungan", "yes", "", "minimal"),
+        ("geopoint", "lokasi_kunjungan", "Lokasi kunjungan (ambil sebelum foto)", "yes", "", ""),
         ("image", "foto_kunjungan", "Foto kunjungan", "yes", "", ""),
     ]
     choices_h = ["list_name", "name", "label", "petugas"]
@@ -2544,14 +2546,15 @@ STATUS_PROSPEK = "prospek"
 STATUS_PENDEKATAN = "sedang pendekatan"
 STATUS_AKUISISI = "sudah akuisisi"
 STATUS_TIDAK = "belum tertarik"
-STATUS_OPTIONS = [STATUS_PROSPEK, STATUS_PENDEKATAN, STATUS_AKUISISI, STATUS_TIDAK]
-# Merchant dengan status ini TIDAK dimasukkan ke rute (sudah dikuasai / tidak berminat).
-STATUS_EXCLUDED = (STATUS_AKUISISI, STATUS_TIDAK)
+STATUS_HILANG = "tidak ditemukan"      # hasil kunjungan "merchant tidak ditemukan": tidak dirutekan lagi
+STATUS_OPTIONS = [STATUS_PROSPEK, STATUS_PENDEKATAN, STATUS_AKUISISI, STATUS_TIDAK, STATUS_HILANG]
+# Merchant dengan status ini TIDAK dimasukkan ke rute (sudah dikuasai / tidak berminat / tidak ditemukan).
+STATUS_EXCLUDED = (STATUS_AKUISISI, STATUS_TIDAK, STATUS_HILANG)
 STATUS_COLORS = {
     STATUS_PROSPEK: "#2563EB", STATUS_PENDEKATAN: "#F59E0B",
-    STATUS_AKUISISI: "#16A34A", STATUS_TIDAK: "#6B7280",
+    STATUS_AKUISISI: "#16A34A", STATUS_TIDAK: "#6B7280", STATUS_HILANG: "#B91C1C",
 }
-STATUS_EMOJI = {STATUS_PROSPEK: "🔵", STATUS_PENDEKATAN: "🟠", STATUS_AKUISISI: "🟢", STATUS_TIDAK: "⚪"}
+STATUS_EMOJI = {STATUS_PROSPEK: "🔵", STATUS_PENDEKATAN: "🟠", STATUS_AKUISISI: "🟢", STATUS_TIDAK: "⚪", STATUS_HILANG: "🔴"}
 
 
 def normalize_status(v):
@@ -2563,6 +2566,8 @@ def normalize_status(v):
     t = re.sub(r"\s+", " ", str(v).strip().lower())
     if not t or t in ("nan", "none"):
         return STATUS_PROSPEK
+    if re.search(r"\b(tidak|tdk|belum)\b.*(ditemukan|ketemu)", t):
+        return STATUS_HILANG
     if re.search(r"\b(belum|tidak|tdk|kurang)\b.*(tertarik|minat)", t) or "menolak" in t:
         return STATUS_TIDAK
     if re.search(r"\b(belum|bukan|tidak|tdk)\b.*(akuisisi|akusisi)", t):
@@ -5560,7 +5565,7 @@ def render_howto():
                 "unduh hasil editnya sebagai Excel. Titik yang melenceng jauh otomatis ditandai merah di pratinjau peta.\n\n"
                 "📉 **Sebelum vs sesudah:** hasil rute dibandingkan dengan urutan merchant di file kamu, jadi kelihatan "
                 "berapa km yang dihemat.\n\n"
-                "🏷️ **Status merchant:** *prospek* (default), *sedang pendekatan*, *sudah akuisisi*, *belum tertarik*. "
+                "🏷️ **Status merchant:** *prospek* (default), *sedang pendekatan*, *sudah akuisisi*, *belum tertarik*, *tidak ditemukan*. "
                 "Dua status terakhir **tidak dimasukkan ke rute**. Ubah di **Lihat & Edit Data Awal** atau klik titik di "
                 "**Pratinjau peta**.\n\n"
                 "⭐ **Khusus Mode Pro:**\n"
@@ -5668,7 +5673,7 @@ if st.session_state.page == "Routing":
             type=["xlsx", "csv"],
             accept_multiple_files=True,
             key=f"uploader_{st.session_state.uploader_nonce}",
-            help="Format .xlsx atau .csv. Kolom wajib: merchant_name, latitude, longitude (koma desimal seperti -7,56 juga dikenali). latitude/longitude boleh dikosongkan — akan dicari otomatis dari nama merchant (tambah kolom alamat supaya lebih akurat). Kolom opsional: status (prospek / sedang pendekatan / sudah akuisisi / belum tertarik — dua yang terakhir tidak diikutkan ke rute; kosong = prospek), prioritas (ya/tidak — dikunjungi lebih dulu) serta jam_buka & jam_tutup (HH:MM — dicek terhadap perkiraan jam tiba); dua kolom terakhir ini hanya dipakai di Mode Pro. Bisa pilih beberapa file sekaligus — nanti otomatis digabung. File yang sudah diupload tetap tersimpan walau kamu pindah ke Maps Extractor.",
+            help="Format .xlsx atau .csv. Kolom wajib: merchant_name, latitude, longitude (koma desimal seperti -7,56 juga dikenali). latitude/longitude boleh dikosongkan — akan dicari otomatis dari nama merchant (tambah kolom alamat supaya lebih akurat). Kolom opsional: status (prospek / sedang pendekatan / sudah akuisisi / belum tertarik / tidak ditemukan — tiga yang terakhir tidak diikutkan ke rute; kosong = prospek), prioritas (ya/tidak — dikunjungi lebih dulu) serta jam_buka & jam_tutup (HH:MM — dicek terhadap perkiraan jam tiba); dua kolom terakhir ini hanya dipakai di Mode Pro. Bisa pilih beberapa file sekaligus — nanti otomatis digabung. File yang sudah diupload tetap tersimpan walau kamu pindah ke Maps Extractor.",
         )
     with _c_sheet:
         _sheet_link = st.text_input(
@@ -5918,7 +5923,7 @@ if st.session_state.page == "Routing":
             st.caption(
                 "✏️ Klik sel untuk memperbaiki nama, koordinat, atau **status**, atau centang **Hapus** untuk "
                 "membuang baris. Tekan **Terapkan perubahan** supaya tersimpan — file aslinya tidak diubah. "
-                "Status **sudah akuisisi** dan **belum tertarik** tidak diikutkan ke rute; **prospek** dan "
+                "Status **sudah akuisisi**, **belum tertarik**, dan **tidak ditemukan** tidak diikutkan ke rute; **prospek** dan "
                 "**sedang pendekatan** tetap diikutkan."
                 + ("\n\n"
                    "🕒 Isi **jam_buka** & **jam_tutup** (format HH:MM, mis. 08:00 dan 21:00) untuk merchant yang punya "
@@ -6092,7 +6097,7 @@ if st.session_state.page == "Routing":
             st.caption(
                 "Membuat file formulir untuk KoboToolbox dari data di atas (setelah edit tabel). Petugas memilih **nama merchant** dari daftar; "
                 "ID merchant tersimpan otomatis di balik pilihan itu, tidak perlu diketik. Hasil kunjungan: sudah akuisisi, penjadwalan ulang, "
-                "belum bertemu PIC, merchant tidak ditemukan, belum tertarik, sudah memiliki produk; plus foto kunjungan."
+                "belum bertemu PIC, merchant tidak ditemukan, belum tertarik, sudah memiliki produk; plus lokasi GPS dan foto kunjungan."
             )
             _xf_title = st.text_input("Judul formulir", value="Kunjungan Merchant", key="xlsform_title", max_chars=80)
             _xf_has_p = any(str(c).strip().lower() == "petugas" for c in df.columns)
@@ -6101,7 +6106,7 @@ if st.session_state.page == "Routing":
                 help="Memakai kolom petugas di data (Mode Pro). Merchant tanpa petugas muncul untuk semua. "
                      "Tanpa kolom petugas, nama petugas diisi sendiri dan semua merchant muncul.",
             )
-            _xf_all = st.checkbox("Sertakan merchant berstatus 'sudah akuisisi' / 'belum tertarik'", value=False, key="xlsform_all")
+            _xf_all = st.checkbox("Sertakan merchant berstatus 'sudah akuisisi' / 'belum tertarik' / 'tidak ditemukan'", value=False, key="xlsform_all")
             if st.button("🛠️ Buat formulir", key="xlsform_btn", width="stretch"):
                 try:
                     _xb, _xi = build_xlsform(df, _xf_title.strip() or "Kunjungan Merchant", _xf_filter, _xf_all)
@@ -6151,7 +6156,7 @@ if st.session_state.page == "Routing":
                         if _syk and _wc:
                             if st.button("📤 Perbarui kolom status di Google Sheet dari hasil kunjungan", key="kobo_to_sheet_btn", width="stretch",
                                          help="Mengubah kolom status di Sheet sesuai pilihan petugas (status_baru). Merchant 'sudah akuisisi' "
-                                              "dan 'belum tertarik' otomatis tidak diikutkan ke rute berikutnya."):
+                                              "dan 'belum tertarik' otomatis tidak diikutkan ke rute berikutnya; begitu juga merchant 'tidak ditemukan'."):
                                 try:
                                     _sdf = read_table_file(_syk["fname"], st.session_state.uploaded_store[_syk["fname"]])
                                     _upd, _ndf, _unk = kobo_status_updates(_kl, _sdf)
@@ -6266,10 +6271,11 @@ if st.session_state.page == "Routing":
         _n_excl_status = int(_skip_status.sum())
         _n_acq = int((df["status"] == STATUS_AKUISISI).sum())
         _n_not = int((df["status"] == STATUS_TIDAK).sum())
+        _n_lost = int((df["status"] == STATUS_HILANG).sum())
         if _skip_status.any():
             df = df[~_skip_status].reset_index(drop=True)
             if df.empty:
-                st.info("Semua merchant berstatus sudah akuisisi / belum tertarik — tidak ada yang bisa dirutekan.")
+                st.info("Semua merchant berstatus sudah akuisisi / belum tertarik / tidak ditemukan — tidak ada yang bisa dirutekan.")
                 st.stop()
         st.session_state.row_key_map = {}
         for _k, _n, _la, _lo in zip(df["_row_key"], df["merchant_name"], df["latitude"], df["longitude"]):
@@ -6293,7 +6299,7 @@ if st.session_state.page == "Routing":
         if n_dup:
             _chk_items.append(f"🧹 **{n_dup}** baris duplikat — " + ("sudah dihapus" if remove_dups else "masih diikutkan"))
         if _n_excl_status:
-            _chk_items.append(f"🚫 **{_n_excl_status}** tidak diikutkan karena status (sudah akuisisi {_n_acq}, belum tertarik {_n_not})")
+            _chk_items.append(f"🚫 **{_n_excl_status}** tidak diikutkan karena status (sudah akuisisi {_n_acq}, belum tertarik {_n_not}, tidak ditemukan {_n_lost})")
         _info_items = []
         if _n_priority:
             _info_items.append(f"⭐ {_n_priority} merchant prioritas dikunjungi lebih dulu")
