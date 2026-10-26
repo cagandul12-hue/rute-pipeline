@@ -4071,6 +4071,26 @@ def auth_session_check(token, now, store=None, idle=AUTH_IDLE_SECONDS):
         return user
 
 
+AUTH_WARN_SECONDS = 120          # peringatan "masih menggunakan halaman?" muncul sebanyak ini sebelum login berakhir
+
+
+def auth_session_remaining(token, now, store=None, idle=AUTH_IDLE_SECONDS):
+    """Sisa detik sebelum login berakhir karena menganggur, TANPA menyegarkan waktu pakai. None bila token tidak ada."""
+    if not isinstance(token, str) or not token:
+        return None
+    store = store or _auth_store()
+    with store["lock"]:
+        rec = store["tokens"].get(_tok_key(token))
+        return None if not rec else idle - (now - rec[1])
+
+
+def auth_touch(ss):
+    """Tandai pengguna masih aktif (dipanggil dari bagian halaman yang interaktif tapi tidak menjalankan ulang seluruh skrip)."""
+    tok = ss.get("auth_token")
+    if ss.get("auth_ok") and tok:
+        auth_session_check(tok, time.time())
+
+
 def auth_session_end(token, store=None):
     store = store or _auth_store()
     with store["lock"]:
@@ -5646,6 +5666,41 @@ render_unsaved_notice(_notice_slot, IS_PRO)
 # ================================================================
 # HALAMAN 1: ROUTING PIPELINE OPTIMIZER
 # ================================================================
+IDLE_WARN_CSS = """<style>
+.st-key-idlewarn{position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:1000000;
+width:min(92vw,420px);background:#FFFBEB;color:#78350F;border:1px solid #F59E0B;border-radius:14px;
+padding:14px 16px;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+.st-key-idlewarn p{color:#78350F;margin:0 0 .5rem 0}
+</style>"""
+
+
+def _idle_watch():
+    """Dijalankan tiap detik (fragment, tidak menyegarkan waktu pakai). Menampilkan hitung mundur sebelum login berakhir."""
+    ss = st.session_state
+    tok = ss.get("auth_token")
+    if not ss.get("auth_ok") or not tok:
+        return
+    rem = auth_session_remaining(tok, time.time())
+    if rem is None or rem <= 0:
+        st.rerun(scope="app")        # skrip utama memeriksa ulang dan menampilkan layar login
+        return
+    if rem > AUTH_WARN_SECONDS:
+        return
+    st.markdown(IDLE_WARN_CSS, unsafe_allow_html=True)
+    with st.container(key="idlewarn"):
+        _m, _s = divmod(int(rem), 60)
+        st.markdown(f"**⏳ Sesi berakhir dalam {_m}:{_s:02d}**  \nMasih menggunakan halaman ini?")
+        _c1, _c2 = st.columns(2)
+        _stay = _c1.button("✅ Ya, masih", key="idle_stay", type="primary", width="stretch")
+        _out = _c2.button("🚪 Keluar", key="idle_out", width="stretch")
+    if _stay:
+        auth_touch(ss)
+        st.rerun(scope="fragment")
+    if _out:
+        _logout()
+        st.rerun(scope="app")
+
+
 def merged_edited_data(ss):
     """Data merchant gabungan (file + Maps Extractor) setelah edit tabel diterapkan, tanpa tampilan apa pun.
     Dipakai halaman Kunjungan. Return DataFrame atau None bila belum ada data valid."""
@@ -5782,6 +5837,8 @@ def render_kobo_page():
 
 
 
+
+st.fragment(run_every=1)(_idle_watch)()
 
 if st.session_state.page == "Routing":
     render_hero(
@@ -6096,6 +6153,7 @@ if st.session_state.page == "Routing":
             _view.insert(0, "hapus", False)
             @st.fragment
             def _data_edit_fragment(view, edit_cols, info_cols, editor_nonce):
+                auth_touch(st.session_state)   # mengetik di tabel ini tidak menjalankan ulang halaman: tetap dihitung aktif
                 # Fragment: mengetik di tabel hanya menjalankan ulang bagian ini (bukan seluruh halaman),
                 # jadi jumlah perubahan yang belum diterapkan bisa ditampilkan langsung.
                 # PENTING: semua data masuk lewat argumen. Pada rerun fragment skrip utama tidak dijalankan ulang,
