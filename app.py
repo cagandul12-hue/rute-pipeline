@@ -1976,6 +1976,73 @@ def sheet_sync_check(ss, now, fetcher=None):
     return "applied"
 
 
+SHEET_WRITE_ID_COL = "merchant_id"
+_SHEET_WRITE_URL_RE = re.compile(r"^https://script\.google\.com/macros/s/[A-Za-z0-9_\-]+/exec$")
+
+
+def sheet_write_config():
+    """(url, secret) penulisan balik ke Sheet dari secrets/env, atau None bila belum diatur / URL tidak valid."""
+    url = str(_setting("SHEET_WRITE_URL", "") or "").strip()
+    secret = str(_setting("SHEET_WRITE_SECRET", "") or "").strip()
+    if not url or not secret or not _SHEET_WRITE_URL_RE.match(url):
+        return None
+    return url, secret
+
+
+def sheet_write_build(fname, data, edits):
+    """Ubah edit tabel pada satu file Sheet menjadi (updates, df_baru, dilewati).
+    updates = [{"id": merchant_id, "values": {kolom: nilai}}]; baris diidentifikasi lewat kolom merchant_id (bukan nomor baris).
+    dilewati = jumlah baris yang tidak punya ID. Baris yang dihapus di tabel TIDAK dihapus dari Sheet."""
+    df = read_table_file(fname, data)
+    idc = next((c for c in df.columns if str(c).strip().lower() == SHEET_WRITE_ID_COL), None)
+    if idc is None:
+        raise ValueError(f"Sheet tidak punya kolom {SHEET_WRITE_ID_COL}.")
+    pre = fname + "#"
+    updates, skipped = [], 0
+    new_df = df.copy()
+    for key, cols in (edits.get("changed") or {}).items():
+        if not str(key).startswith(pre):
+            continue
+        try:
+            i = int(str(key)[len(pre):])
+        except ValueError:
+            continue
+        if not 0 <= i < len(df):
+            continue
+        rid = df.iloc[i][idc]
+        if pd.isna(rid) or str(rid).strip() == "":
+            skipped += 1
+            continue
+        if isinstance(rid, float) and rid.is_integer():
+            rid = int(rid)
+        vals = {}
+        for c, v in cols.items():
+            if isinstance(v, float) and math.isnan(v):
+                v = ""
+            vals[c] = v
+            if c not in new_df.columns:
+                new_df[c] = None
+            new_df[c] = new_df[c].astype(object)
+            new_df.iloc[i, new_df.columns.get_loc(c)] = v
+        if vals:
+            updates.append({"id": str(rid), "values": vals})
+    return updates, new_df, skipped
+
+
+def sheet_write_post(cfg, updates, poster=None):
+    """Kirim ke Apps Script Web App. Return (ok, pesan_atau_hasil)."""
+    url, secret = cfg
+    try:
+        r = (poster or requests.post)(url, data=json.dumps({"secret": secret, "updates": updates}),
+                                      headers={"Content-Type": "text/plain"}, timeout=60)
+        res = r.json()
+    except Exception as e:
+        return False, f"Tidak bisa menghubungi Apps Script ({type(e).__name__}). Cek URL Web App dan koneksi."
+    if not isinstance(res, dict) or not res.get("ok"):
+        return False, f"Ditolak Apps Script: {(res or {}).get('error', 'jawaban tidak dikenali') if isinstance(res, dict) else 'jawaban tidak dikenali'}"
+    return True, res
+
+
 def read_table_file(name, data):
     """Baca file .xlsx atau .csv menjadi DataFrame.
 
@@ -5774,6 +5841,42 @@ if st.session_state.page == "Routing":
                 st.caption(
                     "File download hanya memuat perubahan yang sudah **diterapkan** (bukan yang masih diketik di tabel)."
                 )
+            _sy_w = st.session_state.get("sheet_sync")
+            if _sy_w and _n_edits:
+                _wcfg = sheet_write_config()
+                _pre_w = _sy_w["fname"] + "#"
+                _n_w = sum(1 for k in _edits["changed"] if str(k).startswith(_pre_w))
+                if _n_w:
+                    if not _wcfg:
+                        st.caption("📤 Kirim edit balik ke Google Sheet: belum diatur (isi SHEET_WRITE_URL dan SHEET_WRITE_SECRET di secrets; lihat SETUP_SHEET_WRITE.md).")
+                    else:
+                        _del_w = sum(1 for k in _edits["deleted"] if str(k).startswith(_pre_w))
+                        if st.button(f"📤 Kirim {_n_w} baris hasil edit ke Google Sheet", key="sheet_write_btn", width="stretch",
+                                     help="Menulis nilai yang Anda ubah ke baris yang sama di Sheet (dikenali lewat kolom merchant_id). "
+                                          "Hanya kolom yang boleh ditulis di skrip Apps Script yang berubah. Baris yang dihapus di tabel "
+                                          "tidak dihapus dari Sheet."):
+                            try:
+                                _upd, _newdf, _skip = sheet_write_build(_sy_w["fname"], st.session_state.uploaded_store[_sy_w["fname"]], _edits)
+                            except Exception as e:
+                                _upd, _newdf, _skip = [], None, 0
+                                st.error(f"Gagal menyiapkan data: {e}")
+                            if _upd:
+                                with st.spinner("Mengirim ke Google Sheet…"):
+                                    _wok, _wres = sheet_write_post(_wcfg, _upd)
+                                if _wok:
+                                    _wmiss = len(_wres.get("missing") or [])
+                                    ss_w = st.session_state
+                                    sheet_sync_apply(ss_w, _newdf.to_csv(index=False).encode("utf-8"), time.time(), drop_edits=True)
+                                    ss_w._sheet_flash = (f"✅ {_wres.get('updated', 0)} baris ditulis ke Google Sheet."
+                                                         + (f" {_wmiss} ID tidak ditemukan di Sheet." if _wmiss else "")
+                                                         + (f" {_skip} baris dilewati karena tidak punya merchant_id." if _skip else ""))
+                                    st.rerun(scope="app")
+                                else:
+                                    st.error(_wres)
+                            elif _newdf is not None:
+                                st.warning("Tidak ada baris dengan merchant_id yang bisa dikirim.")
+                        if _del_w:
+                            st.caption(f"ℹ️ {_del_w} baris yang Anda hapus di tabel tidak ikut dihapus dari Sheet.")
 
         # Pemeriksaan titik janggal + pratinjau peta semua titik.
         # Titik berstatus akuisisi/belum tertarik tidak akan dirutekan, jadi tidak ikut diperiksa.
