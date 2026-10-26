@@ -2158,7 +2158,7 @@ def kobo_status_updates(latest, sheet_df):
     return updates, new_df, unknown
 
 
-def build_xlsform(df, title="Kunjungan Merchant", filter_by_petugas=True, include_excluded=False):
+def build_xlsform(df, title="Kunjungan Merchant", filter_by_petugas=True, include_excluded=False, extra_petugas=()):
     """Buat XLSForm (bytes .xlsx) untuk KoboToolbox dari data merchant.
     Pilihan merchant: nilai internal = merchant_id (tersimpan di hasil, tidak ditampilkan), label = nama merchant.
     Return (bytes, info) dengan info = {merchants, petugas, filtered, generated_ids, warnings}."""
@@ -2178,6 +2178,13 @@ def build_xlsform(df, title="Kunjungan Merchant", filter_by_petugas=True, includ
         return "" if v is None or (isinstance(v, float) and math.isnan(v)) else re.sub(r"\s+", " ", str(v)).strip()
 
     petugas_vals = sorted({_clean(v) for v in d[pc]} - {""}, key=str.lower) if pc else []
+    _have = {v.lower() for v in petugas_vals}
+    for v in extra_petugas:                      # nama petugas tambahan yang diketik manual
+        v = _clean(v)[:60]
+        if v and v.lower() not in _have:
+            petugas_vals.append(v)
+            _have.add(v.lower())
+    petugas_vals = sorted(petugas_vals, key=str.lower)
     merchants, seen_ids, generated, dup_ids, no_name = [], set(), idc is None, 0, 0
     for n, (_, r) in enumerate(d.iterrows(), start=1):
         name = _clean(r.get("merchant_name"))
@@ -2212,7 +2219,7 @@ def build_xlsform(df, title="Kunjungan Merchant", filter_by_petugas=True, includ
         warnings.append("Lebih dari 3.000 merchant: formulir bisa lambat di ponsel. Pertimbangkan membagi per petugas atau per wilayah.")
     if not merchants:
         raise ValueError("Tidak ada merchant yang bisa dimasukkan ke formulir.")
-    filtered = bool(filter_by_petugas and petugas_vals)
+    filtered = bool(filter_by_petugas and pc and any(m["petugas"] for m in merchants))
 
     survey_h = ["type", "name", "label", "required", "choice_filter", "appearance"]
     survey = [
@@ -5500,35 +5507,22 @@ def render_app_mode_toggle(prefix):
 
 def render_nav(prefix, horizontal=False):
     # Plain buttons (not a key-bound widget) so the active page can be set
-    # programmatically from anywhere — e.g. the "pakai di Routing Optimizer"
-    # button on the Extract page — without hitting Streamlit's restriction
+    # programmatically from anywhere without hitting Streamlit's restriction
     # on mutating a widget's own session-state key after it's been created.
-    nav_routing_active = st.session_state.page == "Routing"
-    nav_extract_active = st.session_state.page == "Extract"
-    label_routing = "🛣️ Routing" if horizontal else "🛣️  Routing Optimizer"
-    label_extract = "📍 Extractor" if horizontal else "📍  Maps Extractor"
-
-    if horizontal:
-        n1, n2 = st.columns(2)
-    else:
-        n1 = n2 = st.container()
-
-    with n1:
-        go_routing = st.button(
-            label_routing, key=f"{prefix}_nav_routing", width='stretch',
-            type="primary" if nav_routing_active else "secondary",
-        )
-    with n2:
-        go_extract = st.button(
-            label_extract, key=f"{prefix}_nav_extract", width='stretch',
-            type="primary" if nav_extract_active else "secondary",
-        )
-
-    if go_routing:
-        st.session_state.page = "Routing"
-        st.rerun()
-    if go_extract:
-        st.session_state.page = "Extract"
+    pages = [
+        ("Routing", "🛣️ Routing" if horizontal else "🛣️  Routing Optimizer", "routing"),
+        ("Extract", "📍 Extractor" if horizontal else "📍  Maps Extractor", "extract"),
+        ("Kobo", "📋 Kunjungan" if horizontal else "📋  Kunjungan (Kobo)", "kobo"),
+    ]
+    holders = st.columns(len(pages)) if horizontal else [st.container() for _ in pages]
+    clicked = None
+    for (page, label, k), holder in zip(pages, holders):
+        with holder:
+            if st.button(label, key=f"{prefix}_nav_{k}", width='stretch',
+                         type="primary" if st.session_state.page == page else "secondary"):
+                clicked = page
+    if clicked:
+        st.session_state.page = clicked
         st.rerun()
 
 
@@ -5652,6 +5646,143 @@ render_unsaved_notice(_notice_slot, IS_PRO)
 # ================================================================
 # HALAMAN 1: ROUTING PIPELINE OPTIMIZER
 # ================================================================
+def merged_edited_data(ss):
+    """Data merchant gabungan (file + Maps Extractor) setelah edit tabel diterapkan, tanpa tampilan apa pun.
+    Dipakai halaman Kunjungan. Return DataFrame atau None bila belum ada data valid."""
+    parts = []
+    for fname, fbytes in ss.uploaded_store.items():
+        try:
+            fd = read_table_file(fname, fbytes)
+        except Exception:
+            continue
+        ok, _ = validate_dataframe(fd)
+        if not ok:
+            continue
+        fd = fd.copy()
+        fd["source_file"] = fname
+        fd["_row_key"] = [f"{fname}#{i}" for i in range(len(fd))]
+        parts.append(fd)
+    if ss.get("use_extracted_flag") and ss.get("extracted_data"):
+        ed = pd.DataFrame(ss.extracted_data)
+        ok, _ = validate_dataframe(ed)
+        if ok:
+            ed = ed.copy()
+            ed["source_file"] = "Data Ekstraksi (Maps Extractor)"
+            ed["_row_key"] = [f"extract#{i}" for i in range(len(ed))]
+            parts.append(ed)
+    if not parts:
+        return None
+    d = ensure_status_column(pd.concat(parts, ignore_index=True))
+    d = apply_data_edits(d, ss.data_edits)
+    if d.empty:
+        return None
+    d = ensure_status_column(d)
+    if not IS_PRO:
+        d = d.drop(columns=[c for c in PRO_ONLY_COLS if c in d.columns])
+    return d
+
+
+def render_kobo_page():
+    df = merged_edited_data(st.session_state)
+    if df is None:
+        st.info("Belum ada data merchant. Upload file atau ambil dari Google Sheet di halaman **Routing Optimizer** dulu; "
+                "formulir KoboCollect dibuat dari data itu (termasuk edit tabelnya).")
+    else:
+        st.caption(f"Data yang dipakai: {len(df)} baris dari halaman Routing Optimizer (setelah edit tabel).")
+        with st.expander("📱 Buat formulir KoboCollect dari data ini (XLSForm)", expanded=False):
+            st.caption(
+                "Membuat file formulir untuk KoboToolbox dari data di atas (setelah edit tabel). Petugas memilih **nama merchant** dari daftar; "
+                "ID merchant tersimpan otomatis di balik pilihan itu, tidak perlu diketik. Hasil kunjungan: sudah akuisisi, penjadwalan ulang, "
+                "belum bertemu PIC, merchant tidak ditemukan, belum tertarik, sudah memiliki produk; plus lokasi GPS dan foto kunjungan."
+            )
+            _xf_title = st.text_input("Judul formulir", value="Kunjungan Merchant", key="xlsform_title", max_chars=80)
+            _xf_has_p = any(str(c).strip().lower() == "petugas" for c in df.columns)
+            _xf_filter = st.checkbox(
+                "Petugas hanya melihat merchant miliknya", value=True, key="xlsform_filter", disabled=not _xf_has_p,
+                help="Memakai kolom petugas di data (Mode Pro). Merchant tanpa petugas muncul untuk semua. "
+                     "Tanpa kolom petugas, nama petugas diisi sendiri dan semua merchant muncul.",
+            )
+            _xf_extra = st.text_area(
+                "Nama petugas (opsional, satu nama per baris)", key="xlsform_petugas", height=100,
+                placeholder="Petugas 1\nPetugas 2",
+                help="Dipakai sebagai pilihan nama petugas di formulir, ditambah petugas yang sudah ada di kolom petugas data. "
+                     "Kosongkan semuanya kalau petugas mau mengetik namanya sendiri.",
+            )
+            _xf_extra_list = [x.strip() for x in _xf_extra.splitlines() if x.strip()][:200]
+            _xf_all = st.checkbox("Sertakan merchant berstatus 'sudah akuisisi' / 'belum tertarik' / 'tidak ditemukan'", value=False, key="xlsform_all")
+            if st.button("🛠️ Buat formulir", key="xlsform_btn", width="stretch"):
+                try:
+                    _xb, _xi = build_xlsform(df, _xf_title.strip() or "Kunjungan Merchant", _xf_filter, _xf_all, _xf_extra_list)
+                    st.session_state.xlsform_out = (_xb, _xi)
+                except Exception as e:
+                    st.session_state.xlsform_out = None
+                    st.error(f"Gagal membuat formulir: {e}")
+            _xo = st.session_state.get("xlsform_out")
+            if _xo:
+                _xb, _xi = _xo
+                st.success(f"Formulir siap: {_xi['merchants']} merchant"
+                           + (f", {_xi['petugas']} petugas (pilihan{', merchant difilter per petugas' if _xi['filtered'] else ''})"
+                              if _xi["petugas"] else ", nama petugas diisi sendiri"))
+                for _w in _xi["warnings"]:
+                    st.warning(_w)
+                st.download_button("⬇️ Download formulir (XLSForm .xlsx)", data=_xb, file_name="form_kunjungan_merchant.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="xlsform_dl",
+                                   type="primary", width="stretch")
+                st.caption("Di KoboToolbox: **New → Upload an XLSForm** → pilih file ini → **Deploy**. Kalau data merchant berubah, buat formulir lagi "
+                           "dan **Redeploy** (atau unggah sebagai versi baru).")
+
+    _kcfg = kobo_config()
+    with st.expander("📋 Hasil kunjungan (KoboToolbox)", expanded=False):
+        if not _kcfg:
+            st.caption("Belum diatur. Isi KOBO_TOKEN dan KOBO_ASSET_UID (dan KOBO_SERVER bila bukan server global) di secrets; "
+                       "lihat SETUP_KOBO.md bagian API.")
+        else:
+            st.caption("Mengambil isian formulir kunjungan langsung dari KoboToolbox. Satu merchant memakai kunjungan terbarunya.")
+            if st.button("🔄 Ambil hasil kunjungan terbaru", key="kobo_fetch_btn", width="stretch"):
+                with st.spinner("Mengambil dari KoboToolbox…"):
+                    _kok, _kres = kobo_fetch(_kcfg)
+                if _kok:
+                    st.session_state.kobo_latest = kobo_latest(_kres)
+                    st.session_state.kobo_total = len(_kres)
+                    st.session_state.kobo_time = time.time()
+                else:
+                    st.error(_kres)
+            _kl = st.session_state.get("kobo_latest")
+            if _kl is not None:
+                st.caption(f"{st.session_state.get('kobo_total', 0)} isian · {len(_kl)} merchant · "
+                           f"diambil {_ago(datetime.datetime.fromtimestamp(st.session_state.kobo_time, datetime.timezone.utc).isoformat())}")
+                if len(_kl):
+                    _cnt = _kl["hasil_kunjungan"].replace("", "tanpa data").value_counts()
+                    st.bar_chart(_cnt)
+                    st.dataframe(_kl.drop(columns=["lokasi"]), width="stretch", hide_index=True)
+                    _syk, _wc = st.session_state.get("sheet_sync"), sheet_write_config()
+                    if _syk and _wc:
+                        if st.button("📤 Perbarui kolom status di Google Sheet dari hasil kunjungan", key="kobo_to_sheet_btn", width="stretch",
+                                     help="Mengubah kolom status di Sheet sesuai pilihan petugas (status_baru). Merchant 'sudah akuisisi' "
+                                          "dan 'belum tertarik' otomatis tidak diikutkan ke rute berikutnya; begitu juga merchant 'tidak ditemukan'."):
+                            try:
+                                _sdf = read_table_file(_syk["fname"], st.session_state.uploaded_store[_syk["fname"]])
+                                _upd, _ndf, _unk = kobo_status_updates(_kl, _sdf)
+                            except Exception as e:
+                                _upd, _ndf, _unk = [], None, 0
+                                st.error(f"Gagal menyiapkan data: {e}")
+                            if _upd:
+                                _wok, _wres = sheet_write_post(_wc, _upd)
+                                if _wok:
+                                    sheet_sync_apply(st.session_state, _ndf.to_csv(index=False).encode("utf-8"), time.time(), drop_edits=False)
+                                    st.session_state._sheet_flash = (f"✅ Status {_wres.get('updated', 0)} merchant diperbarui di Google Sheet."
+                                                                     + (f" {_unk} ID dari Kobo tidak ada di Sheet." if _unk else ""))
+                                    st.rerun(scope="app")
+                                else:
+                                    st.error(_wres)
+                            elif _ndf is not None:
+                                st.info("Semua status di Sheet sudah sama dengan hasil kunjungan.")
+                    else:
+                        st.caption("Untuk memperbarui status di Sheet: ambil data dari link Google Sheet dan atur SHEET_WRITE_URL/SHEET_WRITE_SECRET.")
+
+
+
+
 if st.session_state.page == "Routing":
     render_hero(
         "Optimasi rute", "Routing Pipeline", "Optimizer",
@@ -6092,90 +6223,6 @@ if st.session_state.page == "Routing":
                                 st.warning("Tidak ada baris dengan merchant_id yang bisa dikirim.")
                         if _del_w:
                             st.caption(f"ℹ️ {_del_w} baris yang Anda hapus di tabel tidak ikut dihapus dari Sheet.")
-
-        with st.expander("📱 Buat formulir KoboCollect dari data ini (XLSForm)", expanded=False):
-            st.caption(
-                "Membuat file formulir untuk KoboToolbox dari data di atas (setelah edit tabel). Petugas memilih **nama merchant** dari daftar; "
-                "ID merchant tersimpan otomatis di balik pilihan itu, tidak perlu diketik. Hasil kunjungan: sudah akuisisi, penjadwalan ulang, "
-                "belum bertemu PIC, merchant tidak ditemukan, belum tertarik, sudah memiliki produk; plus lokasi GPS dan foto kunjungan."
-            )
-            _xf_title = st.text_input("Judul formulir", value="Kunjungan Merchant", key="xlsform_title", max_chars=80)
-            _xf_has_p = any(str(c).strip().lower() == "petugas" for c in df.columns)
-            _xf_filter = st.checkbox(
-                "Petugas hanya melihat merchant miliknya", value=True, key="xlsform_filter", disabled=not _xf_has_p,
-                help="Memakai kolom petugas di data (Mode Pro). Merchant tanpa petugas muncul untuk semua. "
-                     "Tanpa kolom petugas, nama petugas diisi sendiri dan semua merchant muncul.",
-            )
-            _xf_all = st.checkbox("Sertakan merchant berstatus 'sudah akuisisi' / 'belum tertarik' / 'tidak ditemukan'", value=False, key="xlsform_all")
-            if st.button("🛠️ Buat formulir", key="xlsform_btn", width="stretch"):
-                try:
-                    _xb, _xi = build_xlsform(df, _xf_title.strip() or "Kunjungan Merchant", _xf_filter, _xf_all)
-                    st.session_state.xlsform_out = (_xb, _xi)
-                except Exception as e:
-                    st.session_state.xlsform_out = None
-                    st.error(f"Gagal membuat formulir: {e}")
-            _xo = st.session_state.get("xlsform_out")
-            if _xo:
-                _xb, _xi = _xo
-                st.success(f"Formulir siap: {_xi['merchants']} merchant"
-                           + (f", {_xi['petugas']} petugas (pilihan{', merchant difilter per petugas' if _xi['filtered'] else ''})"
-                              if _xi["petugas"] else ", nama petugas diisi sendiri"))
-                for _w in _xi["warnings"]:
-                    st.warning(_w)
-                st.download_button("⬇️ Download formulir (XLSForm .xlsx)", data=_xb, file_name="form_kunjungan_merchant.xlsx",
-                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="xlsform_dl",
-                                   type="primary", width="stretch")
-                st.caption("Di KoboToolbox: **New → Upload an XLSForm** → pilih file ini → **Deploy**. Kalau data merchant berubah, buat formulir lagi "
-                           "dan **Redeploy** (atau unggah sebagai versi baru).")
-
-        _kcfg = kobo_config()
-        with st.expander("📋 Hasil kunjungan (KoboToolbox)", expanded=False):
-            if not _kcfg:
-                st.caption("Belum diatur. Isi KOBO_TOKEN dan KOBO_ASSET_UID (dan KOBO_SERVER bila bukan server global) di secrets; "
-                           "lihat SETUP_KOBO.md bagian API.")
-            else:
-                st.caption("Mengambil isian formulir kunjungan langsung dari KoboToolbox. Satu merchant memakai kunjungan terbarunya.")
-                if st.button("🔄 Ambil hasil kunjungan terbaru", key="kobo_fetch_btn", width="stretch"):
-                    with st.spinner("Mengambil dari KoboToolbox…"):
-                        _kok, _kres = kobo_fetch(_kcfg)
-                    if _kok:
-                        st.session_state.kobo_latest = kobo_latest(_kres)
-                        st.session_state.kobo_total = len(_kres)
-                        st.session_state.kobo_time = time.time()
-                    else:
-                        st.error(_kres)
-                _kl = st.session_state.get("kobo_latest")
-                if _kl is not None:
-                    st.caption(f"{st.session_state.get('kobo_total', 0)} isian · {len(_kl)} merchant · "
-                               f"diambil {_ago(datetime.datetime.fromtimestamp(st.session_state.kobo_time, datetime.timezone.utc).isoformat())}")
-                    if len(_kl):
-                        _cnt = _kl["hasil_kunjungan"].replace("", "tanpa data").value_counts()
-                        st.bar_chart(_cnt)
-                        st.dataframe(_kl.drop(columns=["lokasi"]), width="stretch", hide_index=True)
-                        _syk, _wc = st.session_state.get("sheet_sync"), sheet_write_config()
-                        if _syk and _wc:
-                            if st.button("📤 Perbarui kolom status di Google Sheet dari hasil kunjungan", key="kobo_to_sheet_btn", width="stretch",
-                                         help="Mengubah kolom status di Sheet sesuai pilihan petugas (status_baru). Merchant 'sudah akuisisi' "
-                                              "dan 'belum tertarik' otomatis tidak diikutkan ke rute berikutnya; begitu juga merchant 'tidak ditemukan'."):
-                                try:
-                                    _sdf = read_table_file(_syk["fname"], st.session_state.uploaded_store[_syk["fname"]])
-                                    _upd, _ndf, _unk = kobo_status_updates(_kl, _sdf)
-                                except Exception as e:
-                                    _upd, _ndf, _unk = [], None, 0
-                                    st.error(f"Gagal menyiapkan data: {e}")
-                                if _upd:
-                                    _wok, _wres = sheet_write_post(_wc, _upd)
-                                    if _wok:
-                                        sheet_sync_apply(st.session_state, _ndf.to_csv(index=False).encode("utf-8"), time.time(), drop_edits=False)
-                                        st.session_state._sheet_flash = (f"✅ Status {_wres.get('updated', 0)} merchant diperbarui di Google Sheet."
-                                                                         + (f" {_unk} ID dari Kobo tidak ada di Sheet." if _unk else ""))
-                                        st.rerun(scope="app")
-                                    else:
-                                        st.error(_wres)
-                                elif _ndf is not None:
-                                    st.info("Semua status di Sheet sudah sama dengan hasil kunjungan.")
-                        else:
-                            st.caption("Untuk memperbarui status di Sheet: ambil data dari link Google Sheet dan atur SHEET_WRITE_URL/SHEET_WRITE_SECRET.")
 
         # Pemeriksaan titik janggal + pratinjau peta semua titik.
         # Titik berstatus akuisisi/belum tertarik tidak akan dirutekan, jadi tidak ikut diperiksa.
@@ -7451,6 +7498,12 @@ if st.session_state.page == "Routing":
 # ================================================================
 # HALAMAN 2: MAPS EXTRACTOR
 # ================================================================
+elif st.session_state.page == "Kobo":
+    render_hero(
+        "Kunjungan lapangan", "Kobo", "Kunjungan",
+        "Buat formulir KoboCollect dari data merchant, lalu ambil hasil kunjungan petugas langsung dari KoboToolbox.",
+    )
+    render_kobo_page()
 elif st.session_state.page == "Extract":
     render_hero(
         "Ekstraksi lokasi", "Maps", "Extractor",
