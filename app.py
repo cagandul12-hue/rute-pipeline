@@ -2049,6 +2049,99 @@ def sheet_write_post(cfg, updates, poster=None):
     return True, res
 
 
+KOBO_MAX_ROWS = 20000
+_KOBO_SERVER_RE = re.compile(r"^https://[a-z0-9\-]+\.kobotoolbox\.org$")
+_KOBO_UID_RE = re.compile(r"^[A-Za-z0-9]{10,40}$")
+KOBO_STATUS_MAP = {"prospek": "prospek", "sedang_pendekatan": "sedang pendekatan",
+                   "sudah_akuisisi": "sudah akuisisi", "belum_tertarik": "belum tertarik"}
+
+
+def kobo_config():
+    """(server, token, asset_uid) dari secrets/env, atau None bila belum diatur / tidak valid."""
+    server = str(_setting("KOBO_SERVER", "https://kf.kobotoolbox.org") or "").strip().rstrip("/")
+    token = str(_setting("KOBO_TOKEN", "") or "").strip()
+    uid = str(_setting("KOBO_ASSET_UID", "") or "").strip()
+    if not _KOBO_SERVER_RE.match(server) or not token or not _KOBO_UID_RE.match(uid):
+        return None
+    return server, token, uid
+
+
+def _norm_id(v):
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    return str(v).strip()
+
+
+def kobo_fetch(cfg, getter=None):
+    """Ambil semua isian formulir dari API KoboToolbox. Return (ok, DataFrame_atau_pesan)."""
+    server, token, uid = cfg
+    get = getter or requests.get
+    rows, start, page = [], 0, 1000
+    try:
+        while len(rows) < KOBO_MAX_ROWS:
+            r = get(f"{server}/api/v2/assets/{uid}/data.json",
+                    params={"limit": page, "start": start, "sort": json.dumps({"_id": 1})},
+                    headers={"Authorization": f"Token {token}", "Accept": "application/json"}, timeout=60)
+            if r.status_code in (401, 403):
+                return False, "KoboToolbox menolak akses: cek KOBO_TOKEN dan izin akun pada proyek ini."
+            if r.status_code == 404:
+                return False, "Proyek tidak ditemukan: cek KOBO_ASSET_UID dan KOBO_SERVER (server global atau eu)."
+            r.raise_for_status()
+            res = r.json()
+            chunk = res.get("results") if isinstance(res, dict) else None
+            if not isinstance(chunk, list):
+                return False, "Jawaban KoboToolbox tidak dikenali."
+            rows.extend(c for c in chunk if isinstance(c, dict))
+            if len(chunk) < page:
+                break
+            start += page
+    except Exception as e:
+        return False, f"Tidak bisa menghubungi KoboToolbox ({type(e).__name__})."
+    return True, pd.DataFrame(rows)
+
+
+def kobo_latest(df):
+    """Kunjungan terbaru per merchant_id. Return DataFrame dengan kolom standar (kosong bila tak ada isian)."""
+    cols = ["merchant_id", "merchant_name", "hasil_kunjungan", "status_baru", "petugas", "catatan", "lokasi", "_submission_time"]
+    if df is None or df.empty or "merchant_id" not in df.columns:
+        return pd.DataFrame(columns=cols)
+    d = df.copy()
+    for c in cols:
+        if c not in d.columns:
+            d[c] = ""
+    d["merchant_id"] = d["merchant_id"].map(_norm_id)
+    d = d[d["merchant_id"] != ""]
+    d = d.sort_values("_submission_time", kind="stable").drop_duplicates("merchant_id", keep="last")
+    return d[cols].reset_index(drop=True)
+
+
+def kobo_status_updates(latest, sheet_df):
+    """Status dari Kobo yang berbeda dari Sheet -> (updates, df_sheet_baru, jumlah_id_tak_dikenal)."""
+    idc = next((c for c in sheet_df.columns if str(c).strip().lower() == SHEET_WRITE_ID_COL), None)
+    if idc is None or "status" not in sheet_df.columns:
+        raise ValueError("Sheet perlu kolom merchant_id dan status.")
+    pos = {_norm_id(v): i for i, v in enumerate(sheet_df[idc])}
+    new_df = sheet_df.copy()
+    new_df["status"] = new_df["status"].astype(object)
+    updates, unknown = [], 0
+    for _, r in latest.iterrows():
+        st_new = KOBO_STATUS_MAP.get(str(r.get("status_baru", "")).strip())
+        if not st_new:
+            continue
+        i = pos.get(r["merchant_id"])
+        if i is None:
+            unknown += 1
+            continue
+        cur = sheet_df.iloc[i]["status"]
+        if (str(cur).strip().lower() if not pd.isna(cur) else "") == st_new:
+            continue
+        updates.append({"id": r["merchant_id"], "values": {"status": st_new}})
+        new_df.iloc[i, new_df.columns.get_loc("status")] = st_new
+    return updates, new_df, unknown
+
+
 def read_table_file(name, data):
     """Baca file .xlsx atau .csv menjadi DataFrame.
 
@@ -5883,6 +5976,55 @@ if st.session_state.page == "Routing":
                                 st.warning("Tidak ada baris dengan merchant_id yang bisa dikirim.")
                         if _del_w:
                             st.caption(f"ℹ️ {_del_w} baris yang Anda hapus di tabel tidak ikut dihapus dari Sheet.")
+
+        _kcfg = kobo_config()
+        with st.expander("📋 Hasil kunjungan (KoboToolbox)", expanded=False):
+            if not _kcfg:
+                st.caption("Belum diatur. Isi KOBO_TOKEN dan KOBO_ASSET_UID (dan KOBO_SERVER bila bukan server global) di secrets; "
+                           "lihat SETUP_KOBO.md bagian API.")
+            else:
+                st.caption("Mengambil isian formulir kunjungan langsung dari KoboToolbox. Satu merchant memakai kunjungan terbarunya.")
+                if st.button("🔄 Ambil hasil kunjungan terbaru", key="kobo_fetch_btn", width="stretch"):
+                    with st.spinner("Mengambil dari KoboToolbox…"):
+                        _kok, _kres = kobo_fetch(_kcfg)
+                    if _kok:
+                        st.session_state.kobo_latest = kobo_latest(_kres)
+                        st.session_state.kobo_total = len(_kres)
+                        st.session_state.kobo_time = time.time()
+                    else:
+                        st.error(_kres)
+                _kl = st.session_state.get("kobo_latest")
+                if _kl is not None:
+                    st.caption(f"{st.session_state.get('kobo_total', 0)} isian · {len(_kl)} merchant · "
+                               f"diambil {_ago(datetime.datetime.fromtimestamp(st.session_state.kobo_time, datetime.timezone.utc).isoformat())}")
+                    if len(_kl):
+                        _cnt = _kl["hasil_kunjungan"].replace("", "tanpa data").value_counts()
+                        st.bar_chart(_cnt)
+                        st.dataframe(_kl.drop(columns=["lokasi"]), width="stretch", hide_index=True)
+                        _syk, _wc = st.session_state.get("sheet_sync"), sheet_write_config()
+                        if _syk and _wc:
+                            if st.button("📤 Perbarui kolom status di Google Sheet dari hasil kunjungan", key="kobo_to_sheet_btn", width="stretch",
+                                         help="Mengubah kolom status di Sheet sesuai pilihan petugas (status_baru). Merchant 'sudah akuisisi' "
+                                              "dan 'belum tertarik' otomatis tidak diikutkan ke rute berikutnya."):
+                                try:
+                                    _sdf = read_table_file(_syk["fname"], st.session_state.uploaded_store[_syk["fname"]])
+                                    _upd, _ndf, _unk = kobo_status_updates(_kl, _sdf)
+                                except Exception as e:
+                                    _upd, _ndf, _unk = [], None, 0
+                                    st.error(f"Gagal menyiapkan data: {e}")
+                                if _upd:
+                                    _wok, _wres = sheet_write_post(_wc, _upd)
+                                    if _wok:
+                                        sheet_sync_apply(st.session_state, _ndf.to_csv(index=False).encode("utf-8"), time.time(), drop_edits=False)
+                                        st.session_state._sheet_flash = (f"✅ Status {_wres.get('updated', 0)} merchant diperbarui di Google Sheet."
+                                                                         + (f" {_unk} ID dari Kobo tidak ada di Sheet." if _unk else ""))
+                                        st.rerun(scope="app")
+                                    else:
+                                        st.error(_wres)
+                                elif _ndf is not None:
+                                    st.info("Semua status di Sheet sudah sama dengan hasil kunjungan.")
+                        else:
+                            st.caption("Untuk memperbarui status di Sheet: ambil data dari link Google Sheet dan atur SHEET_WRITE_URL/SHEET_WRITE_SECRET.")
 
         # Pemeriksaan titik janggal + pratinjau peta semua titik.
         # Titik berstatus akuisisi/belum tertarik tidak akan dirutekan, jadi tidak ikut diperiksa.
