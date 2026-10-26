@@ -2035,9 +2035,15 @@ def sheet_write_post(cfg, updates, poster=None):
     try:
         r = (poster or requests.post)(url, data=json.dumps({"secret": secret, "updates": updates}),
                                       headers={"Content-Type": "text/plain"}, timeout=60)
-        res = r.json()
     except Exception as e:
         return False, f"Tidak bisa menghubungi Apps Script ({type(e).__name__}). Cek URL Web App dan koneksi."
+    try:
+        res = r.json()
+    except Exception:
+        txt = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", str(getattr(r, "text", "") or ""))).strip()[:160]
+        return False, (f"Jawaban Apps Script bukan JSON (status {getattr(r, 'status_code', '?')}): \"{txt}\". "
+                       "Biasanya akses Web App belum 'Anyone', skrip belum diterbitkan ulang (New version), atau skrip error; "
+                       "cek menu Executions di Apps Script.")
     if not isinstance(res, dict) or not res.get("ok"):
         return False, f"Ditolak Apps Script: {(res or {}).get('error', 'jawaban tidak dikenali') if isinstance(res, dict) else 'jawaban tidak dikenali'}"
     return True, res
