@@ -2056,6 +2056,20 @@ KOBO_STATUS_MAP = {"prospek": "prospek", "sedang_pendekatan": "sedang pendekatan
                    "sudah_akuisisi": "sudah akuisisi", "belum_tertarik": "belum tertarik"}
 
 
+KOBO_HASIL_CHOICES = [
+    ("sudah_akuisisi", "Sudah akuisisi"),
+    ("penjadwalan_ulang", "Penjadwalan ulang"),
+    ("belum_bertemu_pic", "Belum bertemu PIC"),
+    ("merchant_tidak_ditemukan", "Merchant tidak ditemukan"),
+    ("belum_tertarik", "Belum tertarik"),
+    ("sudah_memiliki_produk", "Sudah memiliki produk"),
+]
+# Hasil kunjungan -> status di aplikasi. 'merchant_tidak_ditemukan' sengaja tidak mengubah status.
+KOBO_HASIL_STATUS = {"sudah_akuisisi": "sudah akuisisi", "belum_tertarik": "belum tertarik",
+                     "sudah_memiliki_produk": "belum tertarik",
+                     "penjadwalan_ulang": "sedang pendekatan", "belum_bertemu_pic": "sedang pendekatan"}
+
+
 def kobo_config():
     """(server, token, asset_uid) dari secrets/env, atau None bila belum diatur / tidak valid."""
     server = str(_setting("KOBO_SERVER", "https://kf.kobotoolbox.org") or "").strip().rstrip("/")
@@ -2127,7 +2141,8 @@ def kobo_status_updates(latest, sheet_df):
     new_df["status"] = new_df["status"].astype(object)
     updates, unknown = [], 0
     for _, r in latest.iterrows():
-        st_new = KOBO_STATUS_MAP.get(str(r.get("status_baru", "")).strip())
+        st_new = KOBO_STATUS_MAP.get(str(r.get("status_baru", "")).strip()) or \
+            KOBO_HASIL_STATUS.get(str(r.get("hasil_kunjungan", "")).strip())
         if not st_new:
             continue
         i = pos.get(r["merchant_id"])
@@ -2140,6 +2155,102 @@ def kobo_status_updates(latest, sheet_df):
         updates.append({"id": r["merchant_id"], "values": {"status": st_new}})
         new_df.iloc[i, new_df.columns.get_loc("status")] = st_new
     return updates, new_df, unknown
+
+
+def build_xlsform(df, title="Kunjungan Merchant", filter_by_petugas=True, include_excluded=False):
+    """Buat XLSForm (bytes .xlsx) untuk KoboToolbox dari data merchant.
+    Pilihan merchant: nilai internal = merchant_id (tersimpan di hasil, tidak ditampilkan), label = nama merchant.
+    Return (bytes, info) dengan info = {merchants, petugas, filtered, generated_ids, warnings}."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    warnings = []
+    d = df.copy()
+    if not include_excluded and "status" in d.columns:
+        d = d[~d["status"].astype(str).str.strip().str.lower().isin(STATUS_EXCLUDED)]
+    idc = next((c for c in d.columns if str(c).strip().lower() == SHEET_WRITE_ID_COL), None)
+    pc = next((c for c in d.columns if str(c).strip().lower() == "petugas"), None)
+    ac = next((c for c in d.columns if str(c).strip().lower() == "alamat"), None)
+
+    def _clean(v):
+        return "" if v is None or (isinstance(v, float) and math.isnan(v)) else re.sub(r"\s+", " ", str(v)).strip()
+
+    petugas_vals = sorted({_clean(v) for v in d[pc]} - {""}, key=str.lower) if pc else []
+    merchants, seen_ids, generated, dup_ids, no_name = [], set(), idc is None, 0, 0
+    for n, (_, r) in enumerate(d.iterrows(), start=1):
+        name = _clean(r.get("merchant_name"))
+        if not name:
+            no_name += 1
+            continue
+        mid = _norm_id(r[idc]) if idc is not None else f"M{n:04d}"
+        if not mid:
+            mid = f"M{n:04d}"
+            generated = True
+        mid = mid.replace(" ", "_") if re.search(r"\s", mid) else mid
+        if mid in seen_ids:
+            dup_ids += 1
+            continue
+        seen_ids.add(mid)
+        merchants.append({"id": mid, "name": name, "alamat": _clean(r.get(ac)) if ac else "", "petugas": _clean(r[pc]) if pc else ""})
+    # nama kembar dibedakan lewat alamat (atau 2 baris pertama alamat), bukan lewat ID
+    from collections import Counter
+    cnt = Counter(m["name"].lower() for m in merchants)
+    for m in merchants:
+        m["label"] = m["name"]
+        if cnt[m["name"].lower()] > 1:
+            m["label"] = f"{m['name']} - {m['alamat'][:40]}" if m["alamat"] else f"{m['name']} ({m['id']})"
+    if generated:
+        warnings.append("Data tidak punya kolom merchant_id (atau ada yang kosong): ID dibuat otomatis (M0001, M0002, …). "
+                        "ID ini tidak ada di Google Sheet, jadi hasil kunjungan belum bisa dicocokkan ke Sheet. Tambahkan kolom merchant_id di Sheet dulu.")
+    if dup_ids:
+        warnings.append(f"{dup_ids} baris dilewati karena merchant_id kembar.")
+    if no_name:
+        warnings.append(f"{no_name} baris dilewati karena tanpa nama merchant.")
+    if len(merchants) > 3000:
+        warnings.append("Lebih dari 3.000 merchant: formulir bisa lambat di ponsel. Pertimbangkan membagi per petugas atau per wilayah.")
+    if not merchants:
+        raise ValueError("Tidak ada merchant yang bisa dimasukkan ke formulir.")
+    filtered = bool(filter_by_petugas and petugas_vals)
+
+    survey_h = ["type", "name", "label", "required", "choice_filter", "appearance"]
+    survey = [
+        ("start", "start", "", "", "", ""), ("end", "end", "", "", "", ""),
+        ("today", "tanggal", "", "", "", ""), ("deviceid", "device", "", "", "", ""),
+        (("select_one petugas" if petugas_vals else "text"), "petugas", "Nama petugas", "yes", "", "minimal" if petugas_vals else ""),
+        ("select_one merchant", "merchant_id", "Nama merchant", "yes", "petugas=${petugas} or petugas=''" if filtered else "", "autocomplete"),
+        ("select_one hasil", "hasil_kunjungan", "Hasil kunjungan", "yes", "", "minimal"),
+        ("image", "foto_kunjungan", "Foto kunjungan", "yes", "", ""),
+    ]
+    choices_h = ["list_name", "name", "label", "petugas"]
+    choices = [("petugas", v, v, "") for v in petugas_vals]
+    choices += [("hasil", k, lbl, "") for k, lbl in KOBO_HASIL_CHOICES]
+    choices += [("merchant", m["id"], m["label"], m["petugas"] if filtered else "") for m in merchants]
+
+    wb = Workbook()
+
+    def put(ws, header, rows, widths):
+        ws.append(header)
+        for row in rows:
+            ws.append(list(row))
+        for c in ws[1]:
+            c.font = Font(bold=True, color="FFFFFF")
+            c.fill = PatternFill("solid", fgColor="2563EB")
+        for i, w in enumerate(widths, 1):
+            ws.column_dimensions[get_column_letter(i)].width = w
+        ws.freeze_panes = "A2"
+
+    ws = wb.active
+    ws.title = "survey"
+    put(ws, survey_h, survey, [22, 20, 26, 10, 36, 14])
+    put(wb.create_sheet("choices"), choices_h, choices, [16, 24, 40, 20])
+    slug = re.sub(r"[^a-z0-9_]+", "_", title.lower()).strip("_") or "kunjungan_merchant"
+    put(wb.create_sheet("settings"), ["form_title", "form_id", "version", "default_language"],
+        [(title[:100], slug[:40], datetime.datetime.now().strftime("%Y%m%d%H%M"), "Indonesian (id)")], [30, 28, 16, 20])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue(), {"merchants": len(merchants), "petugas": len(petugas_vals), "filtered": filtered,
+                            "generated_ids": generated, "warnings": warnings}
 
 
 def read_table_file(name, data):
@@ -5976,6 +6087,41 @@ if st.session_state.page == "Routing":
                                 st.warning("Tidak ada baris dengan merchant_id yang bisa dikirim.")
                         if _del_w:
                             st.caption(f"ℹ️ {_del_w} baris yang Anda hapus di tabel tidak ikut dihapus dari Sheet.")
+
+        with st.expander("📱 Buat formulir KoboCollect dari data ini (XLSForm)", expanded=False):
+            st.caption(
+                "Membuat file formulir untuk KoboToolbox dari data di atas (setelah edit tabel). Petugas memilih **nama merchant** dari daftar; "
+                "ID merchant tersimpan otomatis di balik pilihan itu, tidak perlu diketik. Hasil kunjungan: sudah akuisisi, penjadwalan ulang, "
+                "belum bertemu PIC, merchant tidak ditemukan, belum tertarik, sudah memiliki produk; plus foto kunjungan."
+            )
+            _xf_title = st.text_input("Judul formulir", value="Kunjungan Merchant", key="xlsform_title", max_chars=80)
+            _xf_has_p = any(str(c).strip().lower() == "petugas" for c in df.columns)
+            _xf_filter = st.checkbox(
+                "Petugas hanya melihat merchant miliknya", value=True, key="xlsform_filter", disabled=not _xf_has_p,
+                help="Memakai kolom petugas di data (Mode Pro). Merchant tanpa petugas muncul untuk semua. "
+                     "Tanpa kolom petugas, nama petugas diisi sendiri dan semua merchant muncul.",
+            )
+            _xf_all = st.checkbox("Sertakan merchant berstatus 'sudah akuisisi' / 'belum tertarik'", value=False, key="xlsform_all")
+            if st.button("🛠️ Buat formulir", key="xlsform_btn", width="stretch"):
+                try:
+                    _xb, _xi = build_xlsform(df, _xf_title.strip() or "Kunjungan Merchant", _xf_filter, _xf_all)
+                    st.session_state.xlsform_out = (_xb, _xi)
+                except Exception as e:
+                    st.session_state.xlsform_out = None
+                    st.error(f"Gagal membuat formulir: {e}")
+            _xo = st.session_state.get("xlsform_out")
+            if _xo:
+                _xb, _xi = _xo
+                st.success(f"Formulir siap: {_xi['merchants']} merchant"
+                           + (f", {_xi['petugas']} petugas (pilihan{', merchant difilter per petugas' if _xi['filtered'] else ''})"
+                              if _xi["petugas"] else ", nama petugas diisi sendiri"))
+                for _w in _xi["warnings"]:
+                    st.warning(_w)
+                st.download_button("⬇️ Download formulir (XLSForm .xlsx)", data=_xb, file_name="form_kunjungan_merchant.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="xlsform_dl",
+                                   type="primary", width="stretch")
+                st.caption("Di KoboToolbox: **New → Upload an XLSForm** → pilih file ini → **Deploy**. Kalau data merchant berubah, buat formulir lagi "
+                           "dan **Redeploy** (atau unggah sebagai versi baru).")
 
         _kcfg = kobo_config()
         with st.expander("📋 Hasil kunjungan (KoboToolbox)", expanded=False):
