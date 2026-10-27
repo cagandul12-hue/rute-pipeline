@@ -2117,19 +2117,101 @@ def kobo_fetch(cfg, getter=None):
     return True, pd.DataFrame(rows)
 
 
+def _kobo_latlon(row):
+    """(lat, lon) lokasi kunjungan dari isian geopoint ('lat lon alt akurasi') atau _geolocation; (None, None) bila tak ada."""
+    txt = row.get("lokasi_kunjungan")
+    if isinstance(txt, str):
+        parts = txt.split()
+        if len(parts) >= 2:
+            try:
+                la, lo = float(parts[0]), float(parts[1])
+                if -90 <= la <= 90 and -180 <= lo <= 180:
+                    return la, lo
+            except ValueError:
+                pass
+    g = row.get("_geolocation")
+    if isinstance(g, (list, tuple)) and len(g) >= 2 and all(isinstance(v, (int, float)) for v in g[:2]):
+        if -90 <= g[0] <= 90 and -180 <= g[1] <= 180:
+            return float(g[0]), float(g[1])
+    return None, None
+
+
+def _kobo_foto_url(row):
+    atts = row.get("_attachments")
+    if not isinstance(atts, list):
+        return ""
+    pick = None
+    for a in atts:
+        if isinstance(a, dict) and str(a.get("question_xpath", "")).split("/")[-1] == "foto_kunjungan":
+            pick = a
+            break
+    if pick is None:
+        pick = next((a for a in atts if isinstance(a, dict)), None)
+    if not pick:
+        return ""
+    url = str(pick.get("download_large_url") or pick.get("download_url") or "")
+    return url if url.startswith("https://") else ""
+
+
+KOBO_LATEST_COLS = ["merchant_id", "hasil_kunjungan", "status_baru", "petugas", "_submission_time",
+                    "lat_kunjungan", "lon_kunjungan", "foto_url"]
+
+
 def kobo_latest(df):
-    """Kunjungan terbaru per merchant_id. Return DataFrame dengan kolom standar (kosong bila tak ada isian)."""
-    cols = ["merchant_id", "merchant_name", "hasil_kunjungan", "status_baru", "petugas", "catatan", "lokasi", "_submission_time"]
+    """Kunjungan terbaru per merchant_id. Return DataFrame dengan KOBO_LATEST_COLS (kosong bila tak ada isian)."""
     if df is None or df.empty or "merchant_id" not in df.columns:
-        return pd.DataFrame(columns=cols)
+        return pd.DataFrame(columns=KOBO_LATEST_COLS)
     d = df.copy()
-    for c in cols:
+    for c in ("hasil_kunjungan", "status_baru", "petugas", "_submission_time"):
         if c not in d.columns:
             d[c] = ""
     d["merchant_id"] = d["merchant_id"].map(_norm_id)
     d = d[d["merchant_id"] != ""]
+    ll = d.apply(_kobo_latlon, axis=1) if len(d) else []
+    d["lat_kunjungan"] = [x[0] for x in ll]
+    d["lon_kunjungan"] = [x[1] for x in ll]
+    d["foto_url"] = d.apply(_kobo_foto_url, axis=1) if len(d) else []
     d = d.sort_values("_submission_time", kind="stable").drop_duplicates("merchant_id", keep="last")
-    return d[cols].reset_index(drop=True)
+    return d[KOBO_LATEST_COLS].reset_index(drop=True)
+
+
+def kobo_view(latest, merchants_df=None):
+    """Tabel tampilan hasil kunjungan: waktu (WIB), petugas, nama merchant (dicocokkan lewat merchant_id), hasil, jarak
+    kunjungan dari titik merchant (m), tautan lokasi & foto. Terbaru di atas."""
+    cols = ["Waktu", "Petugas", "Merchant", "Hasil kunjungan", "Jarak dari titik (m)", "Lokasi", "Foto"]
+    if latest is None or latest.empty:
+        return pd.DataFrame(columns=cols)
+    look = {}
+    if merchants_df is not None and not merchants_df.empty:
+        idc = next((c for c in merchants_df.columns if str(c).strip().lower() == SHEET_WRITE_ID_COL), None)
+        if idc is not None:
+            for _, r in merchants_df.iterrows():
+                look.setdefault(_norm_id(r[idc]), (str(r.get("merchant_name", "") or "").strip(), r.get("latitude"), r.get("longitude")))
+    labels = dict(KOBO_HASIL_CHOICES)
+    t = pd.to_datetime(latest["_submission_time"], utc=True, errors="coerce")
+    waktu = t.dt.tz_convert("Asia/Jakarta").dt.strftime("%d/%m/%Y %H:%M").fillna("")
+    rows = []
+    for i, r in latest.iterrows():
+        nm, mla, mlo = look.get(r["merchant_id"], ("", None, None))
+        la, lo = r["lat_kunjungan"], r["lon_kunjungan"]
+        has_v = la is not None and lo is not None and not pd.isna(la) and not pd.isna(lo)
+        dist = None
+        try:
+            if has_v and mla is not None and mlo is not None and not pd.isna(mla) and not pd.isna(mlo):
+                dist = int(round(haversine(float(la), float(lo), float(mla), float(mlo)) * 1000))
+        except (TypeError, ValueError):
+            dist = None
+        rows.append({
+            "Waktu": waktu.iloc[i], "_t": t.iloc[i],
+            "Petugas": str(r["petugas"] or ""),
+            "Merchant": nm or f"ID {r['merchant_id']} (tidak ada di data)",
+            "Hasil kunjungan": labels.get(str(r["hasil_kunjungan"]), str(r["hasil_kunjungan"] or "")),
+            "Jarak dari titik (m)": dist,
+            "Lokasi": f"https://www.google.com/maps?q={la:.6f},{lo:.6f}" if has_v else None,
+            "Foto": r["foto_url"] or None,
+        })
+    out = pd.DataFrame(rows).sort_values("_t", ascending=False, na_position="last").drop(columns=["_t"])
+    return out[cols].reset_index(drop=True)
 
 
 def kobo_status_updates(latest, sheet_df):
@@ -5744,12 +5826,13 @@ def render_kobo_page():
                 "formulir KoboCollect dibuat dari data itu (termasuk edit tabelnya).")
     else:
         st.caption(f"Data yang dipakai: {len(df)} baris dari halaman Routing Optimizer (setelah edit tabel).")
-        with st.container(border=True):
-            st.markdown("#### 📱 Buat formulir KoboCollect dari data ini (XLSForm)")
+        with st.expander("📝 Belum punya formulir KoboCollect (XLSForm)? Buat dulu", expanded=False):
+            st.markdown("**Cukup sekali.** Aplikasi menyiapkan formulir kunjungan dari data merchant Anda, tinggal diunggah ke KoboToolbox.")
+            st.caption("① Atur pilihan di bawah  →  ② Buat & download file  →  ③ Unggah di KoboToolbox lalu **Deploy**")
             st.caption(
-                "Membuat file formulir untuk KoboToolbox dari data di atas (setelah edit tabel). Petugas memilih **nama merchant** dari daftar; "
-                "ID merchant tersimpan otomatis di balik pilihan itu, tidak perlu diketik. Hasil kunjungan: sudah akuisisi, penjadwalan ulang, "
-                "belum bertemu PIC, merchant tidak ditemukan, belum tertarik, sudah memiliki produk; plus lokasi GPS dan foto kunjungan."
+                "Isi formulir: nama petugas, nama merchant (dipilih dari daftar, ID tersimpan otomatis), hasil kunjungan "
+                "(sudah akuisisi, penjadwalan ulang, belum bertemu PIC, merchant tidak ditemukan, belum tertarik, sudah memiliki produk), "
+                "lokasi GPS, dan foto lewat kamera."
             )
             _xf_title = st.text_input("Judul formulir", value="Kunjungan Merchant", key="xlsform_title", max_chars=80)
             _xf_has_p = any(str(c).strip().lower() == "petugas" for c in df.columns)
@@ -5809,9 +5892,16 @@ def render_kobo_page():
                 st.caption(f"{st.session_state.get('kobo_total', 0)} isian · {len(_kl)} merchant · "
                            f"diambil {_ago(datetime.datetime.fromtimestamp(st.session_state.kobo_time, datetime.timezone.utc).isoformat())}")
                 if len(_kl):
-                    _cnt = _kl["hasil_kunjungan"].replace("", "tanpa data").value_counts()
-                    st.bar_chart(_cnt)
-                    st.dataframe(_kl.drop(columns=["lokasi"]), width="stretch", hide_index=True)
+                    st.dataframe(
+                        kobo_view(_kl, df), width="stretch", hide_index=True,
+                        column_config={
+                            "Jarak dari titik (m)": st.column_config.NumberColumn(format="%d"),
+                            "Lokasi": st.column_config.LinkColumn(display_text="📍 Buka"),
+                            "Foto": st.column_config.LinkColumn(display_text="🖼️ Lihat"),
+                        },
+                    )
+                    st.caption("Jarak besar dari titik merchant bisa berarti kunjungan tidak dilakukan di lokasi. "
+                               "Foto terbuka bila Anda sedang login di KoboToolbox.")
                     _syk, _wc = st.session_state.get("sheet_sync"), sheet_write_config()
                     if _syk and _wc:
                         if st.button("📤 Perbarui kolom status di Google Sheet dari hasil kunjungan", key="kobo_to_sheet_btn", width="stretch",
