@@ -3922,7 +3922,7 @@ if "starting_link_saved" not in st.session_state:
 if "sheet_link_saved" not in st.session_state:
     st.session_state.sheet_link_saved = ""     # link Google Sheet terakhir yang berhasil diambil (ikut tersimpan di sesi)
 if "start_mode_saved" not in st.session_state:
-    st.session_state.start_mode_saved = "manual"   # "manual" = tentukan sendiri, "mylocation" = lokasi pengguna di Google Maps
+    st.session_state.start_mode_saved = "mylocation"   # kotak "navigasi dari lokasi petugas": "mylocation" = tercentang (bawaan), "manual" = tidak
 if "multi_depot_rows" not in st.session_state:
     st.session_state.multi_depot_rows = []  # id unik per baris, misal [1, 2, 3]
 if "multi_depot_next_id" not in st.session_state:
@@ -5710,8 +5710,8 @@ def render_howto():
                 "**2. Atur rute** 🛣️  \n"
                 "Pilih cara menentukan jumlah rute (maksimal titik per rute, atau jumlah rute — mis. jumlah sales). "
                 "**Titik awal**: isi titik awal (gudang, kantor, dll.) agar urutan rute dihitung darinya. Centang **🧭 Di lapangan, "
-                "mulai navigasi Google Maps dari lokasi petugas** kalau petugas berangkat dari tempat lain: urutan tetap, tapi link "
-                "Google Maps dimulai dari posisi GPS petugas. Lalu klik **Buat Rute Optimal Sekarang**.\n\n"
+                "mulai navigasi Google Maps dari lokasi petugas** (bawaannya sudah tercentang; hilangkan centang bila navigasi harus mulai dari titik awal): "
+                "urutan tetap, tapi link Google Maps dimulai dari posisi GPS petugas. Lalu klik **Buat Rute Optimal Sekarang**.\n\n"
                 "**3. Pakai hasilnya** 📥  \n"
                 "Pilih tampilan: **Detail rute**, **Peta semua rute**, **📱 Mode Lapangan**, atau **Ringkasan & perbandingan** "
                 "(sebelum vs sesudah optimasi). Buka di Google Maps, kirim ke WhatsApp, salin teks rute, atau unduh Excel."
@@ -5777,6 +5777,8 @@ def render_howto():
                 "(tiap petugas satu wilayah) dan ke hari kerja. Atur jumlah petugas, hari kerja, maks. merchant per hari, "
                 "dan tanggal mulai; hasilnya jadwal petugas × tanggal. **Kunci wilayah** menjaga petugas tetap di areanya. "
                 "Selama mode ini aktif, **Pembagian rute** dan **Titik awal** biasa dinonaktifkan (titik awal diisi per petugas).\n"
+                "- **Merchant terdekat** — di bagian **Titik awal**, centang **🎯 Ambil hanya merchant terdekat dari titik awal** "
+                "dan isi jumlahnya (mis. 20 dari 70): hanya merchant terdekat (garis lurus) yang dibuatkan rute. Titik awal wajib diisi.\n"
                 "- **Multi-depot** — tentukan titik awal untuk tiap rute (Rute 1, Rute 2, …); jumlah rute diatur di Langkah 2.\n"
                 "- **Seimbangkan beban waktu** — durasi tiap rute dibuat lebih mirip.\n"
                 "- **Nama petugas** — isi di tiap rute setelah dibuat; ikut ke Excel, WhatsApp, dan PDF.\n"
@@ -6828,7 +6830,7 @@ if st.session_state.page == "Routing":
                     + ("" if starting_link else " Titik awal di atas kosong, jadi titik mulai rute dipilih otomatis; isi titik awal supaya urutan sesuai tempat berangkat sebenarnya.")
                 )
 
-            nearest_on = st.checkbox(
+            nearest_on = IS_PRO and st.checkbox(
                 "🎯 Ambil hanya merchant terdekat dari titik awal",
                 value=bool(st.session_state.nearest_on_flag),
                 key=_wk("_nearest_on_widget"),
