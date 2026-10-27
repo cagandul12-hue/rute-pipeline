@@ -2229,7 +2229,7 @@ def build_xlsform(df, title="Kunjungan Merchant", filter_by_petugas=True, includ
         ("select_one merchant", "merchant_id", "Nama merchant", "yes", "petugas=${petugas} or petugas=''" if filtered else "", "autocomplete"),
         ("select_one hasil", "hasil_kunjungan", "Hasil kunjungan", "yes", "", "minimal"),
         ("geopoint", "lokasi_kunjungan", "Lokasi kunjungan (ambil sebelum foto)", "yes", "", ""),
-        ("image", "foto_kunjungan", "Foto kunjungan", "yes", "", ""),
+        ("image", "foto_kunjungan", "Foto kunjungan (ambil langsung dengan kamera)", "yes", "", "new"),   # new = hanya kamera, tanpa galeri
     ]
     choices_h = ["list_name", "name", "label", "petugas"]
     choices = [("petugas", v, v, "") for v in petugas_vals]
