@@ -3913,6 +3913,10 @@ if "uploader_nonce" not in st.session_state:
     st.session_state.uploader_nonce = 0  # ganti key uploader supaya kosong setelah file disimpan
 if "use_extracted_flag" not in st.session_state:
     st.session_state.use_extracted_flag = False
+if "nearest_on_flag" not in st.session_state:
+    st.session_state.nearest_on_flag = False      # hanya ambil N merchant terdekat dari titik awal
+if "nearest_n_flag" not in st.session_state:
+    st.session_state.nearest_n_flag = 20
 if "starting_link_saved" not in st.session_state:
     st.session_state.starting_link_saved = ""
 if "sheet_link_saved" not in st.session_state:
@@ -4953,6 +4957,26 @@ def _sync_use_extracted():
     )
 
 
+def _sync_nearest_on():
+    st.session_state.nearest_on_flag = bool(st.session_state.get(_wk("_nearest_on_widget")))
+
+
+def _sync_nearest_n():
+    try:
+        st.session_state.nearest_n_flag = max(2, int(st.session_state.get(_wk("_nearest_n_widget"), 20)))
+    except (TypeError, ValueError):
+        pass
+
+
+def pick_nearest(df, lat, lon, n):
+    """N baris terdekat (jarak garis lurus) dari (lat, lon). Return (df_terpilih_urutan_asli, info) atau (df, None) bila tak perlu."""
+    if n >= len(df):
+        return df, None
+    d = np.array([haversine(lat, lon, a, b) for a, b in zip(df["latitude"], df["longitude"])])
+    keep = np.sort(np.argsort(d, kind="stable")[:n])
+    return df.iloc[keep].reset_index(drop=True), {"picked": int(n), "total": int(len(df)), "max_km": float(d[keep].max())}
+
+
 def _sync_starting_link():
     st.session_state.starting_link_saved = st.session_state.get(
         _wk("_starting_link_widget"), st.session_state.starting_link_saved
@@ -5246,6 +5270,8 @@ def _session_payload(ss, with_files=True):
             "use_extracted_flag": bool(ss.use_extracted_flag),
             "starting_link_saved": ss.starting_link_saved,
             "start_mode_saved": ss.start_mode_saved,
+            "nearest_on_flag": bool(ss.nearest_on_flag),
+            "nearest_n_flag": int(ss.nearest_n_flag),
             "sheet": ({"link": ss.sheet_sync["link"], "fname": ss.sheet_sync["fname"], "on": bool(ss.sheet_sync["on"])}
                       if ss.get("sheet_sync") else {"link": ss.get("sheet_link_saved", ""), "fname": "", "on": False}),
             "round_trip_flag": bool(ss.round_trip_flag),
@@ -5318,6 +5344,10 @@ def load_session_bytes(raw):
     for key in ("use_extracted_flag", "round_trip_flag", "dedupe_flag"):
         if isinstance(cfg.get(key), bool):
             updates[key] = cfg[key]
+    if isinstance(cfg.get("nearest_on_flag"), bool):
+        updates["nearest_on_flag"] = cfg["nearest_on_flag"]
+    if isinstance(cfg.get("nearest_n_flag"), int) and 2 <= cfg["nearest_n_flag"] <= 100000:
+        updates["nearest_n_flag"] = cfg["nearest_n_flag"]
     if cfg.get("start_mode_saved") in ("manual", "mylocation"):
         updates["start_mode_saved"] = cfg["start_mode_saved"]
     _sh = cfg.get("sheet") if isinstance(cfg.get("sheet"), dict) else {}
@@ -6798,6 +6828,30 @@ if st.session_state.page == "Routing":
                     + ("" if starting_link else " Titik awal di atas kosong, jadi titik mulai rute dipilih otomatis; isi titik awal supaya urutan sesuai tempat berangkat sebenarnya.")
                 )
 
+            nearest_on = st.checkbox(
+                "🎯 Ambil hanya merchant terdekat dari titik awal",
+                value=bool(st.session_state.nearest_on_flag),
+                key=_wk("_nearest_on_widget"),
+                on_change=_sync_nearest_on,
+                disabled=dp_on or len(df) < 3,
+                help="Dari semua data, hanya N merchant yang paling dekat dengan titik awal yang dibuatkan rute (jarak garis lurus). "
+                     "Sisanya tidak ikut kali ini; setelah merchant dikunjungi dan statusnya diperbarui, buat rute lagi untuk gelombang berikutnya. "
+                     "Tidak berlaku bersama multi-depot atau Rencana beberapa hari.",
+            ) and not dp_on and len(df) >= 3
+            nearest_n = len(df)
+            if nearest_on:
+                nearest_n = int(st.number_input(
+                    f"Jumlah merchant yang diambil (dari {len(df)})", min_value=2, max_value=max(2, len(df)),
+                    value=int(min(max(2, st.session_state.nearest_n_flag), max(2, len(df)))), step=1,
+                    key=_wk("_nearest_n_widget"), on_change=_sync_nearest_n,
+                ))
+                if not starting_link:
+                    st.warning("Isi **Titik Awal** di atas dulu: tanpa titik awal, merchant terdekat tidak bisa ditentukan "
+                               "dan semua merchant tetap dibuatkan rute.", icon="📍")
+                else:
+                    st.caption(f"🎯 {min(nearest_n, len(df))} merchant terdekat dari titik awal (garis lurus) akan dibuatkan rute; "
+                               "pembagian ke beberapa rute tetap mengikuti pengaturan di atas.")
+
             use_multi_depot = False
             depot_rows_raw = []  # [(nama, lokasi), ...] — mentah, belum divalidasi/resolve
             if dp_on:
@@ -6934,6 +6988,7 @@ if st.session_state.page == "Routing":
             f"**Ringkasan:** {len(df)} merchant → {_plan_txt} · mulai {start_time:%H:%M} · "
             + (f"{int(visit_minutes)} menit/toko" if visit_minutes else "tanpa durasi kunjungan")
             + " · " + ("pulang-pergi" if round_trip else "satu arah")
+            + (f" · {min(nearest_n, len(df))} merchant terdekat" if nearest_on else "")
             + " · titik awal: " + ("per petugas" if dp_on else ("sesuai isian" if starting_link else "otomatis (paling efisien)")) + (" · navigasi dari lokasi petugas" if (use_my_loc and not dp_on) else "")
             + (" · urut sesuai jam buka/tutup" if hours_opt else ""),
             icon="🧾",
@@ -6948,6 +7003,7 @@ if st.session_state.page == "Routing":
             len(df), tuple(df["merchant_name"]), max_points_per_route, target_routes, starting_link,
             round_trip, split_mode, int(visit_minutes), start_time.strftime("%H:%M"),
             use_multi_depot, tuple(depot_rows_raw), balance_time, hours_opt, use_my_loc,
+            (nearest_n if nearest_on else None),
             (dp_n, tuple(dp_names), tuple(dp_rows), tuple(dp_days_sel), dp_cap, str(dp_start_date), dp_lock) if dp_on else None,
         )
 
@@ -6981,6 +7037,9 @@ if st.session_state.page == "Routing":
                         parsed_name, start_lat, start_lon = extract_google_maps_data(starting_link)
                         start_name = parsed_name or "START POINT"
 
+                nearest_info = None
+                if nearest_on and not dp_on and not depots and start_lat and start_lon:
+                    df, nearest_info = pick_nearest(df, start_lat, start_lon, nearest_n)
                 balance_info = None
                 dp_meta = {}
                 route_depot = {}
@@ -7205,6 +7264,7 @@ if st.session_state.page == "Routing":
                 "multi_depot_overrode_single": bool(depots) and bool(starting_link),
                 "n_depots": len(depots),
                 "balance_info": balance_info,
+                "nearest_info": nearest_info,
                 "hours_opt_routes": hours_opt_routes,
                 "hours_opt_failed": hours_opt_failed,
                 "day_plan": dp_on,
@@ -7255,6 +7315,12 @@ if st.session_state.page == "Routing":
                 st.session_state.driver_names[_rid0] = _nm0
                 _r0["driver"] = _nm0
             st.success(f"🎉 Rute berhasil dibuat! {len(route_summaries)} rute siap dipakai.")
+            _near = result.get("nearest_info")
+            if _near:
+                st.caption(
+                    f"🎯 Diambil **{_near['picked']} dari {_near['total']}** merchant terdekat dari titik awal "
+                    f"(terjauh ±{_near['max_km']:.1f} km, garis lurus). {_near['total'] - _near['picked']} lainnya tidak masuk rute ini."
+                )
             _bal = result.get("balance_info")
             if _bal and _bal["before_spread_min"] - _bal["after_spread_min"] > 1:
                 _bal_lead = (
