@@ -5775,12 +5775,14 @@ def render_howto():
                 "Langkah 2 mengatur urutan: yang tutup lebih awal didahulukan, yang belum buka ditunda (atau petugas menunggu ⏳).\n"
                 "- **Pembagian petugas & hari kerja** — centang di Langkah 2 untuk membagi merchant ke beberapa petugas "
                 "(tiap petugas satu wilayah dan titik awalnya sendiri, mis. rumah petugas) dan ke hari kerja. Atur jumlah petugas, "
-                "nama dan titik awal tiap petugas, **hari kerja (pilih sendiri)**, maks. merchant per hari, dan tanggal mulai; "
-                "hasilnya jadwal petugas × tanggal. Untuk satu hari dengan beberapa petugas, pilih satu hari kerja. "
+                "nama dan titik awal tiap petugas, maks. merchant per hari, dan tanggal mulai; **hari kerja boleh dikosongkan** "
+                "(kosong = semua hari berurutan mulai tanggal itu); hasilnya jadwal petugas × tanggal. Untuk satu hari dengan beberapa "
+                "petugas, cukup isi maks. merchant per hari yang cukup besar. "
                 "**Kunci wilayah** menjaga petugas tetap di areanya. Selama mode ini aktif, **Pembagian rute** dan **Titik awal** "
                 "biasa dinonaktifkan (titik awal diisi per petugas).\n"
                 "- **Merchant terdekat** — di bagian **Titik awal**, centang **🎯 Ambil hanya merchant terdekat dari titik awal** "
-                "dan isi jumlahnya (mis. 20 dari 70): hanya merchant terdekat (garis lurus) yang dibuatkan rute. Titik awal wajib diisi.\n"
+                "dan isi jumlahnya (mis. 20 dari 70): hanya merchant terdekat (garis lurus) yang dibuatkan rute. Titik awal wajib diisi (di Pembagian petugas & "
+                "hari kerja: titik awal minimal satu petugas).\n"
                 "- **Seimbangkan beban waktu** — durasi tiap rute dibuat lebih mirip.\n"
                 "- **Nama petugas** — isi di tiap rute setelah dibuat; ikut ke Excel, WhatsApp, dan PDF.\n"
                 "- **Preset** — simpan kombinasi pengaturan bernama, mis. “Rute Pagi Sales”.\n\n"
@@ -6661,7 +6663,12 @@ if st.session_state.page == "Routing":
                                                      step=1, key="dp_cap"))
                     with dc3:
                         dp_start_date = st.date_input("Mulai tanggal", key="dp_start_date")
-                    dp_days_sel = st.multiselect("Hari kerja", ID_DAYS, key="dp_days", placeholder="Pilih hari kerja…")
+                    dp_days_sel = st.multiselect(
+                        "Hari kerja (opsional)", ID_DAYS, key="dp_days", placeholder="Kosong = semua hari berurutan mulai tanggal di atas",
+                        help="Pilih hanya kalau ada hari yang dilewati (mis. Senin–Jumat saja). Dibiarkan kosong, hari kerja dihitung "
+                             "berurutan setiap hari mulai tanggal mulai (akhir pekan ikut). Untuk satu hari dengan beberapa petugas, "
+                             "biarkan kosong atau pilih satu hari.",
+                    )
                     dp_lock = st.checkbox(
                         "🔒 Kunci wilayah petugas", key="dp_lock",
                         help="Merchant yang sudah punya kolom `petugas` (nama sama dengan daftar di bawah) tetap di petugas "
@@ -6695,13 +6702,12 @@ if st.session_state.page == "Routing":
                         dp_rows.append((_nm.strip(), _loc))
                     if len(set(n.lower() for n in dp_names)) < len(dp_names):
                         st.warning("⚠️ Ada nama petugas yang kembar — beri nama berbeda supaya wilayahnya tidak tertukar.")
-                    if not dp_days_sel:
-                        st.warning("⚠️ Pilih hari kerja dulu (minimal satu) sebelum membuat rute.")
-                    _per = math.ceil(len(df) / dp_n)
+                    _n_eff = min(int(st.session_state.nearest_n_flag), len(df)) if (IS_PRO and st.session_state.nearest_on_flag and len(df) >= 3) else len(df)
+                    _per = math.ceil(_n_eff / dp_n)
                     _dp_days_est = math.ceil(_per / dp_cap)
-                    _weeks = math.ceil(_dp_days_est / max(1, len(dp_days_sel)))
+                    _weeks = math.ceil(_dp_days_est / (len(dp_days_sel) or 7))
                     st.caption(
-                        f"📅 Perkiraan: {len(df)} merchant → {dp_n} petugas × ±{_dp_days_est} hari kerja "
+                        f"📅 Perkiraan: {_n_eff} merchant → {dp_n} petugas × ±{_dp_days_est} hari kerja "
                         f"(≈{_weeks} minggu), ±{dp_n * _dp_days_est} rute."
                     )
         use_multi_depot = False   # multi-depot sudah dihapus dari tampilan (digantikan Pembagian petugas & hari kerja)
@@ -6837,11 +6843,11 @@ if st.session_state.page == "Routing":
                 value=bool(st.session_state.nearest_on_flag),
                 key=_wk("_nearest_on_widget"),
                 on_change=_sync_nearest_on,
-                disabled=dp_on or len(df) < 3,
+                disabled=len(df) < 3,
                 help="Dari semua data, hanya N merchant yang paling dekat dengan titik awal yang dibuatkan rute (jarak garis lurus). "
-                     "Sisanya tidak ikut kali ini; setelah merchant dikunjungi dan statusnya diperbarui, buat rute lagi untuk gelombang berikutnya. "
-                     "Tidak berlaku bersama Pembagian petugas & hari kerja.",
-            ) and not dp_on and len(df) >= 3
+                     "Di Pembagian petugas & hari kerja: dekat dengan titik awal petugas mana pun. "
+                     "Sisanya tidak ikut kali ini; setelah merchant dikunjungi dan statusnya diperbarui, buat rute lagi untuk gelombang berikutnya.",
+            ) and len(df) >= 3
             nearest_n = len(df)
             if nearest_on:
                 nearest_n = int(st.number_input(
@@ -6849,11 +6855,12 @@ if st.session_state.page == "Routing":
                     value=int(min(max(2, st.session_state.nearest_n_flag), max(2, len(df)))), step=1,
                     key=_wk("_nearest_n_widget"), on_change=_sync_nearest_n,
                 ))
-                if not starting_link:
-                    st.warning("Isi **Titik Awal** di atas dulu: tanpa titik awal, merchant terdekat tidak bisa ditentukan "
-                               "dan semua merchant tetap dibuatkan rute.", icon="📍")
+                _have_start = bool(starting_link) or (dp_on and any(str(_l).strip() for _, _l in dp_rows))
+                if not _have_start:
+                    st.warning(("Isi titik awal minimal satu petugas di Pembagian petugas & hari kerja" if dp_on else "Isi **Titik Awal** di atas")
+                               + " dulu: tanpa titik awal, merchant terdekat tidak bisa ditentukan dan semua merchant tetap dibuatkan rute.", icon="📍")
                 else:
-                    st.caption(f"🎯 {min(nearest_n, len(df))} merchant terdekat dari titik awal (garis lurus) akan dibuatkan rute; "
+                    st.caption(f"🎯 {min(nearest_n, len(df))} merchant terdekat dari titik awal" + (" petugas" if dp_on else "") + " (garis lurus) akan dibuatkan rute; "
                                "pembagian ke beberapa rute tetap mengikuti pengaturan di atas.")
 
             use_multi_depot = False
@@ -6984,15 +6991,20 @@ if st.session_state.page == "Routing":
                 dp_meta = {}
                 route_depot = {}
                 if dp_on:
-                    if not dp_days_sel:
-                        st.error("❌ Pilih hari kerja dulu (minimal satu) di bagian Pembagian petugas & hari kerja.")
-                        st.stop()
                     _starts = [None] * dp_n
                     _dp_deps, _dp_errs = parse_depot_rows(dp_rows)
                     for _e in _dp_errs:
                         st.warning("⚠️ " + _e.replace("Titik awal Rute", "Titik awal petugas").replace("rute ini dimulai otomatis", "dimulai otomatis"))
                     for _d in _dp_deps:
                         _starts[_d["row"]] = (_d["lat"], _d["lon"])
+                    if nearest_on:
+                        _pts = [_x for _x in _starts if _x]
+                        if _pts and nearest_n < len(df):
+                            _dd = np.array([min(haversine(_a, _b, _la, _lo) for _a, _b in _pts)
+                                            for _la, _lo in zip(df["latitude"], df["longitude"])])
+                            _keep = np.sort(np.argsort(_dd, kind="stable")[:nearest_n])
+                            nearest_info = {"picked": int(nearest_n), "total": int(len(df)), "max_km": float(_dd[_keep].max())}
+                            df = df.iloc[_keep].reset_index(drop=True)
                     _assigned = None
                     if dp_lock and "petugas" in df.columns:
                         _by_name = {n.strip().lower(): i for i, n in enumerate(dp_names)}
@@ -7026,7 +7038,7 @@ if st.session_state.page == "Routing":
                                 "after_max_min": max(_i["after_max_min"] for _i in _bal_parts),
                                 "scope": "petugas",
                             }
-                    _wd = {ID_DAYS.index(x) for x in dp_days_sel}
+                    _wd = {ID_DAYS.index(x) for x in dp_days_sel} or set(range(7))   # kosong = semua hari berurutan
                     _dates = make_work_dates(dp_start_date, _wd, max(m["day"] for m in _meta) + 1)
                     for _m in _meta:
                         _dt = _dates[_m["day"]]
