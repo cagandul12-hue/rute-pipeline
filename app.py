@@ -1306,7 +1306,7 @@ def assign_routes_to_depots(df, depots):
     return new_of, depot_of
 
 
-# ---------- Rencana beberapa hari (petugas × hari kerja) ----------
+# ---------- Pembagian petugas & hari kerja (petugas × hari kerja) ----------
 ID_DAYS = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
 ID_DAYS_SHORT = ["Sen", "Sel", "Rab", "Kam", "Jum", "Sab", "Min"]
 
@@ -1459,7 +1459,7 @@ def plan_multi_day(lat, lon, n_petugas, cap, starts=None, assigned=None, seed=42
 
 
 def build_schedule_matrix(route_summaries):
-    """Tabel jadwal: baris = petugas, kolom = tanggal, isi = 'N titik · X km'. None kalau bukan rencana beberapa hari."""
+    """Tabel jadwal: baris = petugas, kolom = tanggal, isi = 'N titik · X km'. None kalau bukan pembagian petugas & hari kerja."""
     rows = [r for r in route_summaries if r.get("tanggal")]
     if not rows:
         return None
@@ -5571,8 +5571,8 @@ def render_preset_panel():
             {"error": st.error, "success": st.success}.get(flash[0], st.info)(flash[1])
         st.caption(
             "Simpan kombinasi pengaturan yang sering dipakai, mis. “Rute Pagi Sales”. Yang tersimpan: "
-            "cara & jumlah rute, cara membagi, jam mulai, durasi kunjungan, titik-balik, titik awal, dan "
-            "multi-depot. *Maksimal titik per rute* tidak ikut karena batasnya bergantung jumlah merchant. "
+            "cara & jumlah rute, cara membagi, jam mulai, durasi kunjungan, titik-balik, dan titik awal. "
+            "*Maksimal titik per rute* tidak ikut karena batasnya bergantung jumlah merchant. "
             "Preset ikut tersimpan di file **Simpan / Buka Sesi**."
         )
         names = list(ss.presets.keys())
@@ -5670,7 +5670,7 @@ def render_app_mode_toggle(prefix):
             "🛠️ Pro", key=f"{prefix}_appmode_pro", width='stretch',
             type="primary" if mode == "Pro" else "secondary",
             on_click=_set_app_mode, args=("Pro",),
-            help="Semua pengaturan: multi-depot, prioritas, jam operasional, nama petugas, urutan manual, PDF, simpan sesi, dll.",
+            help="Semua pengaturan: pembagian petugas & hari kerja, prioritas, jam operasional, nama petugas, urutan manual, PDF, simpan sesi, dll.",
         )
 
 
@@ -5722,7 +5722,7 @@ def render_howto():
                 "- **⚡ Basic** — paling ringkas: upload data → atur jumlah rute → buat rute. Rute dimulai 08:00, "
                 "tanpa durasi kunjungan, satu arah, dibagi otomatis per area. Titik awal boleh diisi (opsional).\n"
                 "- **🛠️ Pro** — semua pengaturan lanjutan: jam mulai & durasi kunjungan, pulang-pergi, prioritas, jam "
-                "operasional, multi-depot, pembagian \"isi penuh\", seimbangkan beban waktu, nama petugas, urutan manual, "
+                "operasional, pembagian petugas & hari kerja, pembagian \"isi penuh\", seimbangkan beban waktu, nama petugas, urutan manual, "
                 "PDF, simpan sesi, dan preset."
             )
         with t_field:
@@ -5773,13 +5773,14 @@ def render_howto():
                 "- **Jam operasional** — isi `jam_buka`/`jam_tutup` (HH:MM) di Excel/CSV atau di **Lihat & Edit Data Awal**. "
                 "Jam tiba yang lewat jam tutup ditandai ⚠️. Ceklis **Optimalkan rute berdasarkan jam operasional** di "
                 "Langkah 2 mengatur urutan: yang tutup lebih awal didahulukan, yang belum buka ditunda (atau petugas menunggu ⏳).\n"
-                "- **Rencana beberapa hari** — centang di Langkah 2 untuk membagi ratusan merchant ke beberapa petugas "
-                "(tiap petugas satu wilayah) dan ke hari kerja. Atur jumlah petugas, hari kerja, maks. merchant per hari, "
-                "dan tanggal mulai; hasilnya jadwal petugas × tanggal. **Kunci wilayah** menjaga petugas tetap di areanya. "
-                "Selama mode ini aktif, **Pembagian rute** dan **Titik awal** biasa dinonaktifkan (titik awal diisi per petugas).\n"
+                "- **Pembagian petugas & hari kerja** — centang di Langkah 2 untuk membagi merchant ke beberapa petugas "
+                "(tiap petugas satu wilayah dan titik awalnya sendiri, mis. rumah petugas) dan ke hari kerja. Atur jumlah petugas, "
+                "nama dan titik awal tiap petugas, **hari kerja (pilih sendiri)**, maks. merchant per hari, dan tanggal mulai; "
+                "hasilnya jadwal petugas × tanggal. Untuk satu hari dengan beberapa petugas, pilih satu hari kerja. "
+                "**Kunci wilayah** menjaga petugas tetap di areanya. Selama mode ini aktif, **Pembagian rute** dan **Titik awal** "
+                "biasa dinonaktifkan (titik awal diisi per petugas).\n"
                 "- **Merchant terdekat** — di bagian **Titik awal**, centang **🎯 Ambil hanya merchant terdekat dari titik awal** "
                 "dan isi jumlahnya (mis. 20 dari 70): hanya merchant terdekat (garis lurus) yang dibuatkan rute. Titik awal wajib diisi.\n"
-                "- **Multi-depot** — tentukan titik awal untuk tiap rute (Rute 1, Rute 2, …); jumlah rute diatur di Langkah 2.\n"
                 "- **Seimbangkan beban waktu** — durasi tiap rute dibuat lebih mirip.\n"
                 "- **Nama petugas** — isi di tiap rute setelah dibuat; ikut ke Excel, WhatsApp, dan PDF.\n"
                 "- **Preset** — simpan kombinasi pengaturan bernama, mis. “Rute Pagi Sales”.\n\n"
@@ -6636,7 +6637,7 @@ if st.session_state.page == "Routing":
             _ss.setdefault("dp_on", False)
             _ss.setdefault("dp_n", 2)
             _ss.setdefault("dp_cap", 12)
-            _ss.setdefault("dp_days", ID_DAYS[:5])
+            _ss.setdefault("dp_days", [])   # hari kerja dipilih sendiri (tidak terisi otomatis)
             _ss.setdefault("dp_lock", False)
             _ss.setdefault("dp_start_date", _today + datetime.timedelta(days=(7 - _today.weekday()) % 7))
             for _k in ["dp_on", "dp_n", "dp_cap", "dp_days", "dp_lock", "dp_start_date"] + [
@@ -6646,9 +6647,10 @@ if st.session_state.page == "Routing":
                     _ss[_k] = _ss[_k]   # jaga isian walau bagian ini sempat tidak tampil
             with st.container(border=True):
                 dp_on = st.checkbox(
-                    "📅 Rencana beberapa hari (bagi ke hari kerja & petugas)", key="dp_on",
-                    help="Untuk ratusan merchant: dibagi ke beberapa petugas (tiap petugas satu wilayah) lalu ke hari "
-                         "kerja. Tiap petugas-hari menjadi satu rute. Menggantikan pengaturan jumlah rute dan multi-depot.",
+                    "👥 Pembagian petugas & hari kerja", key="dp_on",
+                    help="Bagi merchant ke beberapa petugas (tiap petugas satu wilayah, dengan titik awal masing-masing) lalu ke hari "
+                         "kerja. Tiap petugas-hari menjadi satu rute. Cocok untuk satu hari dengan banyak petugas maupun untuk "
+                         "ratusan merchant lintas hari. Menggantikan pengaturan jumlah rute.",
                 )
                 if dp_on:
                     dc1, dc2, dc3 = st.columns(3)
@@ -6659,7 +6661,7 @@ if st.session_state.page == "Routing":
                                                      step=1, key="dp_cap"))
                     with dc3:
                         dp_start_date = st.date_input("Mulai tanggal", key="dp_start_date")
-                    dp_days_sel = st.multiselect("Hari kerja", ID_DAYS, key="dp_days")
+                    dp_days_sel = st.multiselect("Hari kerja", ID_DAYS, key="dp_days", placeholder="Pilih hari kerja…")
                     dp_lock = st.checkbox(
                         "🔒 Kunci wilayah petugas", key="dp_lock",
                         help="Merchant yang sudah punya kolom `petugas` (nama sama dengan daftar di bawah) tetap di petugas "
@@ -6694,7 +6696,7 @@ if st.session_state.page == "Routing":
                     if len(set(n.lower() for n in dp_names)) < len(dp_names):
                         st.warning("⚠️ Ada nama petugas yang kembar — beri nama berbeda supaya wilayahnya tidak tertukar.")
                     if not dp_days_sel:
-                        st.warning("⚠️ Pilih minimal satu hari kerja.")
+                        st.warning("⚠️ Pilih hari kerja dulu (minimal satu) sebelum membuat rute.")
                     _per = math.ceil(len(df) / dp_n)
                     _dp_days_est = math.ceil(_per / dp_cap)
                     _weeks = math.ceil(_dp_days_est / max(1, len(dp_days_sel)))
@@ -6702,7 +6704,7 @@ if st.session_state.page == "Routing":
                         f"📅 Perkiraan: {len(df)} merchant → {dp_n} petugas × ±{_dp_days_est} hari kerja "
                         f"(≈{_weeks} minggu), ±{dp_n * _dp_days_est} rute."
                     )
-        use_multi_depot = bool(IS_PRO and st.session_state.use_multi_depot_flag and not dp_on)  # nilai widget = flag ini
+        use_multi_depot = False   # multi-depot sudah dihapus dari tampilan (digantikan Pembagian petugas & hari kerja)
         with st.container(border=True):
             st.markdown("**🧭 Pembagian rute**")
             if dp_on:
@@ -6711,7 +6713,7 @@ if st.session_state.page == "Routing":
                 n_cluster_default = max(1, dp_n * _dp_days_est)
                 split_mode, balance_time = SPLIT_AUTO, dp_balance   # dp_balance ikut tanda tangan pengaturan hasil
                 st.info(
-                    "Dinonaktifkan karena **Rencana beberapa hari** aktif — jumlah rute ditentukan oleh jumlah petugas, "
+                    "Dinonaktifkan karena **Pembagian petugas & hari kerja** aktif — jumlah rute ditentukan oleh jumlah petugas, "
                     "hari kerja, dan batas merchant per hari di atas.",
                     icon="🔒",
                 )
@@ -6819,15 +6821,15 @@ if st.session_state.page == "Routing":
                 value=st.session_state.start_mode_saved == "mylocation",
                 key=_wk("_start_mode_widget"),
                 on_change=_sync_start_mode,
-                disabled=dp_on,
-                help="Rute tetap dihitung dari titik awal di atas, tetapi saat link Google Maps dibuka, navigasi dimulai dari "
-                     "posisi GPS petugas pada saat itu (bukan titik awal). Cocok bila petugas berangkat dari rumah atau lokasi lain.",
-            ) and not dp_on
+                help="Rute tetap dihitung dari titik awal (di Pembagian petugas & hari kerja: titik awal tiap petugas), tetapi saat link "
+                     "Google Maps dibuka, navigasi dimulai dari posisi GPS petugas pada saat itu (bukan titik awal). Cocok bila "
+                     "petugas berangkat dari rumah atau lokasi lain.",
+            )
             if use_my_loc:
                 st.caption(
-                    "📍 Urutan rute dihitung dari titik awal di atas. Saat link Google Maps dibuka, navigasi dimulai dari "
-                    "**lokasi petugas saat itu**; aktifkan GPS dan izinkan Google Maps memakai lokasi."
-                    + ("" if starting_link else " Titik awal di atas kosong, jadi titik mulai rute dipilih otomatis; isi titik awal supaya urutan sesuai tempat berangkat sebenarnya.")
+                    "📍 Urutan rute dihitung dari titik awal" + (" tiap petugas" if dp_on else " di atas") + ". Saat link Google Maps "
+                    "dibuka, navigasi dimulai dari **lokasi petugas saat itu**; aktifkan GPS dan izinkan Google Maps memakai lokasi."
+                    + ("" if (starting_link or dp_on) else " Titik awal di atas kosong, jadi titik mulai rute dipilih otomatis; isi titik awal supaya urutan sesuai tempat berangkat sebenarnya.")
                 )
 
             nearest_on = IS_PRO and st.checkbox(
@@ -6838,7 +6840,7 @@ if st.session_state.page == "Routing":
                 disabled=dp_on or len(df) < 3,
                 help="Dari semua data, hanya N merchant yang paling dekat dengan titik awal yang dibuatkan rute (jarak garis lurus). "
                      "Sisanya tidak ikut kali ini; setelah merchant dikunjungi dan statusnya diperbarui, buat rute lagi untuk gelombang berikutnya. "
-                     "Tidak berlaku bersama multi-depot atau Rencana beberapa hari.",
+                     "Tidak berlaku bersama Pembagian petugas & hari kerja.",
             ) and not dp_on and len(df) >= 3
             nearest_n = len(df)
             if nearest_on:
@@ -6855,78 +6857,14 @@ if st.session_state.page == "Routing":
                                "pembagian ke beberapa rute tetap mengikuti pengaturan di atas.")
 
             use_multi_depot = False
-            depot_rows_raw = []  # [(nama, lokasi), ...] — mentah, belum divalidasi/resolve
+            depot_rows_raw = []
             if dp_on:
-                starting_link = ""  # tidak dipakai di Rencana beberapa hari
+                starting_link = ""  # tidak dipakai di Pembagian petugas & hari kerja
                 st.info(
-                    "Dinonaktifkan karena **Rencana beberapa hari** aktif — isi titik awal tiap petugas di bagian "
-                    "Rencana beberapa hari di atas (kosong = titik mulai dipilih otomatis).",
-                    icon="🔒",
+                    "Titik awal tiap petugas diisi di bagian **Pembagian petugas & hari kerja** di atas (kosong = titik mulai dipilih "
+                    "otomatis). Kotak navigasi di atas tetap berlaku untuk rute semua petugas.",
+                    icon="📍",
                 )
-                if IS_PRO:
-                    st.checkbox("🏭 Pakai banyak titik awal (multi-depot)", value=False, key="_md_off", disabled=True)
-            if IS_PRO and not dp_on:
-                use_multi_depot = st.checkbox(
-                    "🏭 Pakai banyak titik awal (multi-depot)",
-                    value=st.session_state.use_multi_depot_flag,
-                    key=_wk("_use_multi_depot_widget"),
-                    on_change=_sync_use_multi_depot,
-                    help=(
-                        "Aktifkan kalau tiap rute berangkat dari titik berbeda (gudang/toko/rumah petugas). Jumlah rute diatur "
-                        "di bagian Pembagian rute, lalu kamu mengisi titik awal untuk tiap rute. Merchant dibagi menurut "
-                        "area dan tiap rute dipasangkan dengan titik awal yang paling cocok. Menggantikan 'Titik Awal' tunggal di atas."
-                    ),
-                )
-            if use_multi_depot:
-                # Satu baris per rute: baris k = titik awal Rute k. Jumlah baris mengikuti jumlah rute di
-                # Pembagian rute. Baris di luar jumlah rute disimpan (tidak hilang) tapi tidak dipakai.
-                _n_slots = max(1, min(int(n_cluster_default), 50))
-                while len(st.session_state.multi_depot_rows) < _n_slots:
-                    st.session_state.multi_depot_rows.append(st.session_state.multi_depot_next_id)
-                    st.session_state.multi_depot_next_id += 1
-                st.caption(
-                    "Isi titik awal untuk tiap rute (link Google Maps atau koordinat). Kosongkan kalau rute itu tidak "
-                    "punya titik awal khusus — titik mulainya dipilih otomatis. Titik awal yang sama boleh dipakai "
-                    "di beberapa rute."
-                )
-                for _rid_x in st.session_state.multi_depot_rows[_n_slots:]:  # baris di luar jumlah rute: isinya dijaga
-                    for _k_x in (f"depot_name_{_rid_x}", f"depot_loc_{_rid_x}"):
-                        if _k_x in st.session_state:
-                            st.session_state[_k_x] = st.session_state[_k_x]
-                for idx, rid in enumerate(st.session_state.multi_depot_rows[:_n_slots]):
-                    rc0, rc1, rc2 = st.columns([0.7, 1.5, 2.3])
-                    with rc0:
-                        st.markdown(
-                            f"<div style='padding-top:{'30px' if idx == 0 else '8px'}'><b>Rute {idx + 1}</b></div>",
-                            unsafe_allow_html=True,
-                        )
-                    with rc1:
-                        st.text_input(
-                            "Nama titik awal (opsional)", key=f"depot_name_{rid}",
-                            placeholder=f"Titik awal Rute {idx + 1}",
-                            label_visibility="visible" if idx == 0 else "collapsed",
-                        )
-                    with rc2:
-                        st.text_input(
-                            "Link Google Maps atau koordinat", key=f"depot_loc_{rid}",
-                            placeholder="https://maps.app.goo.gl/... atau -7.56, 110.81",
-                            label_visibility="visible" if idx == 0 else "collapsed",
-                        )
-                    depot_rows_raw.append((
-                        st.session_state.get(f"depot_name_{rid}", ""),
-                        st.session_state.get(f"depot_loc_{rid}", ""),
-                    ))
-
-                _n_filled = sum(1 for _, loc in depot_rows_raw if loc.strip())
-                if _n_filled:
-                    st.success(
-                        f"✅ {_n_filled} dari {_n_slots} rute punya titik awal khusus"
-                        + ("." if _n_filled == _n_slots else "; sisanya dimulai otomatis.")
-                    )
-                else:
-                    st.caption("Isi titik awal minimal satu rute (link Google Maps atau koordinat).")
-
-
 
         if not IS_PRO:
             # Mode Basic: jumlah rute tetap bisa diatur (di atas), tapi jam
@@ -6938,7 +6876,7 @@ if st.session_state.page == "Routing":
             round_trip = st.session_state.round_trip_flag
             st.caption(
                 "💡 Mode Basic: rute dimulai 08:00, tanpa durasi kunjungan, satu arah, dibagi otomatis per area. "
-                "Butuh jam mulai & durasi kunjungan, pulang-pergi, prioritas, jam operasional, multi-depot, seimbangkan "
+                "Butuh jam mulai & durasi kunjungan, pulang-pergi, prioritas, jam operasional, pembagian petugas & hari kerja, seimbangkan "
                 "beban waktu, atau simpan sesi? Pindah ke **🛠️ Pro** di sidebar."
             )
         else:
@@ -6991,7 +6929,7 @@ if st.session_state.page == "Routing":
             + (f"{int(visit_minutes)} menit/toko" if visit_minutes else "tanpa durasi kunjungan")
             + " · " + ("pulang-pergi" if round_trip else "satu arah")
             + (f" · {min(nearest_n, len(df))} merchant terdekat" if nearest_on else "")
-            + " · titik awal: " + ("per petugas" if dp_on else ("sesuai isian" if starting_link else "otomatis (paling efisien)")) + (" · navigasi dari lokasi petugas" if (use_my_loc and not dp_on) else "")
+            + " · titik awal: " + ("per petugas" if dp_on else ("sesuai isian" if starting_link else "otomatis (paling efisien)")) + (" · navigasi dari lokasi petugas" if use_my_loc else "")
             + (" · urut sesuai jam buka/tutup" if hours_opt else ""),
             icon="🧾",
         )
@@ -7047,7 +6985,7 @@ if st.session_state.page == "Routing":
                 route_depot = {}
                 if dp_on:
                     if not dp_days_sel:
-                        st.error("❌ Pilih minimal satu hari kerja untuk Rencana beberapa hari.")
+                        st.error("❌ Pilih hari kerja dulu (minimal satu) di bagian Pembagian petugas & hari kerja.")
                         st.stop()
                     _starts = [None] * dp_n
                     _dp_deps, _dp_errs = parse_depot_rows(dp_rows)
@@ -7223,7 +7161,7 @@ if st.session_state.page == "Routing":
                             "real_roads": used_real_roads,
                             "round_trip": round_trip,
                             "has_start": has_start,
-                            "from_my_location": bool(use_my_loc and not dp_on),
+                            "from_my_location": bool(use_my_loc),
                             "depot_name": route_start_name if has_start else "",
                             "depot_idx": (route_depot.get(route_id) or {}).get("row"),
                             "driver": st.session_state.driver_names.get(route_id, ""),
