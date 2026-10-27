@@ -2089,6 +2089,30 @@ def _norm_id(v):
     return str(v).strip()
 
 
+def kobo_choice_labels(cfg, list_name="merchant", getter=None):
+    """{nilai_pilihan: label} dari isi formulir yang di-deploy di Kobo (mis. merchant_id -> nama merchant). {} bila gagal."""
+    server, token, uid = cfg
+    try:
+        r = (getter or requests.get)(f"{server}/api/v2/assets/{uid}.json",
+                                     headers={"Authorization": f"Token {token}", "Accept": "application/json"}, timeout=60)
+        r.raise_for_status()
+        choices = (r.json().get("content") or {}).get("choices") or []
+    except Exception:
+        return {}
+    out = {}
+    for c in choices:
+        if not isinstance(c, dict) or str(c.get("list_name") or c.get("list_name_id") or "") != list_name:
+            continue
+        lab = c.get("label")
+        if isinstance(lab, dict):
+            lab = next(iter(lab.values()), "")
+        if isinstance(lab, (list, tuple)):
+            lab = lab[0] if lab else ""
+        if lab not in (None, ""):
+            out[_norm_id(c.get("name"))] = re.sub(r"\s+", " ", str(lab)).strip()
+    return out
+
+
 def kobo_fetch(cfg, getter=None):
     """Ambil semua isian formulir dari API KoboToolbox. Return (ok, DataFrame_atau_pesan)."""
     server, token, uid = cfg
@@ -2175,7 +2199,7 @@ def kobo_latest(df):
     return d[KOBO_LATEST_COLS].reset_index(drop=True)
 
 
-def kobo_view(latest, merchants_df=None):
+def kobo_view(latest, merchants_df=None, labels=None):
     """Tabel tampilan hasil kunjungan: waktu (WIB), petugas, nama merchant (dicocokkan lewat merchant_id), hasil, jarak
     kunjungan dari titik merchant (m), tautan lokasi & foto. Terbaru di atas."""
     cols = ["Waktu", "Petugas", "Merchant", "Hasil kunjungan", "Jarak dari titik (m)", "Lokasi", "Foto"]
@@ -2187,12 +2211,13 @@ def kobo_view(latest, merchants_df=None):
         if idc is not None:
             for _, r in merchants_df.iterrows():
                 look.setdefault(_norm_id(r[idc]), (str(r.get("merchant_name", "") or "").strip(), r.get("latitude"), r.get("longitude")))
-    labels = dict(KOBO_HASIL_CHOICES)
+    hasil_lbl = dict(KOBO_HASIL_CHOICES)
     t = pd.to_datetime(latest["_submission_time"], utc=True, errors="coerce")
     waktu = t.dt.tz_convert("Asia/Jakarta").dt.strftime("%d/%m/%Y %H:%M").fillna("")
     rows = []
     for i, r in latest.iterrows():
         nm, mla, mlo = look.get(r["merchant_id"], ("", None, None))
+        nm = (labels or {}).get(r["merchant_id"]) or nm
         la, lo = r["lat_kunjungan"], r["lon_kunjungan"]
         has_v = la is not None and lo is not None and not pd.isna(la) and not pd.isna(lo)
         dist = None
@@ -2204,8 +2229,8 @@ def kobo_view(latest, merchants_df=None):
         rows.append({
             "Waktu": waktu.iloc[i], "_t": t.iloc[i],
             "Petugas": str(r["petugas"] or ""),
-            "Merchant": nm or f"ID {r['merchant_id']} (tidak ada di data)",
-            "Hasil kunjungan": labels.get(str(r["hasil_kunjungan"]), str(r["hasil_kunjungan"] or "")),
+            "Merchant": nm or f"ID {r['merchant_id']}",
+            "Hasil kunjungan": hasil_lbl.get(str(r["hasil_kunjungan"]), str(r["hasil_kunjungan"] or "")),
             "Jarak dari titik (m)": dist,
             "Lokasi": f"https://www.google.com/maps?q={la:.6f},{lo:.6f}" if has_v else None,
             "Foto": r["foto_url"] or None,
@@ -5631,18 +5656,22 @@ def render_nav(prefix, horizontal=False):
 def render_howto():
     # Selalu tertutup saat pertama dibuka — pengguna bisa membukanya sendiri kalau perlu.
     with st.expander("ℹ️ Cara Pakai", expanded=False):
-        t_quick, t_mode, t_more = st.tabs(["🚀 Mulai cepat", "⚡ Basic vs 🛠️ Pro", "💡 Fitur & tips"])
+        t_quick, t_mode, t_field, t_survey, t_more = st.tabs(
+            ["🚀 Mulai cepat", "⚡ Basic vs 🛠️ Pro", "📱 Di lapangan", "📋 Survey Form", "💡 Fitur & tips"]
+        )
         with t_quick:
             st.markdown(
                 "**1. Kumpulkan data** 📍  \n"
-                "Upload Excel/CSV di **Routing Optimizer**, atau kumpulkan lewat **Maps Extractor** (tempel link "
-                "Google Maps, cari nama merchant, atau isi manual). Mau coba dulu? Klik **🧪 Coba dengan data contoh**.\n\n"
+                "Upload Excel/CSV di **Routing Optimizer**, **tempel link Google Sheet** (kotak di sebelahnya), atau "
+                "kumpulkan lewat **Maps Extractor** (link Google Maps, cari nama merchant, atau isi manual). "
+                "Mau coba dulu? Klik **🧪 Coba dengan data contoh**.\n\n"
                 "**2. Atur rute** 🛣️  \n"
-                "Pilih cara menentukan jumlah rute (maksimal titik per rute, atau jumlah rute — mis. jumlah sales), "
-                "isi **titik awal** kalau ada, lalu klik **Buat Rute Optimal Sekarang**.\n\n"
+                "Pilih cara menentukan jumlah rute (maksimal titik per rute, atau jumlah rute — mis. jumlah sales). "
+                "**Titik awal**: tentukan sendiri, atau pilih **📍 Lokasi anda** supaya Google Maps memulai dari posisi "
+                "petugas saat navigasi. Lalu klik **Buat Rute Optimal Sekarang**.\n\n"
                 "**3. Pakai hasilnya** 📥  \n"
-                "Lihat urutan kunjungan dan perkiraan jam tiba, buka di Google Maps, kirim ke WhatsApp, atau unduh "
-                "semua rute sebagai Excel."
+                "Pilih tampilan: **Detail rute**, **Peta semua rute**, **📱 Mode Lapangan**, atau **Ringkasan & perbandingan** "
+                "(sebelum vs sesudah optimasi). Buka di Google Maps, kirim ke WhatsApp, salin teks rute, atau unduh Excel."
             )
         with t_mode:
             st.markdown(
@@ -5653,8 +5682,39 @@ def render_howto():
                 "operasional, multi-depot, pembagian \"isi penuh\", seimbangkan beban waktu, nama petugas, urutan manual, "
                 "PDF, simpan sesi, dan preset."
             )
+        with t_field:
+            st.markdown(
+                "**📱 Mode Lapangan** — tampilan sederhana untuk petugas: satu titik per layar dengan tombol navigasi besar, "
+                "**Selesai / Lewati**, dan progres (selesai, dilewati, tersisa). Pilih di **Tampilan hasil** setelah rute dibuat.\n\n"
+                "**🧭 Navigasi Google Maps** — tiap rute punya tombol navigasi (dibagi per bagian bila titiknya banyak). "
+                "Kalau navigasi berhenti di titik singgah (\"sudah sampai tujuan\"), pakai **🧭 Navigasi titik demi titik "
+                "(cadangan)**: tiap tombol memulai navigasi ke satu titik, lalu **⏭️ Titik berikutnya**. Rute bisa dikirim ke "
+                "**WhatsApp** atau disalin sebagai teks.\n\n"
+                "**📍 Lokasi anda** — bila dipilih sebagai titik awal, Google Maps memakai posisi petugas saat itu, bukan "
+                "titik tetap.\n\n"
+                "**📋 Catat hasil kunjungan** — lewat formulir KoboCollect (tab **Survey Form**), bukan di rute."
+            )
+        with t_survey:
+            st.markdown(
+                "Menu **📋 Survey Form** menghubungkan rute dengan pencatatan kunjungan lewat KoboToolbox/KoboCollect.\n\n"
+                "**1. Buat formulir** — di panel **Belum punya formulir? Buat dulu**: aplikasi membuat file XLSForm dari data "
+                "merchant (setelah edit tabel). Petugas memilih nama merchant dari daftar (ID tersimpan otomatis), mengisi hasil "
+                "kunjungan, lokasi GPS, dan foto lewat kamera. Isi nama petugas (satu per baris) bila mau jadi pilihan. "
+                "Unggah file ke KoboToolbox → **Deploy**.\n\n"
+                "**2. Petugas mengisi** — di aplikasi **KoboCollect** (bisa tanpa sinyal, dikirim saat ada internet).\n\n"
+                "**3. Lihat hasil** — di panel **Hasil kunjungan**: tekan **Ambil hasil kunjungan terbaru**. Tabel memuat waktu, "
+                "petugas, merchant, hasil, jarak dari titik merchant, tautan lokasi dan foto.\n\n"
+                "**4. Perbarui Sheet** — bila data berasal dari Google Sheet dan penulisan balik sudah diatur, tombol "
+                "**Perbarui kolom status di Google Sheet** menulis status baru (mis. *sudah akuisisi*, *tidak ditemukan*) "
+                "sehingga merchant itu tidak ikut rute berikutnya.\n\n"
+                "Pengaturan (token Kobo, penulisan ke Sheet) ada di **Secrets**; lihat SETUP_KOBO.md dan SETUP_SHEET_WRITE.md."
+            )
         with t_more:
             st.markdown(
+                "🔗 **Google Sheet:** tempel link di kotak sebelah upload, lalu **Ambil data dari Sheet**. Nyalakan "
+                "**🔄 Perbarui otomatis** agar perubahan di Sheet masuk sendiri tiap 30 detik (ditahan bila kamu punya edit "
+                "tabel di data itu). Link tersimpan di sesi. Bila penulisan balik diatur, **📤 Kirim hasil edit ke Google "
+                "Sheet** menulis perubahan tabel ke Sheet (baris dikenali lewat kolom `merchant_id`).\n\n"
                 "📍 **Koordinat kosong?** Biarkan kolom `latitude`/`longitude` kosong (atau tambah kolom `alamat`) — "
                 "app menawarkan pencarian otomatis lewat OpenStreetMap, hasilnya bisa dicek dulu.\n\n"
                 "✏️ **Data salah?** Buka **Lihat & Edit Data Awal** untuk memperbaiki sel atau menghapus baris, lalu "
@@ -5678,9 +5738,11 @@ def render_howto():
                 "- **Seimbangkan beban waktu** — durasi tiap rute dibuat lebih mirip.\n"
                 "- **Nama petugas** — isi di tiap rute setelah dibuat; ikut ke Excel, WhatsApp, dan PDF.\n"
                 "- **Preset** — simpan kombinasi pengaturan bernama, mis. “Rute Pagi Sales”.\n\n"
-                "💾 **Tips:** data tetap ada selama halaman tidak di-refresh atau ditutup, walau pindah menu (login "
-                "tetap aktif saat refresh, tapi file yang diupload perlu diunggah lagi). Untuk melanjutkan di lain "
-                "waktu, pakai **Simpan / Buka Sesi** (Mode Pro) atau unduh data hasil edit."
+                "💾 **Tips:** data tetap ada walau pindah menu. Bila simpan otomatis aktif, status **☁️ Tersimpan otomatis** "
+                "tampil dan setelah refresh muncul tawaran **pulihkan sesi** (data, pengaturan, dan link Sheet). Tanpa itu, "
+                "pakai **Simpan / Buka Sesi** (Mode Pro) atau unduh data hasil edit.\n\n"
+                "🔒 **Login:** keluar otomatis bila 30 menit tidak digunakan; 2 menit sebelumnya muncul hitung mundur "
+                "**Masih menggunakan halaman ini?** — tekan **Ya, masih** untuk melanjutkan."
             )
 
 
@@ -5883,6 +5945,7 @@ def render_kobo_page():
                     _kok, _kres = kobo_fetch(_kcfg)
                 if _kok:
                     st.session_state.kobo_latest = kobo_latest(_kres)
+                    st.session_state.kobo_labels = kobo_choice_labels(_kcfg)
                     st.session_state.kobo_total = len(_kres)
                     st.session_state.kobo_time = time.time()
                 else:
@@ -5893,7 +5956,7 @@ def render_kobo_page():
                            f"diambil {_ago(datetime.datetime.fromtimestamp(st.session_state.kobo_time, datetime.timezone.utc).isoformat())}")
                 if len(_kl):
                     st.dataframe(
-                        kobo_view(_kl, df), width="stretch", hide_index=True,
+                        kobo_view(_kl, df, st.session_state.get("kobo_labels")), width="stretch", hide_index=True,
                         column_config={
                             "Jarak dari titik (m)": st.column_config.NumberColumn(format="%d"),
                             "Lokasi": st.column_config.LinkColumn(display_text="📍 Buka"),
