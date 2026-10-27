@@ -3143,6 +3143,8 @@ def build_whatsapp_text(r, map_links):
         lines.append(f"🧑‍✈️ Petugas: {r['driver']}")
     if r.get("depot_name"):
         lines.append(f"🏭 Titik awal: {r['depot_name']}")
+        if r.get("from_my_location"):
+            lines.append("📍 Navigasi Google Maps dimulai dari lokasi Anda saat link dibuka")
     elif r.get("from_my_location"):
         lines.append("📍 Titik awal: lokasi Anda saat membuka Google Maps")
     if r.get("finish_label"):
@@ -3295,10 +3297,22 @@ def build_excel_bytes(route_summaries):
 
 
 def route_links_info(r, max_waypoints):
-    """Link Google Maps + nomor urut titik untuk sebuah rute (termasuk kaki pulang bila pulang-pergi)."""
+    """Link Google Maps + nomor urut titik untuk sebuah rute (termasuk kaki pulang bila pulang-pergi).
+
+    from_my_location: tiap link tanpa origin (Google Maps memakai posisi petugas saat link dibuka). Kalau rute punya titik awal
+    (has_start), titik itu hanya dipakai untuk menghitung rute: link berisi titik kunjungan saja, dan pada rute pulang-pergi
+    titik awal menjadi tujuan akhir. Indeks link selalu merujuk ke baris `link_df` (baris 0 = titik awal bila has_start)."""
     df = r["df"]
-    mine = bool(r.get("from_my_location")) and not r.get("has_start")
-    # Dari "Lokasi anda": kaki pulang tidak bisa dibuatkan link (Google Maps tak bisa memakai posisi pengguna sebagai tujuan).
+    mine = bool(r.get("from_my_location"))
+    has_start = bool(r.get("has_start"))
+    if mine and has_start:
+        round_ = bool(r.get("round_trip"))
+        base = pd.concat([df.iloc[1:], df.iloc[[0]]], ignore_index=True) if round_ else df.iloc[1:]
+        links = [(ia + 1, ib + 1, url) for ia, ib, url in generate_google_maps_links(base, max_waypoints, from_my_location=True)]
+        link_df = pd.concat([df, df.iloc[[0]]], ignore_index=True) if round_ else df
+        seq_nums = list(df["sequence"]) + ([df["sequence"].iloc[0]] if round_ else [])
+        return links, seq_nums, link_df
+    # Dari "Lokasi anda" tanpa titik awal: kaki pulang tidak bisa dibuatkan link (tujuan tak bisa berupa posisi pengguna).
     is_round = bool(r.get("round_trip")) and not mine
     link_df = pd.concat([df, df.iloc[[0]]], ignore_index=True) if is_round else df
     seq_nums = list(df["sequence"]) + ([df["sequence"].iloc[0]] if is_round else [])
@@ -3656,7 +3670,7 @@ def _pdf_payload(r, links, seq_nums, result):
     return {
         "route_no": int(r["route_id"]) + 1, "rows": rows,
         "has_start": bool(r.get("has_start")), "round_trip": bool(r.get("round_trip")),
-        "from_my_location": bool(r.get("from_my_location")) and not r.get("has_start"),
+        "from_my_location": bool(r.get("from_my_location")),
         "back_label": r.get("back_label") or "", "manual": bool(r.get("manual")),
         "distance_km": float(r["distance_km"]), "duration_sec": float(r["duration_sec"]),
         "visit_sec": float(r.get("visit_sec", 0)), "wait_sec": float(r.get("wait_sec", 0)),
@@ -3777,7 +3791,7 @@ def build_routes_pdf(payloads):
         if p["finish_label"]:
             parts.append(f"Selesai +/-{xml_escape(p['finish_label'])}" + (" (sudah pulang)" if p["round_trip"] else ""))
         if p.get("depot_name"):
-            parts.append(f"Titik awal: {xml_escape(p['depot_name'])}")
+            parts.append(f"Titik awal: {xml_escape(p['depot_name'])}" + (" (navigasi dari lokasi pengguna)" if p.get("from_my_location") else ""))
         elif p.get("from_my_location"):
             parts.append("Titik awal: lokasi pengguna saat membuka Google Maps")
         story.append(Paragraph("  |  ".join(parts), st_meta))
@@ -4949,11 +4963,9 @@ START_MODE_LABELS = {"manual": "✍️ Tentukan titik awal", "mylocation": "📍
 
 
 def _sync_start_mode():
+    """Kotak centang "navigasi mulai dari lokasi petugas": disimpan sebagai start_mode_saved = 'mylocation' / 'manual'."""
     ss = st.session_state
-    label = ss.get(_wk("_start_mode_widget"))
-    for k, v in START_MODE_LABELS.items():
-        if v == label:
-            ss.start_mode_saved = k
+    ss.start_mode_saved = "mylocation" if ss.get(_wk("_start_mode_widget")) else "manual"
 
 
 def _step_next(key, n):
@@ -5667,8 +5679,9 @@ def render_howto():
                 "Mau coba dulu? Klik **🧪 Coba dengan data contoh**.\n\n"
                 "**2. Atur rute** 🛣️  \n"
                 "Pilih cara menentukan jumlah rute (maksimal titik per rute, atau jumlah rute — mis. jumlah sales). "
-                "**Titik awal**: tentukan sendiri, atau pilih **📍 Lokasi anda** supaya Google Maps memulai dari posisi "
-                "petugas saat navigasi. Lalu klik **Buat Rute Optimal Sekarang**.\n\n"
+                "**Titik awal**: isi titik awal (gudang, kantor, dll.) agar urutan rute dihitung darinya. Centang **🧭 Di lapangan, "
+                "mulai navigasi Google Maps dari lokasi petugas** kalau petugas berangkat dari tempat lain: urutan tetap, tapi link "
+                "Google Maps dimulai dari posisi GPS petugas. Lalu klik **Buat Rute Optimal Sekarang**.\n\n"
                 "**3. Pakai hasilnya** 📥  \n"
                 "Pilih tampilan: **Detail rute**, **Peta semua rute**, **📱 Mode Lapangan**, atau **Ringkasan & perbandingan** "
                 "(sebelum vs sesudah optimasi). Buka di Google Maps, kirim ke WhatsApp, salin teks rute, atau unduh Excel."
@@ -5690,8 +5703,8 @@ def render_howto():
                 "Kalau navigasi berhenti di titik singgah (\"sudah sampai tujuan\"), pakai **🧭 Navigasi titik demi titik "
                 "(cadangan)**: tiap tombol memulai navigasi ke satu titik, lalu **⏭️ Titik berikutnya**. Rute bisa dikirim ke "
                 "**WhatsApp** atau disalin sebagai teks.\n\n"
-                "**📍 Lokasi anda** — bila dipilih sebagai titik awal, Google Maps memakai posisi petugas saat itu, bukan "
-                "titik tetap.\n\n"
+                "**🧭 Mulai dari lokasi petugas** — bila dicentang, urutan rute tetap dihitung dari titik awal yang Anda isi, "
+                "tetapi link Google Maps dimulai dari posisi GPS petugas saat dibuka.\n\n"
                 "**📋 Catat hasil kunjungan** — lewat formulir KoboCollect (tab **Survey Form**), bukan di rute."
             )
         with t_survey:
@@ -6754,41 +6767,35 @@ if st.session_state.page == "Routing":
 
         with st.container(border=True):
             st.markdown("**📍 Titik awal**")
-            _sm_keys = list(START_MODE_LABELS)
-            _sm_label = st.radio(
-                "Cara menentukan titik awal",
-                options=list(START_MODE_LABELS.values()),
-                index=_sm_keys.index(st.session_state.start_mode_saved) if st.session_state.start_mode_saved in _sm_keys else 0,
-                horizontal=True,
-                key=_wk("_start_mode_widget"),
-                on_change=_sync_start_mode,
-                disabled=dp_on,
-                label_visibility="collapsed",
-                help="**Tentukan titik awal**: isi link Google Maps/koordinat sendiri (kosong = titik mulai dipilih otomatis). "
-                     "**Lokasi anda**: saat link Google Maps rute dibuka, rute dimulai dari posisi pengguna pada saat itu.",
-            )
-            use_my_loc = (_sm_label == START_MODE_LABELS["mylocation"]) and not dp_on
-            if use_my_loc:
+            if dp_on:
                 starting_link = ""
-                st.info(
-                    "Titik awal = **lokasi Anda saat link Google Maps dibuka** (posisi GPS perangkat pada saat itu, bukan "
-                    "lokasi yang dikunci sekarang). Urutan kunjungan tetap dioptimalkan otomatis. Saat membuka link, "
-                    "aktifkan GPS dan izinkan Google Maps memakai lokasi.",
-                    icon="📍",
-                )
             else:
                 starting_link = st.text_input(
                     "📍 Titik Awal (opsional)",
                     value=st.session_state.starting_link_saved,
                     key=_wk("_starting_link_widget"),
                     on_change=_sync_starting_link,
-                    disabled=dp_on,
                     placeholder="Link Google Maps atau koordinat (-7.5665, 110.8167)",
                     help=(
-                        "Misalnya lokasi gudang atau toko pusat. Kalau diisi, titik ini otomatis jadi awal setiap rute. "
-                        "Cara dapat link: buka lokasinya di Google Maps → Bagikan → Salin link. "
-                        "Atau tempel koordinatnya langsung."
+                        "Misalnya lokasi gudang atau toko pusat. Kalau diisi, titik ini otomatis jadi awal setiap rute dan urutan "
+                        "kunjungan dihitung dari titik ini. Cara dapat link: buka lokasinya di Google Maps → Bagikan → Salin link. "
+                        "Atau tempel koordinatnya langsung. Kosong = titik mulai dipilih otomatis."
                     ),
+                )
+            use_my_loc = st.checkbox(
+                "🧭 Di lapangan, mulai navigasi Google Maps dari lokasi petugas",
+                value=st.session_state.start_mode_saved == "mylocation",
+                key=_wk("_start_mode_widget"),
+                on_change=_sync_start_mode,
+                disabled=dp_on,
+                help="Rute tetap dihitung dari titik awal di atas, tetapi saat link Google Maps dibuka, navigasi dimulai dari "
+                     "posisi GPS petugas pada saat itu (bukan titik awal). Cocok bila petugas berangkat dari rumah atau lokasi lain.",
+            ) and not dp_on
+            if use_my_loc:
+                st.caption(
+                    "📍 Urutan rute dihitung dari titik awal di atas. Saat link Google Maps dibuka, navigasi dimulai dari "
+                    "**lokasi petugas saat itu**; aktifkan GPS dan izinkan Google Maps memakai lokasi."
+                    + ("" if starting_link else " Titik awal di atas kosong, jadi titik mulai rute dipilih otomatis; isi titik awal supaya urutan sesuai tempat berangkat sebenarnya.")
                 )
 
             use_multi_depot = False
@@ -6927,7 +6934,7 @@ if st.session_state.page == "Routing":
             f"**Ringkasan:** {len(df)} merchant → {_plan_txt} · mulai {start_time:%H:%M} · "
             + (f"{int(visit_minutes)} menit/toko" if visit_minutes else "tanpa durasi kunjungan")
             + " · " + ("pulang-pergi" if round_trip else "satu arah")
-            + " · titik awal: " + ("per petugas" if dp_on else ("sesuai isian" if starting_link else ("lokasi Anda saat buka Google Maps" if (use_my_loc and not use_multi_depot) else "otomatis (paling efisien)")))
+            + " · titik awal: " + ("per petugas" if dp_on else ("sesuai isian" if starting_link else "otomatis (paling efisien)")) + (" · navigasi dari lokasi petugas" if (use_my_loc and not dp_on) else "")
             + (" · urut sesuai jam buka/tutup" if hours_opt else ""),
             icon="🧾",
         )
@@ -7155,7 +7162,7 @@ if st.session_state.page == "Routing":
                             "real_roads": used_real_roads,
                             "round_trip": round_trip,
                             "has_start": has_start,
-                            "from_my_location": bool(use_my_loc and not dp_on and not depots and not has_start),
+                            "from_my_location": bool(use_my_loc and not dp_on),
                             "depot_name": route_start_name if has_start else "",
                             "depot_idx": (route_depot.get(route_id) or {}).get("row"),
                             "driver": st.session_state.driver_names.get(route_id, ""),
@@ -7509,7 +7516,7 @@ if st.session_state.page == "Routing":
                                 st.caption(
                                     "🧭 Kolom **Bagian Maps** menunjukkan merchant ini masuk link Google Maps yang mana "
                                     "(mis. 1/3 = link pertama dari 3). "
-                                    + ("Tiap bagian dimulai dari lokasi Anda saat link-nya dibuka." if r.get("from_my_location") and not r.get("has_start")
+                                    + ("Tiap bagian dimulai dari lokasi Anda saat link-nya dibuka." if r.get("from_my_location")
                                        else "Baris **abu-abu** dengan dua bagian adalah titik sambungan: tujuan bagian sebelumnya "
                                             "sekaligus titik awal bagian berikutnya.")
                                 )
@@ -7527,12 +7534,15 @@ if st.session_state.page == "Routing":
                             # alasan untuk kasus paling umum, dan cukup beri catatan untuk skenario
                             # browser-HP yang lebih jarang terjadi.
                             max_wp = MAPS_MAX_WAYPOINTS_DESKTOP
-                            _mine = bool(r.get("from_my_location")) and not r.get("has_start")
-                            link_waypoints = max(0, len(link_df) - (1 if _mine else 2))
+                            _mine = bool(r.get("from_my_location"))
+                            link_waypoints = max(0, len(link_df) - ((2 if r.get("has_start") else 1) if _mine else 2))
                             if _mine:
                                 st.caption(
                                     "📍 Tiap link rute ini dimulai dari **lokasi Anda saat link dibuka** (Google Maps memakai GPS perangkat)."
-                                    + (" Perjalanan pulang ke lokasi awal tidak ikut di link; navigasikan manual." if r.get("round_trip") else "")
+                                    + (" Titik awal rute hanya dipakai untuk menyusun urutan; "
+                                       + ("pulang ke titik awal ikut sebagai tujuan terakhir." if r.get("round_trip") else "tidak ikut di link.")
+                                       if r.get("has_start") else
+                                       (" Perjalanan pulang ke lokasi awal tidak ikut di link; navigasikan manual." if r.get("round_trip") else ""))
                                 )
                             if len(map_links) == 1:
                                 st.link_button("🚗 Buka di Google Maps", map_links[0][2], width='stretch')
@@ -7547,7 +7557,7 @@ if st.session_state.page == "Routing":
                                     f"ℹ️ Google Maps membatasi titik singgah (maks. {max_wp} per link), "
                                     f"jadi rute dibagi jadi {len(map_links)} link. Buka berurutan — "
                                     + ("tiap bagian dimulai dari lokasi Anda saat link-nya dibuka (buka bagian berikutnya setelah "
-                                       "selesai dengan bagian sebelumnya)." if (r.get("from_my_location") and not r.get("has_start"))
+                                       "selesai dengan bagian sebelumnya)." if r.get("from_my_location")
                                        else "tiap bagian dimulai dari titik akhir bagian sebelumnya.")
                                 )
                                 for i, (ia, ib, url) in enumerate(map_links, start=1):
