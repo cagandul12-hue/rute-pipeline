@@ -7547,7 +7547,12 @@ if st.session_state.page == "Routing":
                                 + (" (sudah termasuk pulang)" if r.get("round_trip") else "")
                             )
                         if r.get("depot_name"):
-                            parts.append(f"🏭 Titik awal: {r['depot_name']}")
+                            parts.append(f"🏭 Titik awal: {r['depot_name']}"
+                                         + (" (urutan dihitung dari sini; navigasi Google Maps dimulai dari lokasi petugas)"
+                                            if r.get("from_my_location") else ""))
+                        elif r.get("petugas"):
+                            parts.append("🏭 Titik awal: otomatis — mulai dari merchant yang paling efisien"
+                                         + (" (navigasi dari lokasi petugas)" if r.get("from_my_location") else ""))
                         _route_saved = r.get("naive_distance_km", r["distance_km"]) - r["distance_km"]
                         if _route_saved > 0.05:
                             parts.append(f"📉 Hemat {_route_saved:.1f} km vs sebelum optimasi")
