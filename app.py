@@ -6711,9 +6711,9 @@ if st.session_state.page == "Routing":
                         on_change=_sync_balance_time,
                         help=(
                             "Tanpa ini, satu hari kerja bisa 2 jam sementara hari lain 5 jam. Dengan ini, merchant di "
-                            "perbatasan antar hari milik petugas yang sama dipindahkan supaya durasi (perjalanan + "
-                            "kunjungan) tiap hari lebih mirip. Wilayah dan titik awal petugas tidak berubah, dan batas "
-                            "merchant per hari tetap dihormati. Perkiraan memakai jarak garis lurus; rute akhir tetap "
+                            "perbatasan antar hari milik petugas yang sama, dan merchant di perbatasan wilayah antar petugas, "
+                            "dipindahkan supaya durasi (perjalanan + kunjungan) lebih mirip. Dengan 🔒 Kunci wilayah, merchant "
+                            "tidak pindah antar petugas. Batas merchant per hari tetap dihormati. Perkiraan memakai jarak garis lurus; rute akhir tetap "
                             "dihitung dengan jarak jalan asli."
                         ),
                     )
@@ -7086,6 +7086,30 @@ if st.session_state.page == "Routing":
                                 "after_max_min": max(_i["after_max_min"] for _i in _bal_parts),
                                 "scope": "petugas",
                             }
+                        # Lintas petugas: untuk tiap hari kerja yang sama, pindahkan merchant di perbatasan wilayah dari
+                        # petugas terberat ke petugas tetangga supaya beban antar petugas mirip. Dilewati kalau wilayah
+                        # dikunci (🔒), karena merchant tidak boleh pindah petugas.
+                        if dp_n > 1 and not dp_lock:
+                            _x_parts = []
+                            for _d in sorted({_m["day"] for _m in _meta}):
+                                _rids = [_m["route_id"] for _m in _meta if _m["day"] == _d]
+                                if len(_rids) < 2:
+                                    continue
+                                _mask = df["route"].isin(_rids).to_numpy()
+                                _sub = df[_mask]
+                                _nl, _inf = balance_by_time(
+                                    _sub, _sub["route"].to_numpy(), int(visit_minutes), start=None, max_points=dp_cap,
+                                )
+                                df.loc[_mask, "route"] = _nl
+                                _x_parts.append(_inf)
+                            if _x_parts:
+                                balance_info = {
+                                    "before_spread_min": float(np.mean([_i["before_spread_min"] for _i in _x_parts])),
+                                    "after_spread_min": float(np.mean([_i["after_spread_min"] for _i in _x_parts])),
+                                    "before_max_min": max(_i["before_max_min"] for _i in _x_parts),
+                                    "after_max_min": max(_i["after_max_min"] for _i in _x_parts),
+                                    "scope": "antar_petugas",
+                                }
                     _dateless = not (dp_days_sel or dp_start_date or dp_end_date)   # tanpa tanggal & hari
                     _need_days = max(m["day"] for m in _meta) + 1
                     if not _dateless:
@@ -7346,6 +7370,9 @@ if st.session_state.page == "Routing":
                     "⏱️ Beban waktu diseimbangkan antar hari kerja tiap petugas: selisih hari terlama–tercepat "
                     "(perkiraan, rata-rata per petugas) turun dari "
                     if _bal.get("scope") == "petugas" else
+                    "⏱️ Beban waktu diseimbangkan antar petugas: selisih petugas terlama–tercepat pada hari yang sama "
+                    "(perkiraan) turun dari "
+                    if _bal.get("scope") == "antar_petugas" else
                     "⏱️ Beban waktu diseimbangkan: selisih rute terlama–tercepat (perkiraan) turun dari "
                 )
                 st.caption(
