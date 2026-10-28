@@ -5217,7 +5217,7 @@ PLAN_MAX = "📏 Maksimal titik per rute"
 PLAN_COUNT = "👥 Jumlah rute (mis. jumlah sales)"
 for _k, _v in {
     "plan_mode_flag": PLAN_COUNT,
-    "target_routes_flag": 2,
+    "target_routes_flag": 1,
     "visit_minutes_flag": 0,
     "start_time_flag": datetime.time(8, 0),
     "session_nonce": 0,
@@ -6655,7 +6655,6 @@ if st.session_state.page == "Routing":
             _today = datetime.date.today()
             _ss.setdefault("dp_on", False)
             _ss.setdefault("dp_n", 2)
-            _ss.setdefault("dp_cap", 12)
             _ss.setdefault("dp_days", [])   # hari kerja dipilih sendiri (tidak terisi otomatis)
             _ss.setdefault("dp_lock", False)
             for _k in ["dp_on", "dp_n", "dp_cap", "dp_days", "dp_lock", "dp_start_date", "dp_end_date"] + [
@@ -6675,8 +6674,10 @@ if st.session_state.page == "Routing":
                     with dc1:
                         dp_n = int(st.number_input("Jumlah petugas", min_value=1, max_value=30, step=1, key="dp_n"))
                     with dc2:
-                        dp_cap = int(st.number_input("Maks. merchant per petugas per hari", min_value=1, max_value=60,
-                                                     step=1, key="dp_cap"))
+                        _cap_in = st.number_input("Maks. merchant per petugas per hari (opsional)", min_value=1, max_value=60,
+                                                  step=1, value=None, key="dp_cap", placeholder="Kosong = tanpa batas",
+                                                  help="Kosong = tiap petugas menyelesaikan semua merchant wilayahnya dalam satu hari "
+                                                       "(tanpa batas harian). Isi untuk memecah ke beberapa hari kerja.")
                     dd1, dd2 = st.columns(2)
                     with dd1:
                         dp_start_date = st.date_input("Mulai tanggal (opsional)", value=None, key="dp_start_date",
@@ -6727,6 +6728,7 @@ if st.session_state.page == "Routing":
                         st.warning("⚠️ Ada nama petugas yang kembar — beri nama berbeda supaya wilayahnya tidak tertukar.")
                     _n_eff = min(int(st.session_state.nearest_n_flag), len(df)) if (IS_PRO and st.session_state.nearest_on_flag and len(df) >= 3) else len(df)
                     _per = math.ceil(_n_eff / dp_n)
+                    dp_cap = int(_cap_in) if _cap_in else max(1, _per)   # kosong = tanpa batas harian
                     _dp_days_est = math.ceil(_per / dp_cap)
                     _weeks = math.ceil(_dp_days_est / (len(dp_days_sel) or 7))
                     _dated = bool(dp_days_sel or dp_start_date or dp_end_date)
@@ -6765,7 +6767,7 @@ if st.session_state.page == "Routing":
                 )
                 st.radio("Cara menentukan jumlah rute", [PLAN_MAX, PLAN_COUNT], index=0, key="_plan_off",
                          horizontal=not IS_MOBILE, disabled=True)
-                st.number_input("Maksimal merchant per rute", min_value=1, max_value=60, value=int(dp_cap), step=1,
+                st.number_input("Maksimal merchant per rute", min_value=1, max_value=max(60, int(dp_cap)), value=int(dp_cap), step=1,
                                 key="_cap_off", disabled=True)
             else:
                 if use_multi_depot:
