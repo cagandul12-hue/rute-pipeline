@@ -945,6 +945,11 @@ def route_title(r, emoji):
         if len(petugas) > 14:
             petugas = petugas[:13] + "…"
         head += f" · {fmt_day_label(datetime.date.fromisoformat(r['tanggal']))} · {petugas}"
+    elif r.get("petugas"):
+        petugas = str(r["petugas"])
+        if len(petugas) > 14:
+            petugas = petugas[:13] + "…"
+        head += f" · {petugas}" + (f" · Hari {r['hari_ke']}" if (r.get("hari_ke") or 1) > 1 else "")
     title = f"{head} · {len(r['df'])} titik · {r['distance_km']:.1f} km · {format_duration_short(total)}"
     if not r.get("real_roads", True):
         title += " ⚠️"
@@ -1462,7 +1467,17 @@ def build_schedule_matrix(route_summaries):
     """Tabel jadwal: baris = petugas, kolom = tanggal, isi = 'N titik · X km'. None kalau bukan pembagian petugas & hari kerja."""
     rows = [r for r in route_summaries if r.get("tanggal")]
     if not rows:
-        return None
+        rows = [r for r in route_summaries if r.get("petugas") and r.get("hari_ke")]
+        if not rows or max(r["hari_ke"] for r in rows) < 2:
+            return None   # tanpa tanggal & hanya satu hari: tidak perlu tabel jadwal
+        cols = sorted({r["hari_ke"] for r in rows})
+        names = list(dict.fromkeys(r["petugas"] for r in rows))
+        data = {f"Hari {c}": {} for c in cols}
+        for r in rows:
+            data[f"Hari {r['hari_ke']}"][r["petugas"]] = f"{len(r['df']) - (1 if r.get('has_start') else 0)} titik · {r['distance_km']:.0f} km"
+        mat = pd.DataFrame(data).reindex(index=names, columns=[f"Hari {c}" for c in cols]).fillna("—")
+        mat.index.name = "Petugas"
+        return mat
     cols = sorted({r["tanggal"] for r in rows})
     names = []
     for r in rows:
@@ -3678,7 +3693,7 @@ def _pdf_payload(r, links, seq_nums, result):
         "show_selesai": "jam_selesai" in df.columns,
         "links": [(int(a), int(b), u) for a, b, u in links],
         "seq_nums": [int(x) for x in seq_nums],
-        "date": r.get("tanggal") or result.get("base_date", ""), "start_label": result.get("start_label", ""),
+        "date": r.get("tanggal") or ("" if r.get("petugas") else result.get("base_date", "")), "start_label": result.get("start_label", ""),
         "driver": r.get("driver") or "", "depot_name": r.get("depot_name") or "",
     }
 
@@ -5201,7 +5216,7 @@ def _sync_use_multi_depot():
 PLAN_MAX = "📏 Maksimal titik per rute"
 PLAN_COUNT = "👥 Jumlah rute (mis. jumlah sales)"
 for _k, _v in {
-    "plan_mode_flag": PLAN_MAX,
+    "plan_mode_flag": PLAN_COUNT,
     "target_routes_flag": 2,
     "visit_minutes_flag": 0,
     "start_time_flag": datetime.time(8, 0),
@@ -5775,9 +5790,11 @@ def render_howto():
                 "Langkah 2 mengatur urutan: yang tutup lebih awal didahulukan, yang belum buka ditunda (atau petugas menunggu ⏳).\n"
                 "- **Pembagian petugas & hari kerja** — centang di Langkah 2 untuk membagi merchant ke beberapa petugas "
                 "(tiap petugas satu wilayah dan titik awalnya sendiri, mis. rumah petugas) dan ke hari kerja. Atur jumlah petugas, "
-                "nama dan titik awal tiap petugas, maks. merchant per hari, dan tanggal mulai; **hari kerja boleh dikosongkan** "
-                "(kosong = semua hari berurutan mulai tanggal itu); hasilnya jadwal petugas × tanggal. Untuk satu hari dengan beberapa "
-                "petugas, cukup isi maks. merchant per hari yang cukup besar. "
+                "nama dan titik awal tiap petugas, dan maks. merchant per hari. **Hari kerja, Mulai tanggal, dan Sampai tanggal opsional**: "
+                "kalau semuanya dikosongkan, hasil rute tidak menampilkan tanggal/hari (hanya petugas); kalau diisi, hasilnya jadwal "
+                "petugas × tanggal. Untuk membatasi ke minggu tertentu (mis. hanya Senin–Selasa), pilih hari kerja Senin & Selasa, "
+                "isi Mulai tanggal = Senin itu dan Sampai tanggal = Selasa itu; aplikasi memberi peringatan bila hari yang tersedia "
+                "tidak cukup. Untuk satu hari dengan beberapa petugas, isi maks. merchant per hari yang cukup besar. "
                 "**Kunci wilayah** menjaga petugas tetap di areanya. Selama mode ini aktif, **Pembagian rute** dan **Titik awal** "
                 "biasa dinonaktifkan (titik awal diisi per petugas).\n"
                 "- **Merchant terdekat** — di bagian **Titik awal**, centang **🎯 Ambil hanya merchant terdekat dari titik awal** "
@@ -6632,7 +6649,7 @@ if st.session_state.page == "Routing":
         dp_on = False
         dp_balance = False
         dp_n, dp_cap, dp_lock, _dp_days_est = 1, 12, False, 0
-        dp_names, dp_rows, dp_days_sel, dp_start_date = [], [], [], datetime.date.today()
+        dp_names, dp_rows, dp_days_sel, dp_start_date, dp_end_date = [], [], [], None, None
         if IS_PRO:
             _ss = st.session_state
             _today = datetime.date.today()
@@ -6641,8 +6658,7 @@ if st.session_state.page == "Routing":
             _ss.setdefault("dp_cap", 12)
             _ss.setdefault("dp_days", [])   # hari kerja dipilih sendiri (tidak terisi otomatis)
             _ss.setdefault("dp_lock", False)
-            _ss.setdefault("dp_start_date", _today + datetime.timedelta(days=(7 - _today.weekday()) % 7))
-            for _k in ["dp_on", "dp_n", "dp_cap", "dp_days", "dp_lock", "dp_start_date"] + [
+            for _k in ["dp_on", "dp_n", "dp_cap", "dp_days", "dp_lock", "dp_start_date", "dp_end_date"] + [
                 f"{_p}_{_i}" for _i in range(30) for _p in ("dp_name", "dp_start")
             ]:
                 if _k in _ss:
@@ -6655,16 +6671,23 @@ if st.session_state.page == "Routing":
                          "ratusan merchant lintas hari. Menggantikan pengaturan jumlah rute.",
                 )
                 if dp_on:
-                    dc1, dc2, dc3 = st.columns(3)
+                    dc1, dc2 = st.columns(2)
                     with dc1:
                         dp_n = int(st.number_input("Jumlah petugas", min_value=1, max_value=30, step=1, key="dp_n"))
                     with dc2:
                         dp_cap = int(st.number_input("Maks. merchant per petugas per hari", min_value=1, max_value=60,
                                                      step=1, key="dp_cap"))
-                    with dc3:
-                        dp_start_date = st.date_input("Mulai tanggal", key="dp_start_date")
+                    dd1, dd2 = st.columns(2)
+                    with dd1:
+                        dp_start_date = st.date_input("Mulai tanggal (opsional)", value=None, key="dp_start_date",
+                                                      help="Kosongkan bersama hari kerja kalau tidak perlu tanggal — hasil rute hanya "
+                                                           "menampilkan petugas (dan urutan hari).")
+                    with dd2:
+                        dp_end_date = st.date_input("Sampai tanggal (opsional)", value=None, key="dp_end_date",
+                                                    help="Batas akhir jadwal. Berguna untuk membatasi ke minggu tertentu: mis. hari kerja "
+                                                         "Senin–Selasa, mulai Senin 2 Nov, sampai Selasa 3 Nov.")
                     dp_days_sel = st.multiselect(
-                        "Hari kerja (opsional)", ID_DAYS, key="dp_days", placeholder="Kosong = semua hari berurutan mulai tanggal di atas",
+                        "Hari kerja (opsional)", ID_DAYS, key="dp_days", placeholder="Kosong = tanpa hari/tanggal (atau semua hari berurutan kalau tanggal diisi)",
                         help="Pilih hanya kalau ada hari yang dilewati (mis. Senin–Jumat saja). Dibiarkan kosong, hari kerja dihitung "
                              "berurutan setiap hari mulai tanggal mulai (akhir pekan ikut). Untuk satu hari dengan beberapa petugas, "
                              "biarkan kosong atau pilih satu hari.",
@@ -6706,10 +6729,27 @@ if st.session_state.page == "Routing":
                     _per = math.ceil(_n_eff / dp_n)
                     _dp_days_est = math.ceil(_per / dp_cap)
                     _weeks = math.ceil(_dp_days_est / (len(dp_days_sel) or 7))
+                    _dated = bool(dp_days_sel or dp_start_date or dp_end_date)
                     st.caption(
-                        f"📅 Perkiraan: {_n_eff} merchant → {dp_n} petugas × ±{_dp_days_est} hari kerja "
-                        f"(≈{_weeks} minggu), ±{dp_n * _dp_days_est} rute."
+                        f"📅 Perkiraan: {_n_eff} merchant → {dp_n} petugas × ±{_dp_days_est} hari kerja"
+                        + (f" (≈{_weeks} minggu)" if _dated else "") + f", ±{dp_n * _dp_days_est} rute."
                     )
+                    if dp_end_date:
+                        _wd0 = {ID_DAYS.index(x) for x in dp_days_sel} or set(range(7))
+                        _st0 = dp_start_date or _today
+                        _avail = len([d for d in make_work_dates(_st0, _wd0, 400) if d <= dp_end_date])
+                        if dp_end_date < _st0:
+                            st.warning("⚠️ Tanggal akhir lebih awal dari tanggal mulai.")
+                        elif _avail < _dp_days_est:
+                            _need_cap = math.ceil(_per / max(_avail, 1))
+                            _fit_n = dp_n * max(_avail, 1) * dp_cap
+                            st.warning(
+                                f"⚠️ Hanya tersedia {_avail} hari kerja dalam rentang ini, sedangkan butuh ±{_dp_days_est}. "
+                                f"Naikkan 'Maks. merchant per petugas per hari' jadi ≥{_need_cap}, tambah petugas, atau aktifkan "
+                                f"'Ambil hanya merchant terdekat' (≈{_fit_n} merchant muat)."
+                            )
+                        else:
+                            st.caption(f"✅ {_avail} hari kerja tersedia dalam rentang ini (butuh ±{_dp_days_est}).")
         use_multi_depot = False   # multi-depot sudah dihapus dari tampilan (digantikan Pembagian petugas & hari kerja)
         with st.container(border=True):
             st.markdown("**🧭 Pembagian rute**")
@@ -6951,7 +6991,7 @@ if st.session_state.page == "Routing":
             round_trip, split_mode, int(visit_minutes), start_time.strftime("%H:%M"),
             use_multi_depot, tuple(depot_rows_raw), balance_time, hours_opt, use_my_loc,
             (nearest_n if nearest_on else None),
-            (dp_n, tuple(dp_names), tuple(dp_rows), tuple(dp_days_sel), dp_cap, str(dp_start_date), dp_lock) if dp_on else None,
+            (dp_n, tuple(dp_names), tuple(dp_rows), tuple(dp_days_sel), dp_cap, str(dp_start_date), str(dp_end_date), dp_lock) if dp_on else None,
         )
 
         if run:
@@ -7038,12 +7078,29 @@ if st.session_state.page == "Routing":
                                 "after_max_min": max(_i["after_max_min"] for _i in _bal_parts),
                                 "scope": "petugas",
                             }
-                    _wd = {ID_DAYS.index(x) for x in dp_days_sel} or set(range(7))   # kosong = semua hari berurutan
-                    _dates = make_work_dates(dp_start_date, _wd, max(m["day"] for m in _meta) + 1)
+                    _dateless = not (dp_days_sel or dp_start_date or dp_end_date)   # tanpa tanggal & hari
+                    _need_days = max(m["day"] for m in _meta) + 1
+                    if not _dateless:
+                        _wd = {ID_DAYS.index(x) for x in dp_days_sel} or set(range(7))   # kosong = semua hari berurutan
+                        _st_d = dp_start_date or datetime.date.today()
+                        _dates = make_work_dates(_st_d, _wd, _need_days)
+                        if dp_end_date:
+                            _ok = [d for d in make_work_dates(_st_d, _wd, 400) if d <= dp_end_date]
+                            if len(_ok) < _need_days:
+                                st.error(
+                                    f"❌ Jadwal butuh {_need_days} hari kerja, tetapi hanya {len(_ok)} hari tersedia sampai "
+                                    f"{dp_end_date.strftime('%d/%m/%Y')}. Naikkan maks. merchant per hari, tambah petugas, "
+                                    f"pakai 'Ambil hanya merchant terdekat', atau perpanjang tanggal akhir."
+                                )
+                                st.stop()
                     for _m in _meta:
+                        if _dateless:
+                            dp_meta[_m["route_id"]] = {"petugas": dp_names[_m["p"]], "date": "", "hari": "", "hari_ke": _m["day"] + 1}
+                            continue
                         _dt = _dates[_m["day"]]
                         dp_meta[_m["route_id"]] = {
                             "petugas": dp_names[_m["p"]], "date": _dt.isoformat(), "hari": fmt_day_label(_dt, short=False),
+                            "hari_ke": _m["day"] + 1,
                         }
                         _sp = _starts[_m["p"]]
                         route_depot[_m["route_id"]] = (
@@ -7180,6 +7237,7 @@ if st.session_state.page == "Routing":
                             "petugas": dp_meta.get(route_id, {}).get("petugas", ""),
                             "tanggal": dp_meta.get(route_id, {}).get("date", ""),
                             "hari": dp_meta.get(route_id, {}).get("hari", ""),
+                            "hari_ke": dp_meta.get(route_id, {}).get("hari_ke"),
                             # data mentah untuk ubah-urutan manual (tanpa memanggil OSRM lagi)
                             "route_df": route_df,
                             "distance_matrix": distance_matrix,
@@ -7412,7 +7470,7 @@ if st.session_state.page == "Routing":
                 _view = st.radio("Tampilan hasil", _views, key="_result_view", horizontal=True, label_visibility="collapsed")
             if _view == _views[0]:
                 _pf = "Semua"
-                if any(r.get("tanggal") for r in route_summaries):
+                if any(r.get("petugas") for r in route_summaries):
                     _pnames = list(dict.fromkeys(r["petugas"] for r in route_summaries))
                     _pf = st.selectbox("Tampilkan petugas", ["Semua"] + _pnames, key="_dp_filter")
                 _rq, _only_check = "", False
