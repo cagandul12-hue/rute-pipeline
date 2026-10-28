@@ -3198,6 +3198,7 @@ def build_stepwise_text(r):
         lines.append(f"🏭 Titik awal: {r['depot_name']}")
     lines.append("Ketuk 🧭 di tiap titik, urut dari nomor 1. Navigasi dimulai dari lokasi Anda saat tautan dibuka.")
     lines.append("")
+    _clk = r.get("show_clock", True)
     for _, row in stops.iterrows():
         eta = f" ({row['jam_tiba']})" if ("jam_tiba" in df.columns and _clk) else ""
         star = "⭐ " if row.get("prioritas_flag") else ""
