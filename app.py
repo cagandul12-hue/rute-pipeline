@@ -7102,6 +7102,11 @@ if st.session_state.page == "Routing":
                                 )
                                 st.stop()
                     for _m in _meta:
+                        _sp = _starts[_m["p"]]
+                        route_depot[_m["route_id"]] = (
+                            {"name": f"Titik awal {dp_names[_m['p']]}", "lat": _sp[0], "lon": _sp[1], "row": _m["p"]}
+                            if _sp else None
+                        )
                         if _dateless:
                             dp_meta[_m["route_id"]] = {"petugas": dp_names[_m["p"]], "date": "", "hari": "", "hari_ke": _m["day"] + 1}
                             continue
@@ -7110,11 +7115,6 @@ if st.session_state.page == "Routing":
                             "petugas": dp_names[_m["p"]], "date": _dt.isoformat(), "hari": fmt_day_label(_dt, short=False),
                             "hari_ke": _m["day"] + 1,
                         }
-                        _sp = _starts[_m["p"]]
-                        route_depot[_m["route_id"]] = (
-                            {"name": f"Titik awal {dp_names[_m['p']]}", "lat": _sp[0], "lon": _sp[1], "row": _m["p"]}
-                            if _sp else None
-                        )
                 else:
                     # Jumlah rute: sesuai pengaturan Langkah 2. Dengan multi-depot, tiap rute lalu dipasangkan
                     # dengan titik awal yang diisi untuk rute itu (lihat assign_routes_to_depots).
