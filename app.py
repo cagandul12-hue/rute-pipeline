@@ -3162,11 +3162,12 @@ def build_whatsapp_text(r, map_links):
             lines.append("📍 Navigasi Google Maps dimulai dari lokasi Anda saat link dibuka")
     elif r.get("from_my_location"):
         lines.append("📍 Titik awal: lokasi Anda saat membuka Google Maps")
-    if r.get("finish_label"):
+    _clk = r.get("show_clock", True)
+    if r.get("finish_label") and _clk:
         lines.append(f"🏁 Estimasi selesai ±{r['finish_label']}")
     lines.append("")
     for _, row in df.iterrows():
-        eta = f" ({row['jam_tiba']})" if "jam_tiba" in df.columns else ""
+        eta = f" ({row['jam_tiba']})" if ("jam_tiba" in df.columns and _clk) else ""
         star = "⭐ " if row.get("prioritas_flag") else ""
         warn = f" {row['jadwal_status']}" if row.get("jadwal_status", "").startswith(("⚠️", "⏳")) else ""
         lines.append(f"{int(row['sequence'])}. {star}{row['merchant_name']}{eta}{warn}")
@@ -3198,7 +3199,7 @@ def build_stepwise_text(r):
     lines.append("Ketuk 🧭 di tiap titik, urut dari nomor 1. Navigasi dimulai dari lokasi Anda saat tautan dibuka.")
     lines.append("")
     for _, row in stops.iterrows():
-        eta = f" ({row['jam_tiba']})" if "jam_tiba" in df.columns else ""
+        eta = f" ({row['jam_tiba']})" if ("jam_tiba" in df.columns and _clk) else ""
         star = "⭐ " if row.get("prioritas_flag") else ""
         warn = f" {row['jadwal_status']}" if row.get("jadwal_status", "").startswith(("⚠️", "⏳")) else ""
         lines.append(f"{int(row['sequence'])}. {star}{row['merchant_name']}{eta}{warn}")
@@ -3689,8 +3690,9 @@ def _pdf_payload(r, links, seq_nums, result):
         "back_label": r.get("back_label") or "", "manual": bool(r.get("manual")),
         "distance_km": float(r["distance_km"]), "duration_sec": float(r["duration_sec"]),
         "visit_sec": float(r.get("visit_sec", 0)), "wait_sec": float(r.get("wait_sec", 0)),
-        "finish_label": r.get("finish_label") or "",
-        "show_selesai": "jam_selesai" in df.columns,
+        "show_clock": bool(r.get("show_clock", True)),
+        "finish_label": (r.get("finish_label") or "") if r.get("show_clock", True) else "",
+        "show_selesai": "jam_selesai" in df.columns and bool(r.get("show_clock", True)),
         "links": [(int(a), int(b), u) for a, b, u in links],
         "seq_nums": [int(x) for x in seq_nums],
         "date": r.get("tanggal") or ("" if r.get("petugas") else result.get("base_date", "")), "start_label": result.get("start_label", ""),
@@ -3820,11 +3822,13 @@ def build_routes_pdf(payloads):
         story.append(Spacer(1, 4 * mm))
 
         # tabel kunjungan
-        head = ["No", "Merchant", "Tiba"] + (["Selesai"] if p["show_selesai"] else []) + ["Cek", "Catatan"]
+        head = ["No", "Merchant"] + (["Tiba"] if p["show_clock"] else []) + (["Selesai"] if p["show_selesai"] else []) + ["Cek", "Catatan"]
         data = [[Paragraph(h, st_head) for h in head]]
 
         def row_cells(no, name_html, tiba, selesai, note=""):
-            cells = [Paragraph(no, st_cell), Paragraph(name_html, st_cell), Paragraph(xml_escape(tiba), st_cell)]
+            cells = [Paragraph(no, st_cell), Paragraph(name_html, st_cell)]
+            if p["show_clock"]:
+                cells.append(Paragraph(xml_escape(tiba), st_cell))
             if p["show_selesai"]:
                 cells.append(Paragraph(xml_escape(selesai), st_cell))
             note_color = "#DC2626" if note.startswith("⚠️") else "#111827"
@@ -3844,10 +3848,10 @@ def build_routes_pdf(payloads):
         if p["round_trip"] and p["rows"]:
             data.append(row_cells("-", "<i>Kembali ke titik awal</i>", p["back_label"], ""))
 
-        fixed = 11 + 20 + (20 if p["show_selesai"] else 0) + 12
+        fixed = 11 + (20 if p["show_clock"] else 0) + (20 if p["show_selesai"] else 0) + 12
         merch_w = 70
         notes_w = max(30, doc.width / mm - fixed - merch_w)
-        widths = [11 * mm, merch_w * mm, 20 * mm] + ([20 * mm] if p["show_selesai"] else []) + [12 * mm, notes_w * mm]
+        widths = [11 * mm, merch_w * mm] + ([20 * mm] if p["show_clock"] else []) + ([20 * mm] if p["show_selesai"] else []) + [12 * mm, notes_w * mm]
         tbl = Table(data, colWidths=widths, repeatRows=1)
         tbl.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), rl_colors.HexColor("#1E3A8A")),
@@ -6728,8 +6732,9 @@ if st.session_state.page == "Routing":
                         st.warning("⚠️ Ada nama petugas yang kembar — beri nama berbeda supaya wilayahnya tidak tertukar.")
                     _n_eff = min(int(st.session_state.nearest_n_flag), len(df)) if (IS_PRO and st.session_state.nearest_on_flag and len(df) >= 3) else len(df)
                     _per = math.ceil(_n_eff / dp_n)
-                    dp_cap = int(_cap_in) if _cap_in else max(1, _per)   # kosong = tanpa batas harian
-                    _dp_days_est = math.ceil(_per / dp_cap)
+                    dp_cap = int(_cap_in) if _cap_in else max(1, _n_eff)   # kosong = tanpa batas harian (tiap petugas 1 hari)
+                    _per = math.ceil(_n_eff / dp_n) if _cap_in else _per
+                    _dp_days_est = math.ceil(_per / dp_cap) if _cap_in else 1
                     _weeks = math.ceil(_dp_days_est / (len(dp_days_sel) or 7))
                     _dated = bool(dp_days_sel or dp_start_date or dp_end_date)
                     st.caption(
@@ -6967,7 +6972,7 @@ if st.session_state.page == "Routing":
 
 
         _plan_txt = (
-            f"{dp_n} petugas × ±{_dp_days_est} hari kerja (maks. {dp_cap}/hari)" if dp_on else
+            f"{dp_n} petugas × ±{_dp_days_est} hari kerja " + (f" (maks. {dp_cap}/hari)" if st.session_state.get("dp_cap") else "") + "" if dp_on else
             f"{target_routes} rute (maks. {max_points_per_route}/rute)" if target_routes is not None
             else f"{n_cluster_default} rute (maks. {max_points_per_route} merchant/rute"
                  + (", isi penuh" if n_cluster_default > 1 and split_mode == SPLIT_FULL else
@@ -7251,6 +7256,7 @@ if st.session_state.page == "Routing":
                             "manual": False,
                             "start_dt": start_dt,
                             "visit_sec_each": visit_sec,
+                            "show_clock": bool(visit_sec > 0 or open_secs),
                             "open_secs": open_secs,
                             "base_date": base_date,
                         }
