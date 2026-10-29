@@ -6994,8 +6994,13 @@ if st.session_state.page == "Routing":
 
         # Fingerprint of the current input+settings, so stale results (from a
         # previous file/slider value) don't linger after the inputs change.
+        _fp_cols = [c for c in ("merchant_name", "latitude", "longitude", "prioritas", "jam_buka", "jam_tutup", "petugas")
+                    if c in df.columns]
+        _fp_hash = hashlib.sha256(
+            pd.util.hash_pandas_object(df[_fp_cols].astype(str), index=False).values.tobytes()
+        ).hexdigest()   # isi data (koordinat, prioritas, jam, petugas) ikut menentukan: edit tabel → hasil lama kedaluwarsa
         data_fingerprint = (
-            len(df), tuple(df["merchant_name"]), max_points_per_route, target_routes, starting_link,
+            len(df), tuple(df["merchant_name"]), _fp_hash, max_points_per_route, target_routes, starting_link,
             round_trip, split_mode, int(visit_minutes), start_time.strftime("%H:%M"),
             use_multi_depot, tuple(depot_rows_raw), balance_time, hours_opt, use_my_loc,
             (nearest_n if nearest_on else None),
