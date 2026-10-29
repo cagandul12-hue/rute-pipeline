@@ -1538,7 +1538,7 @@ def check_time_window(arrival_dt, jam_buka, jam_tutup):
 # singgah berlebih DIBUANG diam-diam oleh Google Maps — makanya rute dipecah.
 MAPS_MAX_WAYPOINTS_DESKTOP = 9
 MAPS_MAX_WAYPOINTS_MOBILE = 3
-MAPS_MAX_WAYPOINTS_WA = 4   # link untuk WhatsApp dibuat pendek: link panjang sering terpotong (tidak biru) di iPhone
+MAPS_MAX_WAYPOINTS_WA = MAPS_MAX_WAYPOINTS_DESKTOP   # sama dengan layar: satu link memuat sebanyak mungkin titik
 
 
 def generate_google_maps_links(df, max_waypoints, from_my_location=False):
@@ -3149,9 +3149,11 @@ def build_schedule(duration_matrix, order, start_dt, visit_sec, first_is_start, 
 def build_whatsapp_text(r, map_links):
     """Teks siap kirim (format WhatsApp) untuk satu rute."""
     df = r["df"]
+    _has_start = bool(r.get("has_start"))
+    stops_wa = df.iloc[1:] if _has_start else df   # titik awal bukan tujuan kunjungan: tidak ikut daftar bernomor
     total_sec = r["duration_sec"] + r.get("visit_sec", 0) + r.get("wait_sec", 0)
     lines = [
-        f"*Rute {r['route_id'] + 1}* — {len(df)} titik · ~{r['distance_km']:.1f} km · ~{format_duration(total_sec)}"
+        f"*Rute {r['route_id'] + 1}* — {len(stops_wa)} titik · ~{r['distance_km']:.1f} km · ~{format_duration(total_sec)}"
     ]
     if r.get("tanggal"):
         lines.append(f"📅 {fmt_day_label(datetime.date.fromisoformat(r['tanggal']), short=False)}")
@@ -3167,16 +3169,15 @@ def build_whatsapp_text(r, map_links):
     if r.get("finish_label") and _clk:
         lines.append(f"🏁 Estimasi selesai ±{r['finish_label']}")
     lines.append("")
-    for _, row in df.iterrows():
+    for _no, (_, row) in enumerate(stops_wa.iterrows(), start=1):
         eta = f" ({row['jam_tiba']})" if ("jam_tiba" in df.columns and _clk) else ""
         star = "⭐ " if row.get("prioritas_flag") else ""
         warn = f" {row['jadwal_status']}" if row.get("jadwal_status", "").startswith(("⚠️", "⏳")) else ""
-        lines.append(f"{int(row['sequence'])}. {star}{row['merchant_name']}{eta}{warn}")
+        lines.append(f"{_no}. {star}{row['merchant_name']}{eta}{warn}")
     if r.get("round_trip"):
         lines.append("↩️ Lalu kembali ke titik awal")
     lines.append("")
-    # Link dibuat pendek (sedikit titik singgah per link) dan tiap link di barisnya sendiri, dipisah baris kosong:
-    # WhatsApp iPhone cenderung memotong link panjang atau yang menempel pada teks lain.
+    # Tiap link di barisnya sendiri, dipisah baris kosong, supaya tidak menempel pada teks lain.
     map_links, _, _ = route_links_info(r, MAPS_MAX_WAYPOINTS_WA)
     if len(map_links) == 1:
         lines += ["🗺️ Google Maps:", map_links[0][2]]
@@ -3204,11 +3205,11 @@ def build_stepwise_text(r):
     lines.append("Ketuk 🧭 di tiap titik, urut dari nomor 1. Navigasi dimulai dari lokasi Anda saat tautan dibuka.")
     lines.append("")
     _clk = r.get("show_clock", True)
-    for _, row in stops.iterrows():
+    for _no, (_, row) in enumerate(stops.iterrows(), start=1):
         eta = f" ({row['jam_tiba']})" if ("jam_tiba" in df.columns and _clk) else ""
         star = "⭐ " if row.get("prioritas_flag") else ""
         warn = f" {row['jadwal_status']}" if row.get("jadwal_status", "").startswith(("⚠️", "⏳")) else ""
-        lines.append(f"{int(row['sequence'])}. {star}{row['merchant_name']}{eta}{warn}")
+        lines.append(f"{_no}. {star}{row['merchant_name']}{eta}{warn}")
         lines.append(f"🧭 {stop_nav_url(round(float(row['latitude']), 6), round(float(row['longitude']), 6))}")
         lines.append("")
     if r.get("round_trip"):
