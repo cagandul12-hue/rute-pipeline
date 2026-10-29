@@ -1538,6 +1538,7 @@ def check_time_window(arrival_dt, jam_buka, jam_tutup):
 # singgah berlebih DIBUANG diam-diam oleh Google Maps — makanya rute dipecah.
 MAPS_MAX_WAYPOINTS_DESKTOP = 9
 MAPS_MAX_WAYPOINTS_MOBILE = 3
+MAPS_MAX_WAYPOINTS_WA = 4   # link untuk WhatsApp dibuat pendek: link panjang sering terpotong (tidak biru) di iPhone
 
 
 def generate_google_maps_links(df, max_waypoints, from_my_location=False):
@@ -1552,7 +1553,7 @@ def generate_google_maps_links(df, max_waypoints, from_my_location=False):
     dibuka ("Lokasi Anda"). Rute dipotong jadi bagian yang tidak saling tumpang-tindih (maks. max_waypoints + 1
     merchant per link; merchant terakhir bagian = tujuan, sisanya titik singgah).
     """
-    coords = [f"{row.latitude},{row.longitude}" for _, row in df.iterrows()]
+    coords = [f"{float(row.latitude):.6f},{float(row.longitude):.6f}" for _, row in df.iterrows()]   # 6 desimal ≈ 0,1 m; URL lebih pendek
     links = []
     if from_my_location:
         size = max_waypoints + 1
@@ -3174,11 +3175,15 @@ def build_whatsapp_text(r, map_links):
     if r.get("round_trip"):
         lines.append("↩️ Lalu kembali ke titik awal")
     lines.append("")
+    # Link dibuat pendek (sedikit titik singgah per link) dan tiap link di barisnya sendiri, dipisah baris kosong:
+    # WhatsApp iPhone cenderung memotong link panjang atau yang menempel pada teks lain.
+    map_links, _, _ = route_links_info(r, MAPS_MAX_WAYPOINTS_WA)
     if len(map_links) == 1:
-        lines.append(f"🗺️ Google Maps: {map_links[0][2]}")
+        lines += ["🗺️ Google Maps:", map_links[0][2]]
     else:
+        lines.append(f"🗺️ Google Maps ({len(map_links)} bagian, buka berurutan):")
         for i, (_, _, url) in enumerate(map_links, start=1):
-            lines.append(f"🗺️ Google Maps bagian {i}: {url}")
+            lines += ["", f"Bagian {i}:", url]
     return "\n".join(lines)
 
 
