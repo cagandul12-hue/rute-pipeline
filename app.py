@@ -3208,17 +3208,24 @@ def build_stepwise_text(r):
     lines.append("Ketuk 🧭 di tiap titik, urut dari nomor 1. Navigasi dimulai dari lokasi Anda saat tautan dibuka.")
     lines.append("")
     _clk = r.get("show_clock", True)
-    # merchant yang saling berdekatan (≤ NEAR_STOP_M meter, garis lurus) dalam rute ini
+    # merchant yang saling berdekatan (≤ NEAR_STOP_M meter) dalam rute ini. Pakai JARAK JALAN dari matriks rute
+    # (OSRM) bila tersedia dan nyata; kalau tidak, jatuh ke garis lurus.
     _pts = [(float(x["latitude"]), float(x["longitude"]), str(x["merchant_name"])) for _, x in stops.iterrows()]
+    _dm, _ord = r.get("distance_matrix"), r.get("order")
+    _road = bool(r.get("real_roads", True)) and _dm is not None and _ord is not None and len(_ord) == len(df)
+    _nodes = (list(_ord)[1:] if first_is_start else list(_ord)) if _road else None
     _near = {i: [] for i in range(len(_pts))}
     for _i in range(len(_pts)):
         for _j in range(_i + 1, len(_pts)):
-            _m = haversine(_pts[_i][0], _pts[_i][1], _pts[_j][0], _pts[_j][1]) * 1000
+            if _road:
+                _m = min(float(_dm[_nodes[_i]][_nodes[_j]]), float(_dm[_nodes[_j]][_nodes[_i]]))
+            else:
+                _m = haversine(_pts[_i][0], _pts[_i][1], _pts[_j][0], _pts[_j][1]) * 1000
             if _m <= NEAR_STOP_M:
                 _near[_i].append((_j, _m))
                 _near[_j].append((_i, _m))
     if any(_near.values()):
-        lines.insert(len(lines) - 1, f"👥 Ada merchant yang berdekatan (≤{NEAR_STOP_M} m) — lihat catatan di tiap titik; bisa dikunjungi sekalian.")
+        lines.insert(len(lines) - 1, f"👥 Ada merchant yang berdekatan (≤{NEAR_STOP_M} m {'lewat jalan' if _road else 'garis lurus'}) — lihat catatan di tiap titik; bisa dikunjungi sekalian.")
     for _no, (_, row) in enumerate(stops.iterrows(), start=1):
         eta = f" ({row['jam_tiba']})" if ("jam_tiba" in df.columns and _clk) else ""
         star = "⭐ " if row.get("prioritas_flag") else ""
