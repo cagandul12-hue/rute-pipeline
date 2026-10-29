@@ -3188,6 +3188,9 @@ def build_whatsapp_text(r, map_links):
     return "\n".join(lines)
 
 
+NEAR_STOP_M = 200   # batas "berdekatan" (meter) untuk catatan di teks titik demi titik
+
+
 def build_stepwise_text(r):
     """Teks WhatsApp/salin untuk NAVIGASI TITIK DEMI TITIK: tiap merchant punya satu tautan navigasi sendiri
     (dari lokasi pengguna saat tautan dibuka), jadi tidak bergantung pada navigasi multi-titik Google Maps."""
@@ -3205,11 +3208,24 @@ def build_stepwise_text(r):
     lines.append("Ketuk 🧭 di tiap titik, urut dari nomor 1. Navigasi dimulai dari lokasi Anda saat tautan dibuka.")
     lines.append("")
     _clk = r.get("show_clock", True)
+    # merchant yang saling berdekatan (≤ NEAR_STOP_M meter, garis lurus) dalam rute ini
+    _pts = [(float(x["latitude"]), float(x["longitude"]), str(x["merchant_name"])) for _, x in stops.iterrows()]
+    _near = {i: [] for i in range(len(_pts))}
+    for _i in range(len(_pts)):
+        for _j in range(_i + 1, len(_pts)):
+            _m = haversine(_pts[_i][0], _pts[_i][1], _pts[_j][0], _pts[_j][1]) * 1000
+            if _m <= NEAR_STOP_M:
+                _near[_i].append((_j, _m))
+                _near[_j].append((_i, _m))
+    if any(_near.values()):
+        lines.insert(len(lines) - 1, f"👥 Ada merchant yang berdekatan (≤{NEAR_STOP_M} m) — lihat catatan di tiap titik; bisa dikunjungi sekalian.")
     for _no, (_, row) in enumerate(stops.iterrows(), start=1):
         eta = f" ({row['jam_tiba']})" if ("jam_tiba" in df.columns and _clk) else ""
         star = "⭐ " if row.get("prioritas_flag") else ""
         warn = f" {row['jadwal_status']}" if row.get("jadwal_status", "").startswith(("⚠️", "⏳")) else ""
         lines.append(f"{_no}. {star}{row['merchant_name']}{eta}{warn}")
+        for _j, _m in sorted(_near[_no - 1], key=lambda t: t[1]):
+            lines.append(f"   👥 ±{int(round(_m, -1)) or 10} m dari no. {_j + 1} ({_pts[_j][2]})")
         lines.append(f"🧭 {stop_nav_url(round(float(row['latitude']), 6), round(float(row['longitude']), 6))}")
         lines.append("")
     if r.get("round_trip"):
