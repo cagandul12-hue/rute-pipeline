@@ -1059,7 +1059,10 @@ def solve_tsp(distance_matrix, round_trip=False, fixed_start=False):
     search_parameters.first_solution_strategy = (
         routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
     )
-    search_parameters.time_limit.seconds = 5
+    # Perbaikan urutan awal secara eksplisit dengan Guided Local Search (terus mencari urutan lebih pendek sampai waktu
+    # habis). Waktu menyesuaikan jumlah titik: rute kecil cepat optimal, rute besar diberi waktu lebih panjang.
+    search_parameters.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+    search_parameters.time_limit.seconds = 1 if n <= 8 else (2 if n <= 15 else (4 if n <= 30 else (8 if n <= 60 else 12)))
     solution = routing.SolveWithParameters(search_parameters)
 
     if solution is None:
@@ -1726,7 +1729,7 @@ def extract_google_maps_data(link):
         return None, None, None
 
 
-def balance_clusters(df, max_points_per_route):
+def _balance_clusters_greedy(df, max_points_per_route):
     df = df.copy()
     for _guard in range(1000):  # pengaman supaya tidak pernah macet
         cluster_sizes = df["route"].value_counts().to_dict()
@@ -1763,6 +1766,111 @@ def balance_clusters(df, max_points_per_route):
                     cluster_sizes[best_target_cluster] += 1
                     big_cluster_df = df[df["route"] == big_cluster]
     return df
+
+
+def _route_len_est(D, members):
+    """Perkiraan panjang rute terbuka (km) lewat `members`: tetangga-terdekat dari titik terjauh dari pusat (tidak
+    tergantung urutan anggota, jadi perbandingan antar susunan adil)."""
+    if len(members) < 2:
+        return 0.0
+    m = np.array(members, dtype=int)
+    sub = D[np.ix_(m, m)]
+    cur = int(np.argmax(sub.mean(axis=1)))
+    left = np.ones(len(m), dtype=bool)
+    left[cur] = False
+    order = [cur]
+    for _ in range(len(m) - 1):
+        d = np.where(left, sub[cur], np.inf)
+        j = int(np.argmin(d))
+        left[j] = False
+        order.append(j)
+        cur = j
+    # 2-opt singkat (rute terbuka) supaya perkiraan tidak terlalu kasar
+    def plen(o):
+        return float(sub[o[:-1], o[1:]].sum())
+    best = plen(order)
+    n_o = len(order)
+    for _ in range(3):
+        changed = False
+        for i in range(0, n_o - 1):
+            for j in range(i + 1, n_o):
+                cand = order[:i] + order[i:j + 1][::-1] + order[j + 1:]
+                c = plen(cand)
+                if c < best - 1e-9:
+                    order, best, changed = cand, c, True
+        if not changed:
+            break
+    return best
+
+
+def improve_clusters(df, max_points_per_route, time_budget_s=4.0, max_points=700):
+    """Perbaiki pembagian rute dengan pencarian lokal: coba PINDAH satu merchant ke rute lain dan TUKAR dua merchant
+    antar rute; simpan hanya perubahan yang memperpendek total perkiraan panjang rute. Batas maksimal per rute tidak
+    pernah dilanggar, dan tidak ada rute yang dikosongkan atau dibuat jauh lebih kecil dari yang lain."""
+    n = len(df)
+    labs = df["route"].to_numpy().copy()
+    groups_ids = list(np.unique(labs))
+    K = len(groups_ids)
+    if K < 2 or n < 4 or n > max_points:
+        return df
+    t0 = time.time()
+    lat, lon = df["latitude"].to_numpy(float), df["longitude"].to_numpy(float)
+    D = _hav_km_matrix(lat, lon)
+    cap = int(max_points_per_route)
+    floor = max(1, int(0.6 * n / K))
+    mem = {g: [int(i) for i in np.where(labs == g)[0]] for g in groups_ids}
+    cost = {g: _route_len_est(D, mem[g]) for g in groups_ids}
+
+    def cents():
+        return {g: (float(lat[mem[g]].mean()), float(lon[mem[g]].mean())) for g in groups_ids if mem[g]}
+
+    for _pass in range(4):
+        improved = False
+        c = cents()
+        for i in range(n):
+            if time.time() - t0 > time_budget_s:
+                break
+            src = int(labs[i])
+            near = sorted((g for g in groups_ids if g != src and mem[g]),
+                          key=lambda g: (c[g][0] - lat[i]) ** 2 + (c[g][1] - lon[i]) ** 2)[:3]
+            best = None   # (gain, tipe, j, dst, cost_src_baru, cost_dst_baru)
+            for dst in near:
+                # pindah i -> dst
+                if len(mem[dst]) < cap and len(mem[src]) > floor:
+                    ns = _route_len_est(D, [x for x in mem[src] if x != i])
+                    nd = _route_len_est(D, mem[dst] + [i])
+                    gain = cost[src] + cost[dst] - ns - nd
+                    if gain > 1e-6 and (best is None or gain > best[0]):
+                        best = (gain, "move", None, dst, ns, nd)
+                # tukar i <-> j (j = merchant di dst yang terdekat dengan i)
+                cand = sorted(mem[dst], key=lambda j: D[i, j])[:4]
+                for j in cand:
+                    ns = _route_len_est(D, [x for x in mem[src] if x != i] + [j])
+                    nd = _route_len_est(D, [x for x in mem[dst] if x != j] + [i])
+                    gain = cost[src] + cost[dst] - ns - nd
+                    if gain > 1e-6 and (best is None or gain > best[0]):
+                        best = (gain, "swap", j, dst, ns, nd)
+            if best:
+                _, kind, j, dst, ns, nd = best
+                mem[src].remove(i)
+                mem[dst].append(i)
+                labs[i] = dst
+                if kind == "swap":
+                    mem[dst].remove(j)
+                    mem[src].append(j)
+                    labs[j] = src
+                cost[src], cost[dst] = ns, nd
+                improved = True
+        if not improved or time.time() - t0 > time_budget_s:
+            break
+    out = df.copy()
+    out["route"] = labs
+    return out
+
+
+def balance_clusters(df, max_points_per_route):
+    """Batasi ukuran tiap rute (greedy), lalu perbaiki susunannya dengan pencarian lokal supaya total rute lebih pendek."""
+    return improve_clusters(_balance_clusters_greedy(df, max_points_per_route), max_points_per_route)
 
 
 def fill_clusters(df, max_points_per_route):
@@ -3188,9 +3296,6 @@ def build_whatsapp_text(r, map_links):
     return "\n".join(lines)
 
 
-NEAR_STOP_M = 200   # batas "berdekatan" (meter) untuk catatan di teks titik demi titik
-
-
 def build_stepwise_text(r):
     """Teks WhatsApp/salin untuk NAVIGASI TITIK DEMI TITIK: tiap merchant punya satu tautan navigasi sendiri
     (dari lokasi pengguna saat tautan dibuka), jadi tidak bergantung pada navigasi multi-titik Google Maps."""
@@ -3208,31 +3313,11 @@ def build_stepwise_text(r):
     lines.append("Ketuk 🧭 di tiap titik, urut dari nomor 1. Navigasi dimulai dari lokasi Anda saat tautan dibuka.")
     lines.append("")
     _clk = r.get("show_clock", True)
-    # merchant yang saling berdekatan (≤ NEAR_STOP_M meter) dalam rute ini. Pakai JARAK JALAN dari matriks rute
-    # (OSRM) bila tersedia dan nyata; kalau tidak, jatuh ke garis lurus.
-    _pts = [(float(x["latitude"]), float(x["longitude"]), str(x["merchant_name"])) for _, x in stops.iterrows()]
-    _dm, _ord = r.get("distance_matrix"), r.get("order")
-    _road = bool(r.get("real_roads", True)) and _dm is not None and _ord is not None and len(_ord) == len(df)
-    _nodes = (list(_ord)[1:] if first_is_start else list(_ord)) if _road else None
-    _near = {i: [] for i in range(len(_pts))}
-    for _i in range(len(_pts)):
-        for _j in range(_i + 1, len(_pts)):
-            if _road:
-                _m = min(float(_dm[_nodes[_i]][_nodes[_j]]), float(_dm[_nodes[_j]][_nodes[_i]]))
-            else:
-                _m = haversine(_pts[_i][0], _pts[_i][1], _pts[_j][0], _pts[_j][1]) * 1000
-            if _m <= NEAR_STOP_M:
-                _near[_i].append((_j, _m))
-                _near[_j].append((_i, _m))
-    if any(_near.values()):
-        lines.insert(len(lines) - 1, f"👥 Ada merchant yang berdekatan (≤{NEAR_STOP_M} m {'lewat jalan' if _road else 'garis lurus'}) — lihat catatan di tiap titik; bisa dikunjungi sekalian.")
     for _no, (_, row) in enumerate(stops.iterrows(), start=1):
         eta = f" ({row['jam_tiba']})" if ("jam_tiba" in df.columns and _clk) else ""
         star = "⭐ " if row.get("prioritas_flag") else ""
         warn = f" {row['jadwal_status']}" if row.get("jadwal_status", "").startswith(("⚠️", "⏳")) else ""
         lines.append(f"{_no}. {star}{row['merchant_name']}{eta}{warn}")
-        for _j, _m in sorted(_near[_no - 1], key=lambda t: t[1]):
-            lines.append(f"   👥 ±{int(round(_m, -1)) or 10} m dari no. {_j + 1} ({_pts[_j][2]})")
         lines.append(f"🧭 {stop_nav_url(round(float(row['latitude']), 6), round(float(row['longitude']), 6))}")
         lines.append("")
     if r.get("round_trip"):
