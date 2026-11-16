@@ -2509,6 +2509,33 @@ def referral_config(uid_override=""):
     return server, token, uid
 
 
+def referral_projects(server, token, getter=None):
+    """Cari proyek formulir (sudah di-deploy) di akun Kobo yang namanya memuat 'referral'.
+    Return (ok, [{'uid','name'}, ...] atau pesan_error). Dipakai supaya UID tidak perlu disalin manual."""
+    get = getter or requests.get
+    try:
+        r = get(f"{server}/api/v2/assets/", params={"q": "asset_type:survey", "limit": 100, "ordering": "-date_modified"},
+                headers={"Authorization": f"Token {token}", "Accept": "application/json"}, timeout=60)
+        if r.status_code in (401, 403):
+            return False, "KoboToolbox menolak akses: cek KOBO_TOKEN."
+        r.raise_for_status()
+        res = r.json()
+        items = res.get("results") if isinstance(res, dict) else None
+        if not isinstance(items, list):
+            return False, "Jawaban KoboToolbox tidak dikenali."
+    except Exception as e:
+        return False, f"Tidak bisa menghubungi KoboToolbox ({type(e).__name__})."
+    out = []
+    for a in items:
+        if not isinstance(a, dict):
+            continue
+        uid, name = str(a.get("uid") or ""), str(a.get("name") or "")
+        deployed = bool(a.get("has_deployment")) or bool(a.get("deployment__active")) or a.get("deployment_status") == "deployed"
+        if _KOBO_UID_RE.match(uid) and "referral" in name.lower() and deployed:
+            out.append({"uid": uid, "name": name})
+    return True, out
+
+
 def build_referral_xlsform(title="Referral Mikro", petugas=()):
     """XLSForm (bytes .xlsx) untuk petugas mikro mencatat calon nasabah LVM/EDC: usaha, jenis, pemilik, HP,
     lokasi GPS, dan foto (kamera saja). Return (bytes, info)."""
@@ -6328,7 +6355,8 @@ def render_referral_page():
     ss = st.session_state
     st.caption("Petugas mikro mencatat usaha FnB/UMKM yang berpotensi ditawari **LVM / EDC** lewat KoboCollect (foto & lokasi GPS "
                "otomatis). Hasilnya muncul di sini dan lokasinya bisa langsung dipakai di Routing Optimizer.")
-    _has_uid = bool(str(_setting("KOBO_REFERRAL_ASSET_UID", "") or "").strip() or str(ss.get("ref_uid_input", "") or "").strip())
+    _has_uid = bool(str(_setting("KOBO_REFERRAL_ASSET_UID", "") or "").strip() or ss.get("ref_projects")
+                    or str(ss.get("ref_uid_input", "") or "").strip())
     with st.expander("📝 Belum punya formulir Referral (XLSForm)? Buat dulu", expanded=not _has_uid):
         st.markdown("**Cukup sekali.** Isi formulir: nama petugas, nama usaha, jenis usaha (diketik sendiri), produk (LVM / EDC / lainnya), "
                     "nama pemilik, no. HP pemilik, lokasi GPS, dan foto lewat kamera.")
@@ -6357,14 +6385,40 @@ def render_referral_page():
         st.markdown("#### 🤝 Hasil referral (KoboToolbox)")
         _uid_in = ""
         if not str(_setting("KOBO_REFERRAL_ASSET_UID", "") or "").strip():
-            _uid_in = st.text_input(
-                "Kode proyek Referral (UID)", key="ref_uid_input", max_chars=40, placeholder="mis. aBcDeFgHiJkLmNoPqRsTuV",
-                help="Ada di alamat proyek Kobo: …/#/forms/**UID**/summary. Supaya permanen, simpan sebagai KOBO_REFERRAL_ASSET_UID di secrets.",
-            ).strip()
+            _srv = str(_setting("KOBO_SERVER", "https://kf.kobotoolbox.org") or "").strip().rstrip("/")
+            _tok = str(_setting("KOBO_TOKEN", "") or "").strip()
+            if _tok and _KOBO_SERVER_RE.match(_srv) and "ref_projects" not in ss:
+                with st.spinner("Mencari proyek Referral di akun Kobo…"):
+                    _pok, _pres = referral_projects(_srv, _tok)
+                ss.ref_projects = _pres if _pok else []
+                ss.ref_projects_err = None if _pok else _pres
+            _projs = ss.get("ref_projects") or []
+            if len(_projs) == 1:
+                _uid_in = _projs[0]["uid"]
+                st.caption(f"Proyek ditemukan otomatis: **{_projs[0]['name']}**")
+            elif len(_projs) > 1:
+                _pick = st.selectbox("Proyek Referral", [p["uid"] for p in _projs], key="ref_proj_pick",
+                                     format_func=lambda u: next((p["name"] for p in _projs if p["uid"] == u), u))
+                _uid_in = _pick or ""
+            else:
+                if ss.get("ref_projects_err"):
+                    st.caption(f"⚠️ {ss.ref_projects_err}")
+                else:
+                    st.caption("Proyek Referral belum ditemukan di akun Kobo. Pastikan formulirnya sudah **Deploy** dan namanya memuat kata "
+                               "'Referral' (judul bawaan: Referral Mikro). Atau isi kode proyek di bawah.")
+                _uid_in = st.text_input(
+                    "Kode proyek Referral (UID) — bila tidak ditemukan otomatis", key="ref_uid_input", max_chars=40,
+                    placeholder="mis. aBcDeFgHiJkLmNoPqRsTuV",
+                    help="Ada di alamat proyek Kobo: …/#/forms/**UID**/summary. Supaya permanen, simpan sebagai KOBO_REFERRAL_ASSET_UID di secrets.",
+                ).strip()
+            if _tok and st.button("🔍 Cari ulang proyek", key="ref_proj_refresh"):
+                ss.pop("ref_projects", None)
+                st.rerun()
         _rcfg = referral_config(_uid_in)
         if not _rcfg:
             st.caption("Belum diatur. Butuh KOBO_TOKEN (sama dengan formulir kunjungan) dan kode proyek Referral "
-                       "(isi di atas, atau KOBO_REFERRAL_ASSET_UID di secrets). Lihat SETUP_KOBO.md.")
+                       "(ditemukan otomatis bila formulirnya sudah Deploy dan bernama 'Referral…', atau isi manual / KOBO_REFERRAL_ASSET_UID di secrets). "
+                       "Lihat SETUP_KOBO.md.")
         else:
             if st.button("🔄 Ambil referral terbaru", key="ref_fetch_btn", width="stretch"):
                 with st.spinner("Mengambil dari KoboToolbox…"):
