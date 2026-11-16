@@ -2265,9 +2265,9 @@ def kobo_fetch(cfg, getter=None):
     return True, pd.DataFrame(rows)
 
 
-def _kobo_latlon(row):
-    """(lat, lon) lokasi kunjungan dari isian geopoint ('lat lon alt akurasi') atau _geolocation; (None, None) bila tak ada."""
-    txt = row.get("lokasi_kunjungan")
+def _kobo_latlon(row, field="lokasi_kunjungan"):
+    """(lat, lon) lokasi dari isian geopoint ('lat lon alt akurasi') atau _geolocation; (None, None) bila tak ada."""
+    txt = row.get(field)
     if isinstance(txt, str):
         parts = txt.split()
         if len(parts) >= 2:
@@ -2284,13 +2284,13 @@ def _kobo_latlon(row):
     return None, None
 
 
-def _kobo_foto_url(row):
+def _kobo_foto_url(row, field="foto_kunjungan"):
     atts = row.get("_attachments")
     if not isinstance(atts, list):
         return ""
     pick = None
     for a in atts:
-        if isinstance(a, dict) and str(a.get("question_xpath", "")).split("/")[-1] == "foto_kunjungan":
+        if isinstance(a, dict) and str(a.get("question_xpath", "")).split("/")[-1] == field:
             pick = a
             break
     if pick is None:
@@ -2491,6 +2491,142 @@ def build_xlsform(df, title="Kunjungan Merchant", filter_by_petugas=True, includ
     wb.save(buf)
     return buf.getvalue(), {"merchants": len(merchants), "petugas": len(petugas_vals), "filtered": filtered,
                             "generated_ids": generated, "warnings": warnings}
+
+
+# ---------- Referral Mikro: formulir KoboCollect + hasilnya untuk Routing ----------
+REFERRAL_PRODUK = [("lvm", "LVM"), ("edc", "EDC"), ("lainnya", "Lainnya")]
+REFERRAL_FILE = "Referral Mikro (Kobo).csv"      # nama file yang dikirim ke Routing Optimizer
+REFERRAL_COLS = ["id", "waktu", "petugas", "nama_usaha", "jenis", "produk", "pemilik", "hp", "lat", "lon", "foto_url"]
+
+
+def referral_config(uid_override=""):
+    """(server, token, asset_uid) proyek Referral; UID dari secrets KOBO_REFERRAL_ASSET_UID atau isian di halaman."""
+    server = str(_setting("KOBO_SERVER", "https://kf.kobotoolbox.org") or "").strip().rstrip("/")
+    token = str(_setting("KOBO_TOKEN", "") or "").strip()
+    uid = str(_setting("KOBO_REFERRAL_ASSET_UID", "") or uid_override or "").strip()
+    if not _KOBO_SERVER_RE.match(server) or not token or not _KOBO_UID_RE.match(uid):
+        return None
+    return server, token, uid
+
+
+def build_referral_xlsform(title="Referral Mikro", petugas=()):
+    """XLSForm (bytes .xlsx) untuk petugas mikro mencatat calon nasabah LVM/EDC: usaha, jenis, pemilik, HP,
+    lokasi GPS, dan foto (kamera saja). Return (bytes, info)."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    names, seen = [], set()
+    for v in petugas:
+        v = re.sub(r"\s+", " ", str(v or "")).strip()[:60]
+        if v and v.lower() not in seen:
+            seen.add(v.lower())
+            names.append(v)
+    names.sort(key=str.lower)
+    h = ["type", "name", "label", "required", "relevant", "constraint", "constraint_message", "appearance", "hint"]
+    survey = [
+        ("start", "start", "", "", "", "", "", "", ""), ("end", "end", "", "", "", "", "", "", ""),
+        ("today", "tanggal", "", "", "", "", "", "", ""), ("deviceid", "device", "", "", "", "", "", "", ""),
+        ("select_one petugas" if names else "text", "petugas", "Nama petugas", "yes", "", "", "", "minimal" if names else "", ""),
+        ("text", "nama_usaha", "Nama usaha", "yes", "", "", "", "", "Sesuai papan nama / yang dikenal pelanggan"),
+        ("text", "jenis_usaha", "Jenis usaha", "yes", "", "", "", "", "Ketik sendiri, mis. warung bakso, toko kelontong, laundry"),
+        ("select_one produk", "produk", "Produk", "yes", "", "", "", "minimal", ""),
+        ("text", "produk_lain", "Sebutkan produk lainnya", "yes", "${produk}='lainnya'", "", "", "", ""),
+        ("text", "nama_pemilik", "Nama pemilik", "yes", "", "", "", "", ""),
+        ("text", "no_hp", "No. HP pemilik", "yes", "", "regex(., '^[0-9+ \\-]{8,16}$')",
+         "Isi angka saja, 8-16 digit (boleh diawali +)", "", "Contoh: 081234567890"),
+        ("geopoint", "lokasi_usaha", "Lokasi usaha (ambil di depan usaha, sebelum foto)", "yes", "", "", "", "", ""),
+        ("image", "foto_usaha", "Foto usaha (ambil langsung dengan kamera)", "yes", "", "", "", "new", ""),   # new = kamera saja
+    ]
+    choices = [("petugas", v, v) for v in names]
+    choices += [("produk", k, lbl) for k, lbl in REFERRAL_PRODUK]
+    wb = Workbook()
+
+    def put(ws, header, rows, widths):
+        ws.append(header)
+        for row in rows:
+            ws.append(list(row))
+        for c in ws[1]:
+            c.font = Font(bold=True, color="FFFFFF")
+            c.fill = PatternFill("solid", fgColor="2563EB")
+        for i, w in enumerate(widths, 1):
+            ws.column_dimensions[get_column_letter(i)].width = w
+        ws.freeze_panes = "A2"
+
+    ws = wb.active
+    ws.title = "survey"
+    put(ws, h, survey, [24, 18, 44, 10, 26, 30, 36, 12, 34])
+    put(wb.create_sheet("choices"), ["list_name", "name", "label"], choices, [14, 20, 30])
+    put(wb.create_sheet("settings"), ["form_title", "form_id", "version", "default_language"],
+        [((title or "Referral Mikro")[:100], "referral_mikro", datetime.datetime.now().strftime("%Y%m%d%H%M"), "Indonesian (id)")],
+        [30, 20, 16, 20])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue(), {"petugas": len(names)}
+
+
+def referral_table(df):
+    """Isian formulir Referral dari Kobo -> tabel rapi (REFERRAL_COLS), terbaru di atas. Kosong bila tak ada isian."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=REFERRAL_COLS)
+    pl = dict(REFERRAL_PRODUK)
+
+    def txt(r, k):
+        v = r.get(k)
+        return "" if v is None or (isinstance(v, float) and math.isnan(v)) else re.sub(r"\s+", " ", str(v)).strip()
+
+    t = pd.to_datetime(df.get("_submission_time"), utc=True, errors="coerce") if "_submission_time" in df.columns \
+        else pd.Series([pd.NaT] * len(df), index=df.index)
+    rows = []
+    for i, (_, r) in enumerate(df.iterrows()):
+        la, lo = _kobo_latlon(r, "lokasi_usaha")
+        prod = txt(r, "produk")
+        prod_lbl = txt(r, "produk_lain") if prod == "lainnya" and txt(r, "produk_lain") else pl.get(prod, prod)
+        ts = t.iloc[i]
+        rows.append({
+            "id": txt(r, "_id"),
+            "waktu": ts.tz_convert("Asia/Jakarta").strftime("%d/%m/%Y %H:%M") if pd.notna(ts) else "",
+            "_t": ts,
+            "petugas": txt(r, "petugas"), "nama_usaha": txt(r, "nama_usaha"), "jenis": txt(r, "jenis_usaha"),
+            "produk": prod_lbl,
+            "pemilik": txt(r, "nama_pemilik"), "hp": txt(r, "no_hp"),
+            "lat": la, "lon": lo, "foto_url": _kobo_foto_url(r, "foto_usaha"),
+        })
+    out = pd.DataFrame(rows).sort_values("_t", ascending=False, na_position="last").drop(columns=["_t"])
+    return out[REFERRAL_COLS].reset_index(drop=True)
+
+
+def referral_to_routing(ref):
+    """Referral (yang punya koordinat) -> tabel siap pakai di Routing Optimizer. Baris tanpa koordinat dilewati.
+    Return (DataFrame, jumlah_dilewati)."""
+    if ref is None or ref.empty:
+        return pd.DataFrame(), 0
+    ok = ref["lat"].notna() & ref["lon"].notna() & (ref["nama_usaha"].astype(str).str.strip() != "")
+    d = ref[ok]
+    out = pd.DataFrame({
+        "merchant_id": ["REF-" + str(x) if str(x) else f"REF-{i + 1}" for i, x in enumerate(d["id"])],
+        "merchant_name": d["nama_usaha"].values,
+        "latitude": d["lat"].astype(float).values,
+        "longitude": d["lon"].astype(float).values,
+        "status": "prospek",
+        "petugas": d["petugas"].values,
+        "jenis_usaha": d["jenis"].values,
+        "produk": d["produk"].values,
+        "kontak": [(" · ".join(x for x in (a, b) if x)) for a, b in zip(d["pemilik"], d["hp"])],
+    })
+    return out.reset_index(drop=True), int((~ok).sum())
+
+
+def referral_push(ss, data_bytes, fname=REFERRAL_FILE):
+    """Simpan hasil referral sebagai file data di Routing Optimizer (menggantikan kiriman sebelumnya; edit tabel
+    lama untuk file ini dibuang supaya tidak salah sasaran)."""
+    pre = fname + "#"
+    ed = ss.data_edits
+    ed["deleted"] = [k for k in ed.get("deleted", []) if not str(k).startswith(pre)]
+    ed["changed"] = {k: v for k, v in ed.get("changed", {}).items() if not str(k).startswith(pre)}
+    ss.uploaded_store[fname] = data_bytes
+    ss.data_edit_nonce = ss.get("data_edit_nonce", 0) + 1
+
 
 
 def read_table_file(name, data):
@@ -5816,6 +5952,7 @@ def render_nav(prefix, horizontal=False):
         ("Routing", "🛣️ Routing" if horizontal else "🛣️  Routing Optimizer", "routing"),
         ("Extract", "📍 Extractor" if horizontal else "📍  Maps Extractor", "extract"),
         ("Kobo", "📋 Survey" if horizontal else "📋  Survey Form", "kobo"),
+        ("Referral", "🤝 Referral" if horizontal else "🤝  Referral Mikro", "referral"),
     ]
     holders = st.columns(len(pages)) if horizontal else [st.container() for _ in pages]
     clicked = None
@@ -5884,7 +6021,16 @@ def render_howto():
                 "**4. Perbarui Sheet** — bila data berasal dari Google Sheet dan penulisan balik sudah diatur, tombol "
                 "**Perbarui kolom status di Google Sheet** menulis status baru (mis. *sudah akuisisi*, *tidak ditemukan*) "
                 "sehingga merchant itu tidak ikut rute berikutnya.\n\n"
-                "Pengaturan (token Kobo, penulisan ke Sheet) ada di **Secrets**; lihat SETUP_KOBO.md dan SETUP_SHEET_WRITE.md."
+                "Pengaturan (token Kobo, penulisan ke Sheet) ada di **Secrets**; lihat SETUP_KOBO.md dan SETUP_SHEET_WRITE.md.\n\n"
+                "---\n\n"
+                "Menu **🤝 Referral Mikro** (di bawah Survey Form) untuk petugas mikro yang mencari calon nasabah **LVM / EDC**:\n\n"
+                "**1. Buat formulir** — di panel **Belum punya formulir Referral? Buat dulu** (tidak perlu data merchant). "
+                "Unggah ke KoboToolbox sebagai proyek terpisah → **Deploy**.\n\n"
+                "**2. Petugas mengisi** di KoboCollect: nama usaha, jenis usaha (diketik), produk (LVM/EDC/lainnya), nama pemilik, no. HP pemilik, lokasi GPS, dan foto kamera.\n\n"
+                "**3. Ambil referral** — isi kode proyek (UID), tekan **Ambil referral terbaru**; filter per petugas atau produk; "
+                "lihat tabel dan peta.\n\n"
+                "**4. Pakai di rute** — **Kirim ke Routing Optimizer** menambahkan usaha berkoordinat sebagai data merchant "
+                "(status prospek). Atau unduh CSV untuk ditempel ke Google Sheet."
             )
         with t_more:
             st.markdown(
@@ -6175,6 +6321,124 @@ def render_kobo_page():
                         st.caption("Untuk memperbarui status di Sheet: ambil data dari link Google Sheet dan atur SHEET_WRITE_URL/SHEET_WRITE_SECRET.")
 
 
+
+
+def render_referral_page():
+    """Menu Referral Mikro: buat formulir KoboCollect untuk calon nasabah, ambil isiannya, lalu kirim lokasinya ke Routing."""
+    ss = st.session_state
+    st.caption("Petugas mikro mencatat usaha FnB/UMKM yang berpotensi ditawari **LVM / EDC** lewat KoboCollect (foto & lokasi GPS "
+               "otomatis). Hasilnya muncul di sini dan lokasinya bisa langsung dipakai di Routing Optimizer.")
+    _has_uid = bool(str(_setting("KOBO_REFERRAL_ASSET_UID", "") or "").strip() or str(ss.get("ref_uid_input", "") or "").strip())
+    with st.expander("📝 Belum punya formulir Referral (XLSForm)? Buat dulu", expanded=not _has_uid):
+        st.markdown("**Cukup sekali.** Isi formulir: nama petugas, nama usaha, jenis usaha (diketik sendiri), produk (LVM / EDC / lainnya), "
+                    "nama pemilik, no. HP pemilik, lokasi GPS, dan foto lewat kamera.")
+        st.caption("① Masukkan nama petugas  →  ② Buat & download file  →  ③ Unggah di KoboToolbox lalu **Deploy**  →  ④ Salin kode proyek (UID) ke aplikasi")
+        _rf_title = st.text_input("Judul formulir", value="Referral Mikro", key="ref_form_title", max_chars=80)
+        _rf_names = st.text_area("Nama petugas (opsional, satu nama per baris)", key="ref_form_petugas", height=100,
+                                 placeholder="Petugas 1\nPetugas 2",
+                                 help="Jadi pilihan nama petugas di formulir. Kosongkan kalau petugas mau mengetik namanya sendiri.")
+        if st.button("🛠️ Buat formulir", key="ref_form_btn", width="stretch"):
+            try:
+                ss.ref_xlsform = build_referral_xlsform(_rf_title.strip() or "Referral Mikro",
+                                                        [x for x in _rf_names.splitlines()][:200])
+            except Exception as e:
+                ss.ref_xlsform = None
+                st.error(f"Gagal membuat formulir: {e}")
+        _ro = ss.get("ref_xlsform")
+        if _ro:
+            st.success("Formulir siap" + (f" ({_ro[1]['petugas']} petugas sebagai pilihan)." if _ro[1]["petugas"] else " (nama petugas diisi sendiri)."))
+            st.download_button("⬇️ Download formulir (XLSForm .xlsx)", data=_ro[0], file_name="form_referral_mikro.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="ref_form_dl",
+                               type="primary", width="stretch")
+            st.caption("Di KoboToolbox: **New → Upload an XLSForm** → pilih file ini → **Deploy**. Ini proyek **terpisah** dari "
+                       "formulir kunjungan merchant, jadi kode proyeknya (UID) juga berbeda.")
+
+    with st.container(border=True):
+        st.markdown("#### 🤝 Hasil referral (KoboToolbox)")
+        _uid_in = ""
+        if not str(_setting("KOBO_REFERRAL_ASSET_UID", "") or "").strip():
+            _uid_in = st.text_input(
+                "Kode proyek Referral (UID)", key="ref_uid_input", max_chars=40, placeholder="mis. aBcDeFgHiJkLmNoPqRsTuV",
+                help="Ada di alamat proyek Kobo: …/#/forms/**UID**/summary. Supaya permanen, simpan sebagai KOBO_REFERRAL_ASSET_UID di secrets.",
+            ).strip()
+        _rcfg = referral_config(_uid_in)
+        if not _rcfg:
+            st.caption("Belum diatur. Butuh KOBO_TOKEN (sama dengan formulir kunjungan) dan kode proyek Referral "
+                       "(isi di atas, atau KOBO_REFERRAL_ASSET_UID di secrets). Lihat SETUP_KOBO.md.")
+        else:
+            if st.button("🔄 Ambil referral terbaru", key="ref_fetch_btn", width="stretch"):
+                with st.spinner("Mengambil dari KoboToolbox…"):
+                    _ok, _res = kobo_fetch(_rcfg)
+                if _ok:
+                    ss.ref_data = referral_table(_res)
+                    ss.ref_time = time.time()
+                else:
+                    st.error(_res)
+            _rd = ss.get("ref_data")
+            if _rd is not None:
+                st.caption(f"{len(_rd)} referral · diambil "
+                           f"{_ago(datetime.datetime.fromtimestamp(ss.ref_time, datetime.timezone.utc).isoformat())}")
+            if _rd is not None and len(_rd):
+                _f1, _f2 = st.columns(2)
+                with _f1:
+                    _fp = st.multiselect("Petugas", sorted({x for x in _rd["petugas"] if x}), key="ref_f_petugas")
+                with _f2:
+                    _fpr = st.multiselect("Produk", ["LVM", "EDC", "Lainnya"], key="ref_f_produk",
+                                          help="'Lainnya' mencakup semua produk selain LVM dan EDC.")
+                _fv = _rd[_rd["petugas"].isin(_fp)] if _fp else _rd
+                if _fpr:
+                    _fv = _fv[_fv["produk"].apply(lambda x: ("LVM" if x == "LVM" else "EDC" if x == "EDC" else "Lainnya") in _fpr)]
+                _m1, _m2, _m3, _m4 = st.columns(4)
+                _m1.metric("Referral", len(_fv))
+                _m2.metric("LVM", int((_fv["produk"] == "LVM").sum()))
+                _m3.metric("EDC", int((_fv["produk"] == "EDC").sum()))
+                _m4.metric("Berkoordinat", int((_fv["lat"].notna() & _fv["lon"].notna()).sum()))
+                _show = _fv.assign(
+                    Lokasi=[f"https://www.google.com/maps?q={a:.6f},{b:.6f}" if pd.notna(a) and pd.notna(b) else None
+                            for a, b in zip(_fv["lat"], _fv["lon"])],
+                ).rename(columns={"waktu": "Waktu", "petugas": "Petugas", "nama_usaha": "Usaha", "jenis": "Jenis",
+                                  "produk": "Produk", "pemilik": "Pemilik", "hp": "No. HP", "foto_url": "Foto"})
+                st.dataframe(
+                    _show[["Waktu", "Petugas", "Usaha", "Jenis", "Produk", "Pemilik", "No. HP", "Lokasi", "Foto"]],
+                    width="stretch", hide_index=True,
+                    column_config={"Lokasi": st.column_config.LinkColumn(display_text="📍 Buka"),
+                                   "Foto": st.column_config.LinkColumn(display_text="🖼️ Lihat")},
+                )
+                st.caption("Foto terbuka bila Anda sedang login di KoboToolbox. Tabel mengikuti filter di atas.")
+                _geo = _fv[_fv["lat"].notna() & _fv["lon"].notna()]
+                if len(_geo):
+                    _fm = folium.Map(location=[float(_geo["lat"].mean()), float(_geo["lon"].mean())], zoom_start=13, control_scale=True)
+                    for _, _r in _geo.iterrows():
+                        folium.CircleMarker(
+                            [float(_r["lat"]), float(_r["lon"])], radius=8, color="#ffffff", weight=1.5, fill=True,
+                            fill_color="#2563EB", fill_opacity=0.95,
+                            tooltip=f"{_r['nama_usaha']} · {_r['jenis'] or '-'} · {_r['produk'] or '-'}",
+                        ).add_to(_fm)
+                    _fm.fit_bounds([[float(_geo["lat"].min()), float(_geo["lon"].min())],
+                                    [float(_geo["lat"].max()), float(_geo["lon"].max())]], max_zoom=16)
+                    st_folium(_fm, width=None, height=360, key="ref_map", returned_objects=[])
+
+                st.markdown("##### 🛣️ Pakai di Routing Optimizer")
+                _rt, _skip = referral_to_routing(_fv)
+                if _rt.empty:
+                    st.info("Belum ada referral berkoordinat pada filter ini.")
+                else:
+                    st.caption(f"{len(_rt)} usaha akan dikirim sebagai data merchant (status prospek)"
+                               + (f". {_skip} dilewati karena tanpa koordinat/nama." if _skip else "."))
+                    _c_a, _c_b = st.columns(2)
+                    with _c_a:
+                        if st.button("➕ Kirim ke Routing Optimizer", key="ref_push_btn", type="primary", width="stretch",
+                                     help="Menambahkan data ini sebagai file di Routing Optimizer (bergabung dengan data lain). "
+                                          "Kirim lagi untuk memperbarui; tombol ✖ di sana menghapusnya."):
+                            referral_push(ss, _rt.to_csv(index=False).encode("utf-8"))
+                            ss._sheet_flash = f"✅ {len(_rt)} referral dikirim sebagai **{REFERRAL_FILE}**."
+                            ss.page = "Routing"
+                            st.rerun()
+                    with _c_b:
+                        st.download_button("⬇️ Download CSV (untuk Google Sheet)", data=_rt.to_csv(index=False).encode("utf-8-sig"),
+                                           file_name="referral_mikro.csv", mime="text/csv", key="ref_csv_dl", width="stretch")
+            elif _rd is not None:
+                st.info("Belum ada isian referral di proyek ini.")
 
 
 st.fragment(run_every=1)(_idle_watch)()
@@ -7963,6 +8227,12 @@ elif st.session_state.page == "Kobo":
         "Buat formulir KoboCollect dari data merchant, lalu ambil hasil kunjungan petugas langsung dari KoboToolbox.",
     )
     render_kobo_page()
+elif st.session_state.page == "Referral":
+    render_hero(
+        "Calon nasabah mikro", "Referral", "Mikro",
+        "Catat usaha FnB/UMKM yang berpotensi ditawari LVM/EDC lewat KoboCollect, lalu pakai lokasinya di Routing Optimizer.",
+    )
+    render_referral_page()
 elif st.session_state.page == "Extract":
     render_hero(
         "Ekstraksi lokasi", "Maps", "Extractor",
