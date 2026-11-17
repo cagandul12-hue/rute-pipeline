@@ -6355,9 +6355,7 @@ def render_referral_page():
     ss = st.session_state
     st.caption("Petugas mikro mencatat usaha FnB/UMKM yang berpotensi ditawari **LVM / EDC** lewat KoboCollect (foto & lokasi GPS "
                "otomatis). Hasilnya muncul di sini dan lokasinya bisa langsung dipakai di Routing Optimizer.")
-    _has_uid = bool(str(_setting("KOBO_REFERRAL_ASSET_UID", "") or "").strip() or ss.get("ref_projects")
-                    or str(ss.get("ref_uid_input", "") or "").strip())
-    with st.expander("📝 Belum punya formulir Referral (XLSForm)? Buat dulu", expanded=not _has_uid):
+    with st.expander("📝 Belum punya formulir Referral (XLSForm)? Buat dulu", expanded=False):
         st.markdown("**Cukup sekali.** Isi formulir: nama petugas, nama usaha, jenis usaha (diketik sendiri), produk (LVM / EDC / lainnya), "
                     "nama pemilik, no. HP pemilik, lokasi GPS, dan foto lewat kamera.")
         st.caption("① Masukkan nama petugas  →  ② Buat & download file  →  ③ Unggah di KoboToolbox lalu **Deploy**  →  ④ Salin kode proyek (UID) ke aplikasi")
