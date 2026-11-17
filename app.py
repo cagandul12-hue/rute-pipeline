@@ -8288,8 +8288,8 @@ elif st.session_state.page == "Kobo":
     render_kobo_page()
 elif st.session_state.page == "Referral":
     render_hero(
-        "Calon nasabah mikro", "Referral", "Mikro",
-        "Catat usaha FnB/UMKM yang berpotensi ditawari LVM/EDC lewat KoboCollect, lalu pakai lokasinya di Routing Optimizer.",
+        "Potensi nasabah kredit mikro", "Referral", "Mikro",
+        "Catat usaha FnB/UMKM yang berpotensi ditawari LVM/EDC/produk lain lewat KoboCollect, lalu pakai lokasinya di Routing Optimizer.",
     )
     render_referral_page()
 elif st.session_state.page == "Extract":
