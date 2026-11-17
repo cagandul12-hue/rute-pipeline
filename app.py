@@ -7440,8 +7440,8 @@ if st.session_state.page == "Routing":
         )
 
         if run:
-            if len(df) < 2:
-                st.warning("⚠️ Minimal butuh 2 titik untuk bisa membuat rute.")
+            if len(df) < 1:
+                st.warning("⚠️ Belum ada titik untuk dibuat rute.")
                 st.stop()
 
             # Daftar titik awal per rute (kalau multi-depot aktif) — resolve DULU.
@@ -7468,6 +7468,13 @@ if st.session_state.page == "Routing":
                     else:
                         parsed_name, start_lat, start_lon = extract_google_maps_data(starting_link)
                         start_name = parsed_name or "START POINT"
+
+                # Minimal 2 titik: 1 merchant cukup bila ada titik awal (titik awal terhitung sebagai titik pertama).
+                if len(df) < 2:
+                    _dp_has_start = dp_on and bool(parse_depot_rows(dp_rows)[0])
+                    if not (depots or (start_lat and start_lon) or _dp_has_start):
+                        st.warning("⚠️ Dengan 1 merchant, isi titik awal dulu (rute butuh minimal 2 titik: titik awal + merchant).")
+                        st.stop()
 
                 nearest_info = None
                 if nearest_on and not dp_on and not depots and start_lat and start_lon:
